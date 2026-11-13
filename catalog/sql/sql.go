@@ -129,14 +129,9 @@ func namespaceLikePrefix(prefix string) string {
 	return strings.NewReplacer("!", "!!", "%", "!%", "_", "!_").Replace(prefix) + "%"
 }
 
-func whereNamespaceParent(query *bun.SelectQuery, column string, parent table.Identifier) *bun.SelectQuery {
+func whereNamespaceDescendant(query *bun.SelectQuery, column string, namespace table.Identifier) *bun.SelectQuery {
 	return query.WhereGroup(" AND ", func(query *bun.SelectQuery) *bun.SelectQuery {
-		keys := namespaceStorageKeys(parent)
-		query = query.Where("? = ?", bun.Ident(column), keys[0])
-		for _, key := range keys[1:] {
-			query = query.WhereOr("? = ?", bun.Ident(column), key)
-		}
-		for _, prefix := range namespaceDescendantPrefixes(parent) {
+		for _, prefix := range namespaceDescendantPrefixes(namespace) {
 			query = query.WhereOr("? LIKE ? ESCAPE '!'", bun.Ident(column), namespaceLikePrefix(prefix))
 		}
 
@@ -822,7 +817,7 @@ func (c *Catalog) CreateTable(ctx context.Context, ident table.Identifier, sc *i
 
 	nsIdent := catalog.NamespaceFromIdent(ident)
 	tblIdent := catalog.ObjectNameFromIdent(ident)
-	ns, exists, err := c.resolveNamespaceKey(ctx, nsIdent)
+	ns, exists, err := c.resolveListableNamespaceKey(ctx, nsIdent)
 	if err != nil {
 		return nil, err
 	}
@@ -842,7 +837,7 @@ func (c *Catalog) CreateTable(ctx context.Context, ident table.Identifier, sc *i
 	}
 
 	err = withSerializableWriteTx(ctx, c.db, func(ctx context.Context, tx bun.Tx) error {
-		exists, err := c.namespaceExistsInTx(ctx, tx, ns)
+		exists, err := c.listableNamespaceExistsInTx(ctx, tx, nsIdent, ns)
 		if err != nil {
 			return err
 		}
@@ -962,7 +957,7 @@ func (c *Catalog) CommitTable(ctx context.Context, ident table.Identifier, reqs 
 			return nil
 		}
 
-		exists, err := c.namespaceExistsInTx(ctx, tx, nsKey)
+		exists, err := c.listableNamespaceExistsInTx(ctx, tx, ns, nsKey)
 		if err != nil {
 			return err
 		}
@@ -1127,7 +1122,7 @@ func (c *Catalog) RenameTable(ctx context.Context, from, to table.Identifier) (*
 	}
 	fromTbl := catalog.ObjectNameFromIdent(from)
 
-	toNs, exists, err := c.resolveNamespaceKey(ctx, catalog.NamespaceFromIdent(to))
+	toNs, exists, err := c.resolveListableNamespaceKey(ctx, catalog.NamespaceFromIdent(to))
 	if err != nil {
 		return nil, err
 	}
@@ -1162,7 +1157,7 @@ func (c *Catalog) RenameTable(ctx context.Context, from, to table.Identifier) (*
 			return fmt.Errorf("%w: %s", catalog.ErrNoSuchNamespace, fromNs)
 		}
 
-		destinationNamespaceExists, err := c.namespaceExistsInTx(ctx, tx, toNs)
+		destinationNamespaceExists, err := c.listableNamespaceExistsInTx(ctx, tx, catalog.NamespaceFromIdent(to), toNs)
 		if err != nil {
 			return err
 		}
@@ -1345,6 +1340,14 @@ func (c *Catalog) DropNamespace(ctx context.Context, namespace table.Identifier)
 		if err != nil {
 			return err
 		}
+
+		children, err := c.childNamespacesInTx(ctx, tx, namespace)
+		if err != nil {
+			return fmt.Errorf("error checking namespace '%s' for child namespaces: %w", nsToDelete, err)
+		}
+		if len(children) > 0 {
+			return fmt.Errorf("%w: child namespaces exist in namespace %s", catalog.ErrNamespaceNotEmpty, nsToDelete)
+		}
 		if !exists {
 			return fmt.Errorf("%w: %s", catalog.ErrNoSuchNamespace, nsToDelete)
 		}
@@ -1377,7 +1380,7 @@ func (c *Catalog) LoadNamespaceProperties(ctx context.Context, namespace table.I
 		return nil, err
 	}
 
-	nsToLoad, exists, err := c.resolveNamespaceKey(ctx, namespace)
+	nsToLoad, exists, err := c.resolveListableNamespaceKey(ctx, namespace)
 	if err != nil {
 		return nil, err
 	}
@@ -1425,13 +1428,16 @@ func validateNamespacePropertyUpdates(removals []string, updates iceberg.Propert
 }
 
 func (c *Catalog) ListNamespaces(ctx context.Context, parent table.Identifier) ([]table.Identifier, error) {
-	tableQuery := c.db.NewSelect().Model((*sqlIcebergTable)(nil)).
-		Column("table_namespace").Where("catalog_name = ?", c.name)
-	nsQuery := c.db.NewSelect().Model((*sqlIcebergNamespaceProps)(nil)).
-		Column("namespace").Where("catalog_name = ?", c.name)
+	return withReadTx(ctx, c.db, func(ctx context.Context, tx bun.Tx) ([]table.Identifier, error) {
+		children, err := c.childNamespacesInTx(ctx, tx, parent)
+		if err != nil {
+			return nil, fmt.Errorf("error listing namespaces for '%s': %w", parent, err)
+		}
+		if len(parent) == 0 || len(children) > 0 {
+			return children, nil
+		}
 
-	if len(parent) > 0 {
-		_, exists, err := c.resolveNamespaceKey(ctx, parent)
+		_, exists, err := c.resolveNamespaceKeyInTx(ctx, tx, parent)
 		if err != nil {
 			return nil, err
 		}
@@ -1439,38 +1445,92 @@ func (c *Catalog) ListNamespaces(ctx context.Context, parent table.Identifier) (
 			return nil, fmt.Errorf("%w: %s", catalog.ErrNoSuchNamespace, strings.Join(parent, "."))
 		}
 
-		tableQuery = whereNamespaceParent(tableQuery, "table_namespace", parent)
-		nsQuery = whereNamespaceParent(nsQuery, "namespace", parent)
+		return children, nil
+	})
+}
+
+// childNamespacesInTx returns the namespaces one level below parent, or the
+// distinct first levels when parent is empty, as Java's JdbcCatalog does.
+// A namespace counts if it has properties of its own or holds a table or view
+// anywhere below it. LIKE ignores case on some databases, so the levels are
+// compared exactly after the query.
+func (c *Catalog) childNamespacesInTx(ctx context.Context, tx bun.Tx, parent table.Identifier) ([]table.Identifier, error) {
+	tableQuery := tx.NewSelect().Model((*sqlIcebergTable)(nil)).
+		Column("table_namespace").Where("catalog_name = ?", c.name)
+	nsQuery := tx.NewSelect().Model((*sqlIcebergNamespaceProps)(nil)).
+		Column("namespace").Where("catalog_name = ?", c.name)
+	if len(parent) > 0 {
+		tableQuery = whereNamespaceDescendant(tableQuery, "table_namespace", parent)
+		nsQuery = whereNamespaceDescendant(nsQuery, "namespace", parent)
 	}
 
-	namespaces, err := withReadTx(ctx, c.db, func(ctx context.Context, tx bun.Tx) ([]string, error) {
-		var namespaces []string
-
-		rows, err := tx.QueryContext(ctx, tableQuery.String()+" UNION "+nsQuery.String())
-		if err != nil {
-			return nil, fmt.Errorf("error listing namespaces for '%s': %w", parent, err)
-		}
-
-		err = c.db.ScanRows(ctx, rows, &namespaces)
-
-		return namespaces, err
-	})
+	rows, err := tx.QueryContext(ctx, tableQuery.String()+" UNION "+nsQuery.String())
 	if err != nil {
 		return nil, err
 	}
 
+	var namespaces []string
+	if err := c.db.ScanRows(ctx, rows, &namespaces); err != nil {
+		return nil, err
+	}
+
 	ret := make([]table.Identifier, 0, len(namespaces))
+	seen := make(map[string]struct{}, len(namespaces))
 	for _, n := range namespaces {
 		ident, err := namespaceFromString(n)
 		if err != nil {
 			return nil, err
 		}
-		if len(parent) == 0 || (len(ident) >= len(parent) && slices.Equal(ident[:len(parent)], parent)) {
-			ret = append(ret, ident)
+		if len(ident) <= len(parent) || !slices.Equal(ident[:len(parent)], parent) {
+			continue
 		}
+		ident = ident[:len(parent)+1]
+		key := namespaceToString(ident)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		ret = append(ret, ident)
 	}
 
 	return ret, nil
+}
+
+// resolveListableNamespaceKey is resolveNamespaceKey for read operations and
+// for creating tables and views in a namespace, where a namespace also exists
+// while it has child namespaces, even without a row of its own. CreateNamespace
+// and UpdateNamespaceProperties keep the exact check, so CreateNamespace is
+// how such a namespace gets a row.
+func (c *Catalog) resolveListableNamespaceKey(ctx context.Context, namespace table.Identifier) (string, bool, error) {
+	key, exists, err := c.resolveNamespaceKey(ctx, namespace)
+	if err != nil || exists || len(namespace) == 0 {
+		return key, exists, err
+	}
+
+	children, err := withReadTx(ctx, c.db, func(ctx context.Context, tx bun.Tx) ([]table.Identifier, error) {
+		return c.childNamespacesInTx(ctx, tx, namespace)
+	})
+	if err != nil {
+		return "", false, err
+	}
+
+	return key, len(children) > 0, nil
+}
+
+// listableNamespaceExistsInTx is the in-transaction counterpart of
+// resolveListableNamespaceKey for a storage key it already resolved.
+func (c *Catalog) listableNamespaceExistsInTx(ctx context.Context, tx bun.Tx, namespace table.Identifier, key string) (bool, error) {
+	exists, err := c.namespaceExistsInTx(ctx, tx, key)
+	if err != nil || exists || len(namespace) == 0 {
+		return exists, err
+	}
+
+	children, err := c.childNamespacesInTx(ctx, tx, namespace)
+	if err != nil {
+		return false, err
+	}
+
+	return len(children) > 0, nil
 }
 
 func (c *Catalog) UpdateNamespaceProperties(ctx context.Context, namespace table.Identifier, removals []string, updates iceberg.Properties) (catalog.PropertiesUpdateSummary, error) {
@@ -1564,7 +1624,7 @@ func (c *Catalog) UpdateNamespaceProperties(ctx context.Context, namespace table
 }
 
 func (c *Catalog) CheckNamespaceExists(ctx context.Context, namespace table.Identifier) (bool, error) {
-	_, exists, err := c.resolveNamespaceKey(ctx, namespace)
+	_, exists, err := c.resolveListableNamespaceKey(ctx, namespace)
 
 	return exists, err
 }
@@ -1581,7 +1641,7 @@ func (c *Catalog) CreateView(ctx context.Context, identifier table.Identifier, v
 
 	nsIdent := catalog.NamespaceFromIdent(identifier)
 	viewIdent := catalog.ObjectNameFromIdent(identifier)
-	ns, exists, err := c.resolveNamespaceKey(ctx, nsIdent)
+	ns, exists, err := c.resolveListableNamespaceKey(ctx, nsIdent)
 	if err != nil {
 		return nil, err
 	}
@@ -1618,7 +1678,7 @@ func (c *Catalog) CreateView(ctx context.Context, identifier table.Identifier, v
 	metadataLocation := createdView.MetadataLocation()
 
 	err = withSerializableWriteTx(ctx, c.db, func(ctx context.Context, tx bun.Tx) error {
-		exists, err := c.namespaceExistsInTx(ctx, tx, ns)
+		exists, err := c.listableNamespaceExistsInTx(ctx, tx, nsIdent, ns)
 		if err != nil {
 			return err
 		}
