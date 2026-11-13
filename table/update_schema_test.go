@@ -1295,6 +1295,14 @@ func TestDeleteIdentifierColumn(t *testing.T) {
 		require.ErrorContains(t, err, "cannot delete identifier field id")
 	})
 
+	t.Run("delete then rename the identifier onto the deleted name fails", func(t *testing.T) {
+		_, err := NewUpdateSchema(newTxn(), true, true).
+			DeleteColumn([]string{"name"}).
+			RenameColumn([]string{"id"}, "name").
+			Apply()
+		require.ErrorContains(t, err, "cannot delete identifier field name")
+	})
+
 	t.Run("deleting a struct with a nested identifier field fails", func(t *testing.T) {
 		nested := iceberg.NewSchemaWithIdentifiers(1, []int{3},
 			iceberg.NestedField{ID: 1, Name: "name", Type: iceberg.PrimitiveTypes.String, Required: true},
