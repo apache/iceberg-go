@@ -747,7 +747,7 @@ func benchmarkNestedEqualityDeleteSchema(width, depth int) (*iceberg.Schema, int
 			fields[i] = field
 		}
 
-		return &iceberg.StructType{FieldList: fields}
+		return iceberg.NewStructType(fields...)
 	}
 
 	fields := make([]iceberg.NestedField, width)

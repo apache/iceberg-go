@@ -1202,9 +1202,9 @@ func TestProcessEqualityDeletesNestedInt64DoesNotBuildUnusedIndex(t *testing.T) 
 	parent.Release()
 
 	fileSchema := iceberg.NewSchema(0, iceberg.NestedField{
-		ID: 2, Name: "person", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
-			{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
-		}},
+		ID: 2, Name: "person", Type: iceberg.NewStructType(
+			iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		),
 	})
 	deleteSet := int64EqualityDeleteSet(456)
 	deleteSet.colNames[0] = "person.id"
@@ -1305,9 +1305,9 @@ func TestResolveArrowFieldUsesFieldIDBeforeName(t *testing.T) {
 	schema := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64},
 		iceberg.NestedField{ID: 2, Name: "renamed", Type: iceberg.PrimitiveTypes.Int64},
-		iceberg.NestedField{ID: 4, Name: "record", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
-			{ID: 3, Name: "value", Type: iceberg.PrimitiveTypes.Int64},
-		}}},
+		iceberg.NestedField{ID: 4, Name: "record", Type: iceberg.NewStructType(
+			iceberg.NestedField{ID: 3, Name: "value", Type: iceberg.PrimitiveTypes.Int64},
+		)},
 	)
 
 	refs := indexArrowFields(schema)
@@ -1324,9 +1324,9 @@ func TestResolveArrowFieldsByIDOnlyIndexesRequestedFields(t *testing.T) {
 	schema := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "ignored", Type: iceberg.PrimitiveTypes.Int64},
 		iceberg.NestedField{ID: 2, Name: "id", Type: iceberg.PrimitiveTypes.Int64},
-		iceberg.NestedField{ID: 4, Name: "record", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
-			{ID: 3, Name: "value", Type: iceberg.PrimitiveTypes.Int64},
-		}}},
+		iceberg.NestedField{ID: 4, Name: "record", Type: iceberg.NewStructType(
+			iceberg.NestedField{ID: 3, Name: "value", Type: iceberg.PrimitiveTypes.Int64},
+		)},
 	)
 
 	refs := resolveArrowFieldsByID(schema, []int{2, 3})
@@ -1381,9 +1381,9 @@ func TestResolveArrowFieldRejectsAmbiguousOrMismatchedIDs(t *testing.T) {
 			name: "literal dotted name is distinct from nested path",
 			schema: iceberg.NewSchema(0,
 				iceberg.NestedField{ID: 1, Name: "user.id", Type: iceberg.PrimitiveTypes.Int64},
-				iceberg.NestedField{ID: 2, Name: "user", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
-					{ID: 3, Name: "id", Type: iceberg.PrimitiveTypes.Int64},
-				}}},
+				iceberg.NestedField{ID: 2, Name: "user", Type: iceberg.NewStructType(
+					iceberg.NestedField{ID: 3, Name: "id", Type: iceberg.PrimitiveTypes.Int64},
+				)},
 			),
 			fieldID: 1, fieldName: "user.id", wantPath: []int{0},
 		},
@@ -1576,9 +1576,7 @@ func TestResolveRequestedArrowFieldsPreservesDeepAndSiblingPaths(t *testing.T) {
 	const depth = 12
 	field := iceberg.NestedField{ID: 100, Name: "leaf", Type: iceberg.PrimitiveTypes.Int64}
 	for id := depth; id > 0; id-- {
-		field = iceberg.NestedField{ID: id, Name: "nested", Type: &iceberg.StructType{
-			FieldList: []iceberg.NestedField{field},
-		}}
+		field = iceberg.NestedField{ID: id, Name: "nested", Type: iceberg.NewStructType(field)}
 	}
 	schema := iceberg.NewSchema(0, field,
 		iceberg.NestedField{ID: 101, Name: "sibling", Type: iceberg.PrimitiveTypes.Int64})

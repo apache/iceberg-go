@@ -26,9 +26,9 @@ import (
 func TestStrictMetricsNestedColumnDoesNotProveAllRowsMatch(t *testing.T) {
 	schema := iceberg.NewSchema(0, iceberg.NestedField{
 		ID: 1, Name: "payload", Required: false,
-		Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
-			{ID: 2, Name: "value", Required: false, Type: iceberg.PrimitiveTypes.Int32},
-		}},
+		Type: iceberg.NewStructType(
+			iceberg.NestedField{ID: 2, Name: "value", Required: false, Type: iceberg.PrimitiveTypes.Int32},
+		),
 	})
 
 	// One row has a null parent, and the other has payload.value = 3.

@@ -301,7 +301,7 @@ func inspectPartitionTypeWithSchema(
 					break
 				}
 			}
-			if !active || idx >= len(partitionType.FieldList) {
+			if !active || idx >= partitionType.NumFields() {
 				continue
 			}
 
@@ -317,7 +317,7 @@ func inspectPartitionTypeWithSchema(
 					if previousVoid && !fieldVoid {
 						selected[field.FieldID] = field
 						old := fieldsByID[field.FieldID]
-						old.Type = partitionType.FieldList[idx].Type
+						old.Type = partitionType.Field(idx).Type
 						fieldsByID[field.FieldID] = old
 					}
 
@@ -336,7 +336,7 @@ func inspectPartitionTypeWithSchema(
 			fieldsByID[field.FieldID] = iceberg.NestedField{
 				ID:       field.FieldID,
 				Name:     field.Name,
-				Type:     partitionType.FieldList[idx].Type,
+				Type:     partitionType.Field(idx).Type,
 				Required: false,
 			}
 		}
@@ -348,7 +348,7 @@ func inspectPartitionTypeWithSchema(
 	}
 	sort.Slice(fields, func(left, right int) bool { return fields[left].ID < fields[right].ID })
 
-	return &iceberg.StructType{FieldList: fields}, nil
+	return iceberg.NewStructType(fields...), nil
 }
 
 func isInspectVoidTransform(transform iceberg.Transform) bool {
