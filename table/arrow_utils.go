@@ -530,6 +530,51 @@ func ArrowSchemaToIcebergWithOptions(sc *arrow.Schema, opts ArrowToIcebergOption
 	}
 }
 
+// arrowSchemaToIcebergForRead allows unmatched physical fields only when
+// conversion of the full file schema is needed to retain row counts.
+func arrowSchemaToIcebergForRead(sc *arrow.Schema, opts ArrowToIcebergOptions, allowUnmappedFields bool) (*iceberg.Schema, error) {
+	if allowUnmappedFields && opts.NameMapping != nil {
+		opts.NameMapping = includeUnmappedArrowFields(sc.Fields(), opts.NameMapping)
+	}
+
+	return ArrowSchemaToIcebergWithOptions(sc, opts)
+}
+
+// includeUnmappedArrowFields supplements a temporary mapping without changing
+// the table mapping. Unmapped physical columns receive the existing -1 sentinel.
+func includeUnmappedArrowFields(fields []arrow.Field, mapping iceberg.NameMapping) iceberg.NameMapping {
+	result := slices.Clone(mapping)
+	for _, field := range fields {
+		idx := slices.IndexFunc(result, func(mapped iceberg.MappedField) bool {
+			return slices.Contains(mapped.Names, field.Name)
+		})
+		if idx < 0 {
+			result = append(result, iceberg.MappedField{Names: []string{field.Name}})
+			idx = len(result) - 1
+		}
+
+		entry := result[idx]
+		if id := getFieldID(field); id != nil {
+			entry.FieldID = id
+		}
+		switch typ := field.Type.(type) {
+		case *arrow.StructType:
+			entry.Fields = includeUnmappedArrowFields(typ.Fields(), entry.Fields)
+		case *arrow.MapType:
+			key, value := typ.KeyField(), typ.ItemField()
+			key.Name, value.Name = "key", "value"
+			entry.Fields = includeUnmappedArrowFields([]arrow.Field{key, value}, entry.Fields)
+		case arrow.ListLikeType:
+			element := typ.ElemField()
+			element.Name = "element"
+			entry.Fields = includeUnmappedArrowFields([]arrow.Field{element}, entry.Fields)
+		}
+		result[idx] = entry
+	}
+
+	return result
+}
+
 func ArrowSchemaToIcebergWithFreshIDs(sc *arrow.Schema, downcastNsTimestamp bool) (*iceberg.Schema, error) {
 	schemaWithoutIDs, err := arrowToSchemaWithoutIDs(sc, downcastNsTimestamp)
 	if err != nil {
