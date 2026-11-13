@@ -53,16 +53,16 @@ func newInspectPartitionBuilder(
 	if err != nil {
 		return nil, err
 	}
-	expected := make(map[int]struct{}, len(partitionType.FieldList))
-	for _, field := range partitionType.FieldList {
+	expected := make(map[int]struct{}, partitionType.NumFields())
+	for _, field := range partitionType.Fields() {
 		expected[field.ID] = struct{}{}
 	}
 	if err := validateInspectBuilderLookup("partition", lookup, expected); err != nil {
 		return nil, err
 	}
 
-	fields := make([]inspectPartitionFieldBuilder, 0, len(partitionType.FieldList))
-	for _, field := range partitionType.FieldList {
+	fields := make([]inspectPartitionFieldBuilder, 0, partitionType.NumFields())
+	for _, field := range partitionType.Fields() {
 		fieldBuilder := lookup[field.ID]
 		partitionField := inspectPartitionFieldBuilder{
 			id:        field.ID,

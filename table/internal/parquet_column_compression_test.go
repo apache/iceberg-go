@@ -45,9 +45,7 @@ func TestParquetColumnCompressionOptions(t *testing.T) {
 	fileSchema := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32},
 		iceberg.NestedField{ID: 2, Name: "payload", Type: iceberg.PrimitiveTypes.String},
-		iceberg.NestedField{ID: 3, Name: "items", Type: &iceberg.ListType{
-			ElementID: 4, Element: iceberg.PrimitiveTypes.Int32,
-		}},
+		iceberg.NestedField{ID: 3, Name: "items", Type: iceberg.NewListType(4, iceberg.PrimitiveTypes.Int32, false)},
 	)
 	arrowSchema := arrow.NewSchema([]arrow.Field{
 		compressionField(1, "id", arrow.PrimitiveTypes.Int32),
