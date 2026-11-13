@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -162,15 +163,21 @@ func TestUpdateViewRetentionAndMetadataLocation(t *testing.T) {
 
 type viewUpdateContextKey struct{}
 
+// viewUpdateHook pauses the loser at its first iceberg_tables UPDATE, which on SQLite
+// is the write-lock statement, so the winner commits before the loser takes the lock
+// and the loser's compare-and-swap then finds the metadata location moved.
 type viewUpdateHook struct {
 	staged  chan struct{}
 	release chan struct{}
+	once    sync.Once
 }
 
 func (h *viewUpdateHook) BeforeQuery(ctx context.Context, event *bun.QueryEvent) context.Context {
 	if ctx.Value(viewUpdateContextKey{}) == true && event.Operation() == "UPDATE" && strings.Contains(event.Query, "iceberg_tables") {
-		close(h.staged)
-		<-h.release
+		h.once.Do(func() {
+			close(h.staged)
+			<-h.release
+		})
 	}
 
 	return ctx
