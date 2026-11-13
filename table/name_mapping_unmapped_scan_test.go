@@ -101,3 +101,77 @@ func TestScanWithIDLessNameMappingFields(t *testing.T) {
 	payload := result.Column(1).Data().Chunk(0).(*array.Struct)
 	require.Equal(t, "kept", payload.Field(0).(*array.String).Value(0))
 }
+
+// An imported ID-less file may have top-level and nested fields absent from
+// the table mapping. Reading a later-added column must retain physical rows.
+func TestScanWithUnmappedIDLessColumnsAndMissingProjection(t *testing.T) {
+	ctx := t.Context()
+	cat, err := hadoop.NewCatalog(ctx, "local", t.TempDir(), nil)
+	require.NoError(t, err)
+	require.NoError(t, cat.CreateNamespace(ctx, catalog.ToIdentifier("db"), nil))
+
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "payload", Type: iceberg.NewStructType(
+			iceberg.NestedField{ID: 3, Name: "known", Type: iceberg.PrimitiveTypes.String, Required: true},
+		), Required: true},
+	)
+	mapping := iceberg.NameMapping{
+		{FieldID: new(1), Names: []string{"id"}},
+		{FieldID: new(2), Names: []string{"payload"}, Fields: []iceberg.MappedField{
+			{FieldID: new(3), Names: []string{"known"}},
+		}},
+	}
+	mappingJSON, err := json.Marshal(mapping)
+	require.NoError(t, err)
+	tbl, err := cat.CreateTable(ctx, catalog.ToIdentifier("db", "events"), schema,
+		catalog.WithProperties(iceberg.Properties{
+			table.DefaultNameMappingKey: string(mappingJSON),
+		}))
+	require.NoError(t, err)
+
+	fileSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: false},
+		{Name: "payload", Type: arrow.StructOf(
+			arrow.Field{Name: "known", Type: arrow.BinaryTypes.String, Nullable: false},
+			arrow.Field{Name: "external_nested", Type: arrow.BinaryTypes.String, Nullable: true},
+		), Nullable: false},
+		{Name: "external_top", Type: arrow.BinaryTypes.String, Nullable: true},
+	}, nil)
+	data, err := array.TableFromJSON(memory.DefaultAllocator, fileSchema, []string{
+		`[{"id":1,"payload":{"known":"kept","external_nested":"nested"},"external_top":"top"}]`,
+	})
+	require.NoError(t, err)
+	defer data.Release()
+
+	filePath := tbl.Location() + "/data/idless.parquet"
+	writer, err := (iceio.LocalFS{}).Create(ctx, filePath)
+	require.NoError(t, err)
+	require.NoError(t, pqarrow.WriteTable(data, writer, 1,
+		parquet.NewWriterProperties(), pqarrow.DefaultWriterProps()))
+
+	dataFileBuilder, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec, iceberg.EntryContentData, filePath, iceberg.ParquetFile,
+		nil, nil, nil, 1, 1024,
+	)
+	require.NoError(t, err)
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.AddDataFiles(ctx,
+		[]iceberg.DataFile{dataFileBuilder.Build()}, nil, table.WithoutAutoNameMapping()))
+	tbl, err = tx.Commit(ctx)
+	require.NoError(t, err)
+
+	tx = tbl.NewTransaction()
+	require.NoError(t, tx.UpdateSchema(true, false).
+		AddColumn([]string{"z"}, iceberg.PrimitiveTypes.String, "", false, nil).Commit())
+	tbl, err = tx.Commit(ctx)
+	require.NoError(t, err)
+
+	result, err := tbl.Scan(table.WithSelectedFields("z")).ToArrowTable(ctx)
+	require.NoError(t, err)
+	defer result.Release()
+
+	require.EqualValues(t, 1, result.NumRows())
+	require.Equal(t, "z", result.Schema().Field(0).Name)
+	require.True(t, result.Column(0).Data().Chunk(0).IsNull(0))
+}
