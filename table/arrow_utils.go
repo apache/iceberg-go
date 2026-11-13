@@ -495,9 +495,6 @@ func ArrowSchemaToIceberg(sc *arrow.Schema, downcastNsTimestamp bool, nameMappin
 type ArrowToIcebergOptions struct {
 	DowncastNsTimestamp bool
 	NameMapping         iceberg.NameMapping
-	// AllowUnmappedFields assigns ID -1 to physical fields absent from the
-	// name mapping. Use it only for file schemas needed to retain row counts.
-	AllowUnmappedFields bool
 	TableSchema         *iceberg.Schema
 	TableProperties     iceberg.Properties
 }
@@ -536,16 +533,21 @@ func ArrowSchemaToIcebergWithOptions(sc *arrow.Schema, opts ArrowToIcebergOption
 			return nil, err
 		}
 
-		mapping := opts.NameMapping
-		if opts.AllowUnmappedFields {
-			mapping = includeUnmappedArrowFields(sc.Fields(), mapping)
-		}
-
-		return iceberg.ApplyNameMapping(schemaWithoutIDs, mapping)
+		return iceberg.ApplyNameMapping(schemaWithoutIDs, opts.NameMapping)
 	default:
 		return nil, fmt.Errorf("%w: arrow schema does not have field-ids and no name mapping provided",
 			iceberg.ErrInvalidSchema)
 	}
+}
+
+// arrowSchemaToIcebergForRead allows unmatched physical fields only when
+// conversion of the full file schema is needed to retain row counts.
+func arrowSchemaToIcebergForRead(sc *arrow.Schema, opts ArrowToIcebergOptions, allowUnmappedFields bool) (*iceberg.Schema, error) {
+	if allowUnmappedFields && opts.NameMapping != nil {
+		opts.NameMapping = includeUnmappedArrowFields(sc.Fields(), opts.NameMapping)
+	}
+
+	return ArrowSchemaToIcebergWithOptions(sc, opts)
 }
 
 // includeUnmappedArrowFields supplements a temporary mapping without changing
