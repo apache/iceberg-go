@@ -570,14 +570,14 @@ func includeUnmappedArrowFields(fields []arrow.Field, mapping iceberg.NameMappin
 		switch typ := field.Type.(type) {
 		case *arrow.StructType:
 			entry.Fields = includeUnmappedArrowFields(typ.Fields(), entry.Fields)
-		case arrow.ListLikeType:
-			element := typ.ElemField()
-			element.Name = "element"
-			entry.Fields = includeUnmappedArrowFields([]arrow.Field{element}, entry.Fields)
 		case *arrow.MapType:
 			key, value := typ.KeyField(), typ.ItemField()
 			key.Name, value.Name = "key", "value"
 			entry.Fields = includeUnmappedArrowFields([]arrow.Field{key, value}, entry.Fields)
+		case arrow.ListLikeType:
+			element := typ.ElemField()
+			element.Name = "element"
+			entry.Fields = includeUnmappedArrowFields([]arrow.Field{element}, entry.Fields)
 		}
 		result[idx] = entry
 	}
