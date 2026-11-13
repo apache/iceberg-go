@@ -53,16 +53,31 @@ func TestSingleArgumentSortTransformsRejectMultipleSources(t *testing.T) {
 			require.ErrorIs(t, err, table.ErrInvalidSortSourceID)
 			require.ErrorContains(t, err, "requires a single source ID")
 
-			_, err = json.Marshal(field)
-			require.ErrorIs(t, err, table.ErrInvalidSortSourceID)
+			// Historical sort fields may have been written with extra source IDs.
+			// Reading and re-serializing them must not make table metadata unusable.
+			encodedField, err := json.Marshal(field)
+			require.NoError(t, err)
+			require.Contains(t, string(encodedField), `"source-ids":[1,2]`)
 
 			fieldJSON := fmt.Sprintf(`{"source-ids":[1,2],"transform":%q,"direction":"asc","null-order":"nulls-first"}`, transform.String())
 			var decodedField table.SortField
-			err = json.Unmarshal([]byte(fieldJSON), &decodedField)
+			require.NoError(t, json.Unmarshal([]byte(fieldJSON), &decodedField))
+			require.Equal(t, []int{1, 2}, decodedField.SourceIDs)
+
+			orderJSON := []byte(`{"order-id":1,"fields":[` + fieldJSON + `]}`)
+			var decodedOrder table.SortOrder
+			require.NoError(t, json.Unmarshal(orderJSON, &decodedOrder))
+			require.Equal(t, []int{1, 2}, decodedOrder.Field(0).SourceIDs)
+			_, err = json.Marshal(decodedOrder)
+			require.NoError(t, err)
+
+			// Incoming unbound create-table and add-sort-order payloads are strict.
+			var unbound table.UnboundSortOrder
+			err = json.Unmarshal(orderJSON, &unbound)
 			require.ErrorIs(t, err, table.ErrInvalidSortSourceID)
 
-			var decodedOrder table.SortOrder
-			err = json.Unmarshal([]byte(`{"order-id":1,"fields":[`+fieldJSON+`]}`), &decodedOrder)
+			var updates table.Updates
+			err = json.Unmarshal([]byte(`[{"action":"add-sort-order","sort-order":`+string(orderJSON)+`}]`), &updates)
 			require.ErrorIs(t, err, table.ErrInvalidSortSourceID)
 		})
 	}

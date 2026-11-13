@@ -110,10 +110,6 @@ func (s *SortField) String() string {
 }
 
 func (s SortField) MarshalJSON() ([]byte, error) {
-	if err := validateSortTransformSources(s); err != nil {
-		return nil, err
-	}
-
 	direction := s.Direction
 	if direction == "" {
 		direction = SortASC
@@ -217,10 +213,6 @@ func (s *SortField) unmarshal(b []byte, binding orderBinding) error {
 	if next.Transform, err = iceberg.ParseTransform(transformString); err != nil {
 		return err
 	}
-	if err := validateSortTransformSources(next); err != nil {
-		return err
-	}
-
 	switch next.Direction {
 	case SortASC, SortDESC:
 	default:
@@ -279,8 +271,8 @@ func validateSortSourceIDs(ids []int, binding orderBinding) error {
 }
 
 // validateSortTransformSources rejects multiple sources for Iceberg's known
-// single-argument transforms. Unknown transforms may accept multiple inputs,
-// so their source IDs must remain readable for v3 forward compatibility.
+// single-argument transforms when creating new orders. Existing metadata must
+// remain readable and serializable; unknown transforms may have multiple inputs.
 func validateSortTransformSources(field SortField) error {
 	switch field.Transform.(type) {
 	case iceberg.IdentityTransform, *iceberg.IdentityTransform,
@@ -343,7 +335,19 @@ type UnboundSortOrder struct {
 }
 
 func (u *UnboundSortOrder) UnmarshalJSON(b []byte) error {
-	return u.unmarshal(b, unboundOrder)
+	var next SortOrder
+	if err := next.unmarshal(b, unboundOrder); err != nil {
+		return err
+	}
+
+	for idx, field := range next.fields {
+		if err := validateSortTransformSources(field); err != nil {
+			return fmt.Errorf("sort field at index %d: %w", idx, err)
+		}
+	}
+
+	u.SortOrder = next
+	return nil
 }
 
 func (s SortOrder) OrderID() int {
@@ -520,10 +524,6 @@ func (s *SortOrder) CheckCompatibility(schema *iceberg.Schema) error {
 		if err := validateSortSourceIDs(field.SourceIDs, boundOrder); err != nil {
 			return fmt.Errorf("sort field has invalid source IDs: %w", err)
 		}
-		if err := validateSortTransformSources(field); err != nil {
-			return fmt.Errorf("sort field has invalid transform sources: %w", err)
-		}
-
 		var firstField iceberg.NestedField
 		for idx, sourceID := range field.SourceIDs {
 			f, ok := schema.FindFieldByID(sourceID)
