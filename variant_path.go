@@ -203,6 +203,9 @@ func parseBracketSelector(s, path string) (string, int, error) {
 			i += 2
 			start = i
 		default:
+			if s[i] < 0x20 {
+				return "", 0, fmt.Errorf("%w: invalid variant path %q (unescaped control character in quoted member)", ErrInvalidArgument, path)
+			}
 			i++
 		}
 	}

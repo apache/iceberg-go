@@ -42,6 +42,7 @@ Per-release notes (highlights, breaking changes, contributors) are published on 
 
 ### Unreleased compatibility notes
 
+- **Variant extract paths reject raw ASCII controls.** Quoted path members containing unescaped U+0000 through U+001F now fail in `Extract(...).Bind` with `ErrInvalidArgument`; previously these paths were accepted. Scans using these expressions also return the binding error. Use JSONPath escapes such as `\t`, `\n`, or `\u0001` instead of raw control characters. In Go interpreted string literals, write `\\t` to pass a JSONPath `\t` escape rather than a literal tab.
 - **Data-file replacements now reject concurrent deletes.** Commits staged through `ReplaceDataFiles`, `ReplaceDataFilesByPath`, `ReplaceFiles`, or rewrite operations can return `table.ErrConflictingDeleteFiles` when a concurrent position delete targets a replaced file or any concurrent equality delete is added. Compaction on tables with streaming equality deletes may see additional conflicts.
 - **Orphan cleanup now rejects `gc.enabled=false`.** `DeleteOrphanFiles`, `PlanOrphanFiles`, `ExecuteOrphanCleanup`, and dry runs now return an error before filesystem access. The `iceberg clean-orphan-files` command is also affected.
 - **Partition specs reject source types a transform cannot handle.** Creating or updating a spec with an incompatible source, such as `day(string)`, now fails. Writes to existing incompatible specs return `ErrInvalidTransform` instead of writing null partition values.

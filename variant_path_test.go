@@ -78,6 +78,8 @@ func TestParseVariantPath(t *testing.T) {
 		{"bracket empty quoted member", "$['']", []string{""}},
 		{"bracket plain unicode", "$['naïve_東京']", []string{"naïve_東京"}},
 		{"bracket literal delimiters", "$['a.b[0]']", []string{"a.b[0]"}},
+		{"bracket raw space", "$['a b']", []string{"a b"}},
+		{"bracket raw DEL", "$['a\x7fb']", []string{"a\x7fb"}},
 		{"bracket two different escapes", "$['a\\nb\\tc']", []string{"a\nb\tc"}},
 		{"bracket mixed escaped and plain runs", "$['pre\\'mid\\\\end']", []string{"pre'mid\\end"}},
 		{"bracket nested", "$['location']['latitude']", []string{"location", "latitude"}},
@@ -141,5 +143,30 @@ func TestParseVariantPathRejects(t *testing.T) {
 			_, err := parseVariantPath(tt.path)
 			require.ErrorIs(t, err, ErrInvalidArgument)
 		})
+	}
+}
+
+func TestParseVariantPathRejectsUnescapedControlBytes(t *testing.T) {
+	for c := range 0x20 {
+		for _, path := range []string{
+			"$['a" + string(rune(c)) + "b']",
+			"$['a\\n" + string(rune(c)) + "b']",
+		} {
+			_, err := parseVariantPath(path)
+			require.ErrorIs(t, err, ErrInvalidArgument, "path %q", path)
+		}
+	}
+
+	// Escaped controls remain valid and round-trip to their actual values.
+	for _, tc := range []struct {
+		path string
+		want []string
+	}{
+		{path: "$['a\\nb']", want: []string{"a\nb"}},
+		{path: "$['a\\u0001b']", want: []string{"a\x01b"}},
+	} {
+		got, err := parseVariantPath(tc.path)
+		require.NoError(t, err)
+		assert.Equal(t, tc.want, got)
 	}
 }
