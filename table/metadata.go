@@ -1796,6 +1796,14 @@ func (b *MetadataBuilder) NameMapping() iceberg.NameMapping {
 	return nil
 }
 
+func validateNameMappingProperty(props iceberg.Properties, mapping iceberg.NameMapping) error {
+	if _, exists := props[DefaultNameMappingKey]; exists && mapping == nil {
+		return fmt.Errorf("%w: invalid %s", ErrInvalidMetadata, DefaultNameMappingKey)
+	}
+
+	return nil
+}
+
 func (b *MetadataBuilder) TrimMetadataLogs(maxEntries int) *MetadataBuilder {
 	b.metadataLog = trimMetadataLog(b.metadataLog, maxEntries)
 

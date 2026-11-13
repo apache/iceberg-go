@@ -214,7 +214,7 @@ func TestPartitionStatisticsVersionedSchemas(t *testing.T) {
 	}
 	_, err := PartitionStatisticsSchema(nil, 2)
 	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
-	_, err = PartitionStatisticsSchema(&iceberg.StructType{}, 3)
+	_, err = PartitionStatisticsSchema(iceberg.NewStructType(), 3)
 	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
 }
 

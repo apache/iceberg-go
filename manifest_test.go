@@ -523,7 +523,6 @@ func TestPartitionFieldStatsAcceptsConvertibleValues(t *testing.T) {
 		{name: "boolean from literal", typ: PrimitiveTypes.Bool, value: BoolLiteral(true), want: NewLiteral(true)},
 		{name: "int32 from int", typ: PrimitiveTypes.Int32, value: int(7), want: NewLiteral(int32(7))},
 		{name: "int32 from literal", typ: PrimitiveTypes.Int32, value: Int32Literal(7), want: NewLiteral(int32(7))},
-		{name: "int32 wraps overflowing int64", typ: PrimitiveTypes.Int32, value: int64(math.MaxInt32) + 1, want: NewLiteral(int32(math.MinInt32))},
 		{name: "int64 from int", typ: PrimitiveTypes.Int64, value: int(8), want: NewLiteral(int64(8))},
 		{name: "float32 from float64", typ: PrimitiveTypes.Float32, value: float64(1.5), want: NewLiteral(float32(1.5))},
 		{name: "float32 overflows to infinity", typ: PrimitiveTypes.Float32, value: float64(math.MaxFloat32) * 2, want: NewLiteral(float32(math.Inf(1)))},

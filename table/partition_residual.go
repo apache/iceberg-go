@@ -92,7 +92,7 @@ func newPartitionResidualEvaluator(
 	partitionType := spec.PartitionType(schema)
 	builder := &partitionResidualBuilder{
 		spec:            *spec,
-		partitionSchema: iceberg.NewSchema(0, partitionType.FieldList...),
+		partitionSchema: iceberg.NewSchema(0, partitionType.Fields()...),
 		caseSensitive:   caseSensitive,
 	}
 	root, err := iceberg.VisitExpr(filter, builder)

@@ -58,13 +58,11 @@ func TestParquetDecimalWriterPhysicalTypes(t *testing.T) {
 			decimalType := iceberg.MustDecimalTypeOf(tt.precision, tt.scale)
 			iceSchema := iceberg.NewSchema(0,
 				iceberg.NestedField{ID: 1, Name: "value", Type: decimalType},
-				iceberg.NestedField{ID: 2, Name: "nested", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
-					{ID: 3, Name: "amount", Type: decimalType},
-				}}},
+				iceberg.NestedField{ID: 2, Name: "nested", Type: iceberg.NewStructType(
+					iceberg.NestedField{ID: 3, Name: "amount", Type: decimalType},
+				)},
 				iceberg.NestedField{ID: 4, Name: "items", Type: iceberg.NewListType(5, decimalType, false)},
-				iceberg.NestedField{ID: 6, Name: "mapping", Type: &iceberg.MapType{
-					KeyID: 7, KeyType: iceberg.PrimitiveTypes.String, ValueID: 8, ValueType: decimalType,
-				}},
+				iceberg.NestedField{ID: 6, Name: "mapping", Type: iceberg.NewMapType(7, iceberg.PrimitiveTypes.String, 8, decimalType, false)},
 			)
 			arrowSchema, err := table.SchemaToArrowSchema(iceSchema, nil, true, false)
 			require.NoError(t, err)
