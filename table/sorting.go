@@ -347,6 +347,7 @@ func (u *UnboundSortOrder) UnmarshalJSON(b []byte) error {
 	}
 
 	u.SortOrder = next
+
 	return nil
 }
 
@@ -463,9 +464,6 @@ func newSortOrder(orderID int, fields []SortField, validateSourceIDs bool) (Sort
 				return SortOrder{}, fmt.Errorf("%w: sort field at index %d: %w", ErrInvalidTransform, idx, err)
 			}
 		}
-		if err := validateSortTransformSources(field); err != nil {
-			return SortOrder{}, fmt.Errorf("sort field at index %d: %w", idx, err)
-		}
 		if field.Direction != SortASC && field.Direction != SortDESC {
 			return SortOrder{}, fmt.Errorf("%w: sort field at index %d", ErrInvalidSortDirection, idx)
 		}
@@ -475,6 +473,9 @@ func newSortOrder(orderID int, fields []SortField, validateSourceIDs bool) (Sort
 		if validateSourceIDs {
 			if err := validateSortSourceIDs(field.SourceIDs, boundOrder); err != nil {
 				return SortOrder{}, fmt.Errorf("sort field at index %d has invalid source IDs: %w", idx, err)
+			}
+			if err := validateSortTransformSources(field); err != nil {
+				return SortOrder{}, fmt.Errorf("sort field at index %d: %w", idx, err)
 			}
 		}
 	}
