@@ -1406,7 +1406,7 @@ func (a *arrowProjectionVisitor) Map(m iceberg.MapType, mapArray, keyResult, val
 	keyField := a.constructField(m.KeyField(), keys.DataType())
 	valField := a.constructField(m.ValueField(), vals.DataType())
 
-	mapType := arrow.MapOfWithMetadata(keyField.Type, keyField.Metadata, valField.Type, valField.Metadata)
+	mapType := arrow.MapOfFields(keyField, valField)
 	childData := array.NewData(mapType.Elem(), arr.Data().Children()[0].Len(), []*memory.Buffer{nil},
 		[]arrow.ArrayData{keys.Data(), vals.Data()}, 0, 0)
 	defer childData.Release()
@@ -2184,21 +2184,6 @@ func recordNBytes(rec arrow.RecordBatch) (total int64) {
 	return total
 }
 
-func binPackRecords(itr iter.Seq2[arrow.RecordBatch, error], recordLookback int, targetFileSize int64) iter.Seq[[]arrow.RecordBatch] {
-	return internal.PackingIterator(func(yield func(arrow.RecordBatch) bool) {
-		for rec, err := range itr {
-			if err != nil {
-				panic(err)
-			}
-
-			rec.Retain()
-			if !yield(rec) {
-				return
-			}
-		}
-	}, targetFileSize, recordLookback, recordNBytes, false)
-}
-
 type recordWritingArgs struct {
 	sc              *arrow.Schema
 	itr             iter.Seq2[arrow.RecordBatch, error]
@@ -2434,36 +2419,15 @@ func positionDeleteRecordsToDataFiles(ctx context.Context, rootLocation string, 
 		args.writeUUID = &u
 	}
 
-	targetFileSize := int64(meta.props.GetInt(WriteTargetFileSizeBytesKey,
-		WriteTargetFileSizeBytesDefault))
+	targetFileSize := int64(meta.props.GetInt(WriteDeleteTargetFileSizeBytesKey,
+		WriteDeleteTargetFileSizeBytesDefault))
 
 	if latestMetadata.PartitionSpec().IsUnpartitioned() {
 		cw := newConcurrentDataFileWriter(func(rootLocation string, fs iceio.WriteFileIO, meta *MetadataBuilder, props iceberg.Properties, opts ...dataFileWriterOption) (dataFileWriter, error) {
 			return newPositionDeleteWriter(rootLocation, fs, meta, props, opts...)
 		}, withSchemaSanitization(false))
-		nextCount, stopCount := iter.Pull(args.counter)
-		tasks := func(yield func(WriteTask) bool) {
-			defer stopCount()
 
-			fileCount := 0
-			for batch := range binPackRecords(args.itr, defaultBinPackLookback, targetFileSize) {
-				cnt, _ := nextCount()
-				fileCount++
-				t := WriteTask{
-					Uuid:        *args.writeUUID,
-					ID:          cnt,
-					PartitionID: iceberg.UnpartitionedSpec.ID(),
-					FileCount:   fileCount,
-					Schema:      iceberg.PositionalDeleteSchema,
-					Batches:     batch,
-				}
-				if !yield(t) {
-					return
-				}
-			}
-		}
-
-		return cw.writeFiles(ctx, rootLocation, args.fs, meta, meta.props, nil, tasks)
+		return cw.writeDeleteRecords(ctx, rootLocation, meta, iceberg.PositionalDeleteSchema, args, targetFileSize)
 	}
 	factory, err := newWriterFactory(rootLocation, args, meta, iceberg.PositionalDeleteSchema, targetFileSize,
 		withContentType(iceberg.EntryContentPosDeletes),
@@ -2473,9 +2437,8 @@ func positionDeleteRecordsToDataFiles(ctx context.Context, rootLocation string, 
 	}
 
 	partitionWriter := newPositionDeletePartitionedFanoutWriter(latestMetadata, partitionContextByFilePath, args.itr, factory)
-	workers := config.EnvConfig.MaxWorkers
 
-	return partitionWriter.Write(ctx, workers)
+	return partitionWriter.Write(ctx)
 }
 
 // positionDeleteRecordsToDataFilesDV produces deletion-vector Puffin output

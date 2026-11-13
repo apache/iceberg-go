@@ -131,6 +131,11 @@ func (t *Transaction) RewritePositionDeleteFiles(
 	if meta.formatVersion != 2 {
 		return nil, fmt.Errorf("%w: position delete rewrites require v2 table format", iceberg.ErrNotImplemented)
 	}
+	if err := tblutils.ValidateParquetReadProperties(meta.props); err != nil {
+		return nil, err
+	}
+	ctx = tblutils.WithTableProperties(ctx, meta.props)
+
 	if opts.MinInputFiles <= 0 {
 		opts.MinInputFiles = 2
 	}

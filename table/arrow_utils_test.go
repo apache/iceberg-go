@@ -1072,6 +1072,24 @@ func TestVariantProjectionExclusion(t *testing.T) {
 	assert.Equal(t, "id", arrowSc.Field(0).Name)
 }
 
+// Imported columns without Iceberg field IDs are legal in a name mapping.
+// Schema conversion must keep their unknown ID rather than failing.
+func TestArrowSchemaWithOptionalNameMappingIDs(t *testing.T) {
+	source := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int64},
+		{Name: "external", Type: arrow.BinaryTypes.String},
+	}, nil)
+	mapping := iceberg.NameMapping{
+		{FieldID: new(7), Names: []string{"id"}},
+		{Names: []string{"external"}},
+	}
+
+	result, err := table.ArrowSchemaToIceberg(source, false, mapping)
+	require.NoError(t, err)
+	require.Equal(t, 7, result.Field(0).ID)
+	require.Equal(t, -1, result.Field(1).ID)
+}
+
 func TestArrowSchemaWithNameMapping(t *testing.T) {
 	schemaWithoutIDs := arrow.NewSchema([]arrow.Field{
 		{Name: "foo", Type: arrow.BinaryTypes.String, Nullable: true},

@@ -106,6 +106,7 @@ var (
 	endpointDeleteTable      = endpoint{http.MethodDelete, "/v1/{prefix}/namespaces/{namespace}/tables/{table}"}
 	endpointRenameTable      = endpoint{http.MethodPost, "/v1/{prefix}/tables/rename"}
 	endpointRegisterTable    = endpoint{http.MethodPost, "/v1/{prefix}/namespaces/{namespace}/register"}
+	endpointRemoteSign       = endpoint{http.MethodPost, "/v1/{prefix}/namespaces/{namespace}/tables/{table}/sign"}
 	endpointReportMetrics    = endpoint{http.MethodPost, "/v1/{prefix}/namespaces/{namespace}/tables/{table}/metrics"}
 	endpointTableCredentials = endpoint{http.MethodGet, "/v1/{prefix}/namespaces/{namespace}/tables/{table}/credentials"}
 	endpointPlanTableScan    = endpoint{http.MethodPost, "/v1/{prefix}/namespaces/{namespace}/tables/{table}/plan"}
@@ -154,7 +155,7 @@ var allEndpoints = []endpoint{
 	endpointCommitTransaction,
 	endpointListTables, endpointLoadTable, endpointTableExists, endpointCreateTable,
 	endpointUpdateTable, endpointDeleteTable, endpointRenameTable, endpointRegisterTable,
-	endpointReportMetrics, endpointTableCredentials,
+	endpointRemoteSign, endpointReportMetrics, endpointTableCredentials,
 	endpointPlanTableScan, endpointFetchPlanResult, endpointCancelPlanning, endpointFetchScanTasks,
 	endpointListViews, endpointLoadView, endpointViewExists, endpointCreateView,
 	endpointUpdateView, endpointDeleteView, endpointRenameView, endpointRegisterView,

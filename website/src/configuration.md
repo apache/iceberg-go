@@ -48,12 +48,12 @@ catalog:
 |---|---|
 | `default-catalog` | Name used when `--catalog-name` is not passed on the CLI. |
 | `max-workers` | Worker pool size for concurrent operations. Default `5`. |
-| `catalog.<name>.type` | One of `rest`, `hive`, `glue`, `sql`, `hadoop`. `dynamodb` is recognized by the CLI but not implemented yet. |
+| `catalog.<name>.type` | One of `rest`, `hive`, `glue`, `sql`, `hadoop`, `dynamodb`. |
 | `catalog.<name>.uri` | Catalog endpoint or DSN. |
 | `catalog.<name>.warehouse` | Warehouse identifier (REST/Glue) or location (Hive/SQL). |
 | `catalog.<name>.credential` | Credential string passed through to the catalog's auth handler. |
 | `catalog.<name>.output` | CLI output format (e.g. `text`, `json`). |
-| `catalog.<name>.aws-profile` | AWS named profile for the Glue catalog. When unset, the AWS SDK default credential chain is used. |
+| `catalog.<name>.aws-profile` | AWS named profile for Glue and DynamoDB catalogs. When unset, the AWS SDK default credential chain is used. |
 | `catalog.<name>.sql-driver` | `database/sql` driver name for the SQL catalog. Maps to the `sql.driver` property. The default CLI binary only compiles in `sqliteshim`; other drivers require a custom build. |
 | `catalog.<name>.sql-dialect` | SQL dialect for the SQL catalog (`postgres`, `mysql`, `sqlite`, `mssql`, `oracle`). Maps to the `sql.dialect` property. The default CLI binary only ships `sqlite` via `sqliteshim`; other dialects need a custom build with their drivers. |
 | `catalog.<name>.rest.sigv4-enabled` | Enable AWS SigV4 signing for REST. When enabled, requests are signed with the `s3.*` credential properties if set (`s3.access-key-id` / `s3.secret-access-key` / `s3.session-token`), otherwise with the AWS default credential chain. The Java-client names (`rest.access-key-id` / `rest.secret-access-key` / `rest.session-token`) are accepted as aliases, resolved per field with the `s3.*` keys taking precedence. |
@@ -67,6 +67,17 @@ Each catalog package exposes its own functional `Option` set. The lists below re
 ### REST (`catalog/rest`)
 
 The most option-rich surface. Source: [`catalog/rest/options.go`](https://github.com/apache/iceberg-go/blob/main/catalog/rest/options.go).
+
+When `GET /v1/config` returns a non-null `idempotency-key-lifetime`, the client
+sends fresh UUIDv7 `Idempotency-Key` headers on namespace, table, view and
+transaction mutations, including create view, and on scan cancellation. After
+negotiation, a configured default `Idempotency-Key` is dropped from all requests
+when the server advertises a lifetime; the initial `GET /v1/config` may still
+carry it because advertisement is not yet known. Scan plan and task requests
+send keys independently of this advertisement and have a separate retry policy.
+Go's standard HTTP transport may replay certain failed requests on reused
+connections with the same key. The advertised lifetime is not currently enforced,
+including zero or malformed values.
 
 | Group | Options |
 |---|---|
@@ -99,12 +110,77 @@ The most option-rich surface. Source: [`catalog/rest/options.go`](https://github
 > until the `catalog/rest/sigv4` backend is blank-imported; the error names the
 > import to add.
 
-#### Custom token sources (Google BigLake)
+#### Authentication type
+
+The `rest.auth.type` property selects how the client authenticates, as in Iceberg
+Java. It is read only from the properties the client supplies; a server's
+`/v1/config` defaults and overrides can't change it. An `AuthManager` passed with
+`WithAuthManager` takes precedence over it.
+
+| Value | Behavior |
+|---|---|
+| unset or `oauth2` | Use `token`, or the client-credentials flow with `credential`. With neither, send no authorization header. |
+| `none` | Send no authorization header, even if `token` or `credential` is set. |
+| `basic` | HTTP Basic authentication with `rest.auth.basic.username` and `rest.auth.basic.password`, both required. Like `rest.auth.type`, they are read only from the client's properties. |
+| `sigv4` | Sign every request with AWS SigV4 and authenticate with the type in `rest.auth.sigv4.delegate-auth-type` (default `oauth2`; `sigv4` is rejected). Requires a blank import of `catalog/rest/sigv4`. Unlike `rest.sigv4-enabled`, a server override can't turn this signing off. |
+| `google` | Google credentials, for catalogs such as BigLake. Requires a blank import of `catalog/rest/googleauth`. |
+
+Other values select an auth manager registered with `rest.RegisterAuthManager`.
+An unregistered value fails `NewCatalog` / `catalog.Load`.
+
+When SigV4 signs a request that already carries an `Authorization` header, such
+as the `oauth2` or `basic` header of the delegate auth type, the header moves to
+`Original-Authorization` and is signed with the request, as in Java. This also
+applies to `rest.sigv4-enabled`.
+
+#### Google BigLake
+
+With `rest.auth.type=google`, the
+[`catalog/rest/googleauth`](https://github.com/apache/iceberg-go/blob/main/catalog/rest/googleauth/googleauth.go)
+backend authenticates with Google credentials, using the same properties as
+Java's `GoogleAuthManager`:
+
+| Property | Description |
+|---|---|
+| `gcp.auth.credentials-path` | Path to a credentials JSON file, such as a service account key. |
+| `gcp.auth.credentials-json` | The same JSON, inline. Setting both is an error. |
+| `gcp.auth.scopes` | Comma-separated OAuth scopes. Default `https://www.googleapis.com/auth/cloud-platform`. |
+
+Without either credentials property, Application Default Credentials are used.
+Like `rest.auth.type`, these are read only from the client's properties.
+
+Token requests don't go through the catalog's HTTP client, so a transport, TLS
+config or proxy set with `WithCustomTransport`, `WithTLSConfig` or
+`WithTransportFactory` doesn't apply to them, as in Java. They use a client with
+the default transport and a 60-second timeout. To use a specific client, put it
+in the context's `oauth2.HTTPClient` value when loading the catalog, or build
+the token source yourself (for example with `googleauth.TokenSource`) and pass
+`NewOauth2AuthManager(ts)` to `WithAuthManager`. One exception: on Google Cloud
+compute, Application Default Credentials come from the metadata server, which
+the Google library always reaches through its own client.
+
+```go
+import (
+	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/catalog"
+	_ "github.com/apache/iceberg-go/catalog/rest/googleauth"
+)
+
+cat, err := catalog.Load(ctx, "biglake", iceberg.Properties{
+	"type":                       "rest",
+	"uri":                        "https://biglake.googleapis.com/iceberg/v1/restcatalog",
+	"warehouse":                  "gs://lakehouse-public-data",
+	"rest.auth.type":             "google",
+	"header.x-goog-user-project": "my-project",
+})
+```
+
+#### Custom token sources
 
 `WithCredential` uses the OAuth2 client-credentials flow against the catalog's
 token endpoint. For other identity providers, wrap any `oauth2.TokenSource` with
-`NewOauth2AuthManager` and pass it to `WithAuthManager`. Google's BigLake Iceberg
-REST catalog, for example, takes Application Default Credentials:
+`NewOauth2AuthManager` and pass it to `WithAuthManager`. The Google setup above
+can also be written this way:
 
 ```go
 ts, err := google.DefaultTokenSource(ctx, "https://www.googleapis.com/auth/cloud-platform")
@@ -120,9 +196,9 @@ cat, err := rest.NewCatalog(ctx, "biglake", "https://biglake.googleapis.com/iceb
 The manager reuses a token until it expires, then asks the source for a new one.
 That refresh runs on the HTTP client the source was built with. For
 `google.DefaultTokenSource` that is the client in the context's
-`oauth2.HTTPClient` value, or `http.DefaultClient`, which has no timeout.
-Unlike Java's `rest.auth.type=google`, this is configured in code; iceberg-go
-has no `rest.auth.type` property.
+`oauth2.HTTPClient` value, or `http.DefaultClient`, which has no timeout. With
+`rest.auth.type=google`, the backend sets a client with a 60-second timeout
+unless the context already carries one.
 
 #### Metrics reporting
 
@@ -212,7 +288,7 @@ All credential and tuning property keys are constants in [`io/config.go`](https:
 
 ### S3
 
-Authentication is resolved in this order (`io/gocloud/s3/s3.go`):
+When remote signing is disabled, authentication is resolved in this order (`io/gocloud/s3/s3.go`):
 
 1. Static credentials in properties: `s3.access-key-id` + `s3.secret-access-key` (+ optional `s3.session-token`).
 2. The standard AWS SDK v2 default credential chain - environment variables (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`), `~/.aws/credentials`, container/IAM role.
@@ -230,7 +306,34 @@ Tuning properties:
 | `s3.connect-timeout` (`io.S3ConnectTimeout`) | Either a number of seconds (`"60"`, `"60.0"`) or a Go duration (`"5s"`). |
 | `s3.force-virtual-addressing` (`io.S3ForceVirtualAddressing`) | Force virtual-host-style addressing. |
 | `s3.compat-mode` (`io.S3CompatMode`) | Enable for non-AWS S3 endpoints. Defaults to off. |
-| `s3.signer.uri` (`io.S3SignerURI`) | Reserved for remote-signing endpoint (not yet implemented). |
+| `s3.remote-signing-enabled` (`io.S3RemoteSigningEnabled`) | Set to `true` to have a REST service sign S3 requests. Defaults to `false`. |
+| `s3.signer.uri` (`io.S3SignerURI`) | Legacy signing service base URI. Requests use `<base>/v1/aws/s3/sign`. |
+
+With remote signing enabled, S3 uses anonymous SDK credentials and obtains each
+request's signature from the signing service. No local AWS credentials are needed.
+REST catalogs use the table's `/sign` endpoint by default and pass through the
+response's `remote-signing-config` headers and properties. When that config is
+present, legacy `signer.endpoint`, `signer.uri`, and `s3.signer.uri` settings
+are ignored. `rest.remote-signing.endpoint` can explicitly override the default.
+It may be an absolute URL or a path relative to the catalog URI.
+Legacy settings are supported when the response has no remote signing config.
+
+A table-specific token takes precedence over the catalog token. The catalog's
+refreshing authentication is reused only when the signer shares the catalog's
+origin. For a separate signing service, use the headers supplied in
+`remote-signing-config` or a table-specific token. For a standalone S3 FileIO,
+set `s3.signer.uri`, `s3.region`, and an optional `token` for the signing service.
+When also supplying `rest.remote-signing.config`, set
+`rest.remote-signing.endpoint` to the complete signing endpoint instead.
+
+Object uploads use unsigned payloads. Only bulk-delete XML bodies are sent to the
+signer. Streaming signatures (`aws-chunked`) are unsupported. Caller-supplied
+checksum values are preserved; an upload that sets `ChecksumAlgorithm` must also
+supply its checksum value. Signing requests use the caller's context and a
+30-second timeout unless the HTTP client has a configured timeout.
+Remote signing accepts a standard `*http.Client` or the AWS SDK's buildable client
+for S3 requests so redirects can be disabled. Other custom HTTP clients are rejected.
+S3 requests must resolve to SigV4; SigV4a and S3 Express signing are not supported.
 
 ### Google Cloud Storage
 
@@ -392,7 +495,8 @@ Property key constants are in [`table/properties.go`](https://github.com/apache/
 | Key | Default | Description |
 |---|---|---|
 | `write.format.default` | `parquet` | File format used when writing data files. Read in `table/writer.go` and `table/rolling_data_writer.go`. |
-| `write.target-file-size-bytes` | (set by writer) | Target size for newly written data files. Read in `table/arrow_utils.go` and `table/equality_delete_writer.go`. |
+| `write.target-file-size-bytes` | `536870912` (512 MB) | Target size for newly written data files. Read in `table/arrow_utils.go`. |
+| `write.delete.target-file-size-bytes` | `67108864` (64 MB) | Target size for equality-delete and v2 position-delete files where file rolling applies. Read in `table/equality_delete_writer.go` and `table/arrow_utils.go`. |
 
 ### Scan reads
 
@@ -495,17 +599,69 @@ All defined in `table/internal/parquet_files.go` and read by the Parquet writer:
 | `write.parquet.page-version` | `2` |
 | `write.parquet.compression-codec` | `zstd` |
 | `write.parquet.compression-level` | `-1` (codec default) |
+| `write.parquet.compression-codec.column.<name>` | Global codec |
+| `write.parquet.compression-level.column.<name>` | Global level, or the column codec's default if the codecs differ |
 | `write.parquet.bloom-filter-max-bytes` | 1 MB |
 | `write.parquet.bloom-filter-enabled.column.<name>` | (per-column toggle, prefix-matched) |
+| `write.parquet.bloom-filter-fpp.column.<name>` | 0.01 (per-column false-positive probability, strictly between 0 and 1) |
+| `write.parquet.bloom-filter-ndv.column.<name>` | unset (expected distinct values; positive integer up to 4,294,967,295) |
+| `write.parquet.bloom-filter-adaptive-enabled` | `false` (size enabled Bloom filters to observed NDV unless a per-column NDV is specified) |
+| `write.parquet.stats-enabled.column.<name>` | `true` (per-column Parquet statistics toggle) |
 | `parquet.enable.dictionary` | `true` (global dictionary encoding switch; same key as Iceberg Java) |
 | `write.parquet.dict-encoding-enabled.column.<name>` | (per-column toggle, prefix-matched; overrides the global switch) |
 | `write.parquet.shred-variants` | `false` (opt-in shredding of top-level variant columns) |
 | `write.parquet.variant-inference-buffer-size` | 100 rows (buffered per file to infer the shredding schema) |
 
-The bloom filter and dictionary toggles are parsed the way Iceberg Java parses them: only `true` (case-insensitive) enables, so any other value — including `1` — reads as `false`.
+The bloom filter, statistics, and dictionary toggles follow Iceberg Java parsing: only `true`
+(case-insensitive) enables a toggle; other values, including `1`, are false. Bloom filters remain
+disabled for a column unless its enabled toggle is set. When adaptive sizing is enabled, an explicit
+column NDV takes precedence. Adaptive sizing rejects FPP values extremely close to 1 that could make
+the writer hang.
+
+Statistics settings apply to data files and use Iceberg field names, including nested paths such as
+`items.element`. Disabling statistics can reduce pruning and omit some Iceberg file metrics; other
+metadata may still be recorded.
+
+Column compression keys use case-sensitive Iceberg leaf paths, such as
+`items.element` or `attributes.value.name`. They apply to data files and use
+the global settings for columns without overrides. An explicit column level
+must be an integer valid for its effective codec. Missing fields are ignored.
+Parquet variant leaves do not have Iceberg field IDs and cannot be selected by
+these keys. Arrow does not register legacy `lz4` or `lzo` codecs by default;
+`lz4_raw` is supported.
+Bloom column settings use Iceberg names, including `items.element` and
+`lookup.value`. Writers resolve these to the physical Parquet paths. Existing
+physical-path settings remain supported; logical names take precedence when
+both are present. Logical settings follow column renames and are removed when
+the column is deleted. Data-column Bloom settings do not apply to delete files.
+
+Equality-delete and v2 position-delete Parquet writers also support these
+overrides, defined in `table/properties.go`. Unset overrides inherit the
+corresponding `write.parquet.*` setting and its default. If the delete codec
+differs from the data codec and no delete level is set, the delete writer uses
+the codec's default level instead of inheriting the data codec's level.
+
+| Key | Overrides |
+|---|---|
+| `write.delete.parquet.row-group-size-bytes` | Row-group size target |
+| `write.delete.parquet.page-size-bytes` | Data page size |
+| `write.delete.parquet.page-row-limit` | Page write batch size |
+| `write.delete.parquet.dict-size-bytes` | Dictionary page size |
+| `write.delete.parquet.page-version` | Data page version: `v1` or `v2` (`1` and `2` also accepted) |
+| `write.delete.parquet.compression-codec` | Compression codec |
+| `write.delete.parquet.compression-level` | Compression level |
+
+As in Java, data-column Bloom filter and dictionary overrides do not apply to
+delete files. The global `parquet.enable.dictionary` switch still applies.
+Metrics configuration is independent: equality deletes use the table metrics
+settings, while position deletes always retain full `file_path` and `pos` bounds.
 
 ### Parquet reader
 
 | Key | Description |
 |---|---|
 | `read.parquet.batch-size` | Arrow record-batch size used by the Parquet reader. |
+| `read.parquet.max-compressed-page-size-bytes` | Maximum compressed page body. Default: 64 MiB. |
+| `read.parquet.max-uncompressed-page-size-bytes` | Maximum uncompressed page body. Default: 256 MiB. |
+
+The page limits are Go-specific reader settings; Iceberg Java ignores them. Explicit values must be integers from `1` to `2147483647`, the largest size representable in a Parquet page header. Table properties apply to scans, deletes, delete-file inspection and maintenance. A scan can override them through `table.WithOptions` without changing saved metadata. Compressed and uncompressed limits are independent; raising one does not raise the other.

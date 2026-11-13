@@ -17,7 +17,7 @@
 # golangci-lint version (keep in sync with CI and README)
 GOLANGCI_LINT_VERSION := v2.14.0
 
-.PHONY: test test-assert test-race vet lint lint-install integration-setup integration-setup-spark4 integration-test integration-scanner integration-io integration-rest integration-rest-scan-planning integration-setup-polaris integration-external-rest integration-spark integration-hadoop integration-down integration-logs docs-gen
+.PHONY: test test-assert test-race vet lint lint-install integration-setup integration-setup-spark4 integration-test integration-scanner integration-io integration-rest integration-rest-scan-planning integration-setup-polaris integration-external-rest integration-spark integration-hadoop integration-dynamodb integration-down integration-logs docs-gen
 
 test:
 	go test -v ./...
@@ -62,14 +62,14 @@ integration-logs:
 	docker compose -f internal/recipe/docker-compose.yml logs
 
 integration-env:
-	@echo "export AWS_S3_ENDPOINT=http://$$(docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' object-store):9000"
+	@echo "export AWS_S3_ENDPOINT=http://localhost:9000"
 	@echo "export AWS_REGION=us-east-1"
 	@echo "export SPARK_CONTAINER_ID=$$(docker ps -qf 'name=spark-iceberg')"
 	@echo "export DOCKER_API_VERSION=$$(docker version -f '{{.Server.APIVersion}}')"
 
 # Keep the isolated Java scan-planning suite in umbrella CI so its wire
 # compatibility coverage runs alongside the other integration tests.
-integration-test: integration-scanner integration-io integration-rest integration-rest-scan-planning integration-spark integration-hive integration-hadoop
+integration-test: integration-scanner integration-io integration-rest integration-rest-scan-planning integration-spark integration-hive integration-hadoop integration-dynamodb
 
 integration-scanner:
 	go test -tags=integration -v -run="^TestScanner" ./table
@@ -102,6 +102,11 @@ integration-external-rest:
 
 integration-spark:
 	go test -tags=integration -v -run="^TestSparkIntegration" ./table
+
+DYNAMODB_ENDPOINT ?= http://localhost:8000
+
+integration-dynamodb:
+	DYNAMODB_ENDPOINT='$(DYNAMODB_ENDPOINT)' go test -tags=integration -v ./catalog/dynamodb
 
 integration-hive:
 	go test -tags=integration -v ./catalog/hive/...

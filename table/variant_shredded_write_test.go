@@ -830,8 +830,8 @@ func variantBoundField(t *testing.T, raw []byte, path string) variant.Value {
 	return field.Value
 }
 
-// TestShreddedVariantWriteRegularDecimalStats checks that with shredding on but no
-// shredded decimal, a regular decimal column keeps FLBA and its bounds stay correct.
+// TestShreddedVariantWriteRegularDecimalStats checks that a regular decimal uses
+// the spec's integer encoding and correct bounds even when no variant decimal is shredded.
 func TestShreddedVariantWriteRegularDecimalStats(t *testing.T) {
 	mem := memory.DefaultAllocator
 	iceSchema := iceberg.NewSchema(0,
@@ -887,9 +887,7 @@ func TestShreddedVariantWriteRegularDecimalStats(t *testing.T) {
 	}
 	require.Len(t, files, 1)
 
-	// The variant shreds no decimal, so per-file gating leaves StoreDecimalAsInteger
-	// off and the regular decimal column keeps its default FIXED_LEN_BYTE_ARRAY.
-	assert.Equal(t, parquet.Types.FixedLenByteArray, columnPhysicalType(t, files[0].FilePath(), "price"))
+	assert.Equal(t, parquet.Types.Int32, columnPhysicalType(t, files[0].FilePath(), "price"))
 
 	decTyp := iceberg.MustDecimalTypeOf(9, 2)
 	lb, err := iceberg.LiteralFromBytes(decTyp, files[0].LowerBoundValues()[2])

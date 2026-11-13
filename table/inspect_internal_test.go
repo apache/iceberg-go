@@ -4105,7 +4105,7 @@ func TestInspectPositionDeletesEarlyRelease(t *testing.T) {
 				arrowSchema, schemaErr := SchemaToArrowSchema(schema, nil, true, false)
 				require.NoError(t, schemaErr)
 				rr = inspect.positionDeleteRecordReader(
-					context.Background(), arrowSchema, nil, slices.Values([]iceberg.ManifestFile(nil)), partitionType, partitionIDs, tbl.metadata.FormatVersion())
+					context.Background(), arrowSchema, nil, slices.Values([]iceberg.ManifestFile(nil)), partitionType, partitionIDs, tbl.metadata.FormatVersion(), nil)
 			}
 			require.NoError(t, err)
 			require.True(t, rr.Next())

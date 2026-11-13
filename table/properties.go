@@ -104,9 +104,30 @@ const (
 	ParquetCompressionDefault                = internal.ParquetCompressionDefault
 	ParquetCompressionLevelKey               = internal.ParquetCompressionLevelKey
 	ParquetCompressionLevelDefault           = internal.ParquetCompressionLevelDefault
+	ParquetCompressionColumnCodecKeyPrefix   = internal.ParquetCompressionColumnCodecKeyPrefix
+	ParquetCompressionColumnLevelKeyPrefix   = internal.ParquetCompressionColumnLevelKeyPrefix
+	DeleteParquetRowGroupSizeBytesKey        = "write.delete.parquet.row-group-size-bytes"
+	DeleteParquetPageSizeBytesKey            = "write.delete.parquet.page-size-bytes"
+	DeleteParquetPageRowLimitKey             = "write.delete.parquet.page-row-limit"
+	DeleteParquetDictSizeBytesKey            = "write.delete.parquet.dict-size-bytes"
+	DeleteParquetPageVersionKey              = "write.delete.parquet.page-version"
+	DeleteParquetCompressionKey              = "write.delete.parquet.compression-codec"
+	DeleteParquetCompressionLevelKey         = "write.delete.parquet.compression-level"
 	ParquetBloomFilterMaxBytesKey            = internal.ParquetBloomFilterMaxBytesKey
 	ParquetBloomFilterMaxBytesDefault        = internal.ParquetBloomFilterMaxBytesDefault
+	ParquetBloomFilterAdaptiveEnabledKey     = internal.ParquetBloomFilterAdaptiveEnabledKey
+	ParquetBloomFilterAdaptiveEnabledDefault = internal.ParquetBloomFilterAdaptiveEnabledDefault
 	ParquetBloomFilterColumnEnabledKeyPrefix = internal.ParquetBloomFilterColumnEnabledKeyPrefix
+	ParquetBloomFilterColumnFPPKeyPrefix     = internal.ParquetBloomFilterColumnFPPKeyPrefix
+	ParquetBloomFilterColumnNDVKeyPrefix     = internal.ParquetBloomFilterColumnNDVKeyPrefix
+	ParquetColumnStatsEnabledKeyPrefix       = internal.ParquetColumnStatsEnabledKeyPrefix
+
+	// Parquet read page limits are Go-specific bounds on page body sizes.
+	// Table properties provide defaults; WithOptions overrides them per scan.
+	ParquetMaxCompressedPageSizeBytesKey       = internal.ParquetMaxCompressedPageSizeBytesKey
+	ParquetMaxCompressedPageSizeBytesDefault   = internal.ParquetMaxCompressedPageSizeBytesDefault
+	ParquetMaxUncompressedPageSizeBytesKey     = internal.ParquetMaxUncompressedPageSizeBytesKey
+	ParquetMaxUncompressedPageSizeBytesDefault = internal.ParquetMaxUncompressedPageSizeBytesDefault
 
 	ParquetBatchSizeKey     = internal.ParquetBatchSizeKey
 	ParquetBatchSizeDefault = internal.ParquetBatchSizeDefault
@@ -141,8 +162,10 @@ const (
 	WriteFormatDefaultKey     = "write.format.default"
 	WriteFormatDefaultDefault = "parquet"
 
-	WriteTargetFileSizeBytesKey     = "write.target-file-size-bytes"
-	WriteTargetFileSizeBytesDefault = 512 * 1024 * 1024 // 512 MB
+	WriteTargetFileSizeBytesKey           = "write.target-file-size-bytes"
+	WriteTargetFileSizeBytesDefault       = 512 * 1024 * 1024 // 512 MB
+	WriteDeleteTargetFileSizeBytesKey     = "write.delete.target-file-size-bytes"
+	WriteDeleteTargetFileSizeBytesDefault = 64 * 1024 * 1024 // 64 MB
 
 	ParquetShredVariantsKey         = internal.ParquetShredVariantsKey
 	ParquetShredVariantsDefault     = internal.ParquetShredVariantsDefault

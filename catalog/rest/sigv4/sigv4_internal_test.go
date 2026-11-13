@@ -81,6 +81,43 @@ func TestSignRequestEmptyBodyContentHash(t *testing.T) {
 	assert.NotEmpty(t, req.Header.Get("Authorization"), "SigV4 should set the Authorization header")
 }
 
+// TestSignRequestRelocatesAuthorization pins the Java behavior of
+// RESTSigV4AuthSession: an Authorization header set before signing moves to
+// Original-Authorization and is signed with the request, instead of being
+// overwritten by the SigV4 signature.
+func TestSignRequestRelocatesAuthorization(t *testing.T) {
+	t.Parallel()
+
+	s := newTestSigner(t)
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://example.com/test", nil)
+	require.NoError(t, err)
+	req.Header.Set("Authorization", "Bearer tok")
+
+	require.NoError(t, s.SignRequest(req))
+	assert.Equal(t, []string{"Bearer tok"}, req.Header.Values("Original-Authorization"))
+	signature := req.Header.Get("Authorization")
+	assert.True(t, strings.HasPrefix(signature, "AWS4-HMAC-SHA256"), signature)
+	assert.Contains(t, signature, "original-authorization", "the relocated header must be signed")
+
+	// Signing again, as for a same-origin redirect that carries the previous
+	// signature, must not move that signature over the original token.
+	require.NoError(t, s.SignRequest(req))
+	assert.Equal(t, []string{"Bearer tok"}, req.Header.Values("Original-Authorization"))
+	assert.True(t, strings.HasPrefix(req.Header.Get("Authorization"), "AWS4-HMAC-SHA256"))
+}
+
+func TestSignRequestWithoutAuthorizationAddsNoOriginal(t *testing.T) {
+	t.Parallel()
+
+	s := newTestSigner(t)
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://example.com/test", nil)
+	require.NoError(t, err)
+
+	require.NoError(t, s.SignRequest(req))
+	assert.Empty(t, req.Header.Values("Original-Authorization"))
+	assert.NotContains(t, req.Header.Get("Authorization"), "original-authorization")
+}
+
 func TestSignRequestBodyContentHash(t *testing.T) {
 	t.Parallel()
 

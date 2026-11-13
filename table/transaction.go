@@ -95,10 +95,12 @@ type Transaction struct {
 	noReplay bool
 
 	// pinnedRefs names refs whose AssertRefSnapshotID requirement guards
-	// the commit: those from AssertRefSnapshotID, RollbackToSnapshot,
-	// and CherryPickSnapshot. doCommit's refresh-and-replay must not rewrite
-	// their assertions to the fresh head between retries, so a ref that has
-	// changed fails the commit.
+	// the commit. These include refs from AssertRefSnapshotID,
+	// RollbackToSnapshot, CherryPickSnapshot, FastForwardBranch,
+	// ReplaceBranchFromRef, and ReplaceBranch. A promotion of a staged source
+	// snapshot also pins the commit branch. On retry, these assertions are not
+	// rewritten, so a changed ref fails the commit. ExpireSnapshots instead
+	// replans against refreshed metadata.
 	pinnedRefs map[string]struct{}
 
 	expirations []expirationRecord
@@ -628,9 +630,9 @@ func (t *Transaction) UpdateSpec(caseSensitive bool) *UpdateSpec {
 
 // ReplaceSortOrder stages order as the table's new default sort order,
 // the analogue of Java's Table.replaceSortOrder() / BaseReplaceSortOrder.
-// The metadata builder reuses the ID of an equivalent existing order or
-// assigns the next available one, so order's own ID is ignored. The
-// commit is fenced by AssertDefaultSortOrderID, matching
+// An equivalent historical order is reused without adding it again.
+// Otherwise the metadata builder assigns a fresh ID, so order's ID is
+// ignored. The commit is fenced by AssertDefaultSortOrderID, matching
 // UpdateRequirements.forUpdateTable on SetDefaultSortOrder. Replacing
 // the default with a field-identical order is a no-op.
 func (t *Transaction) ReplaceSortOrder(order SortOrder) error {
@@ -642,10 +644,19 @@ func (t *Transaction) ReplaceSortOrder(order SortOrder) error {
 		return nil
 	}
 
-	return t.apply(
-		[]Update{NewAddSortOrderUpdate(&order), NewSetDefaultSortOrderUpdate(-1)},
-		[]Requirement{AssertDefaultSortOrderID(t.tbl.Metadata().DefaultSortOrder())},
-	)
+	reqs := []Requirement{AssertDefaultSortOrderID(t.tbl.Metadata().DefaultSortOrder())}
+	orderID := meta.reuseOrCreateNewSortOrderID(&order)
+	if previous, err := meta.GetSortOrderByID(orderID); err == nil {
+		if err := order.CheckCompatibility(meta.CurrentSchema()); err != nil {
+			return err
+		}
+
+		// Reuse a concrete ID: -1 could refer to a different order added
+		// earlier in this transaction.
+		return t.apply([]Update{NewSetDefaultSortOrderUpdate(previous.OrderID())}, reqs)
+	}
+
+	return t.apply([]Update{NewAddSortOrderUpdate(&order), NewSetDefaultSortOrderUpdate(-1)}, reqs)
 }
 
 func sameSortFields(a, b SortOrder) bool {
@@ -1108,16 +1119,13 @@ func (t *Transaction) ReplaceDataFilesByPath(ctx context.Context, filesToDelete,
 		}
 	}
 
-	if meta.NameMapping() == nil {
-		nameMapping := meta.CurrentSchema().NameMapping()
-		mappingJson, err := json.Marshal(nameMapping)
-		if err != nil {
+	if len(filesToAdd) > 0 {
+		if err := validateNameMappingProperty(meta.props, meta.NameMapping()); err != nil {
 			return err
 		}
-		err = t.SetProperties(iceberg.Properties{DefaultNameMappingKey: string(mappingJson)})
-		if err != nil {
-			return err
-		}
+	}
+	if err := t.ensureNameMapping(); err != nil {
+		return err
 	}
 
 	commitUUID := uuid.New()
@@ -1146,7 +1154,20 @@ func (t *Transaction) ReplaceDataFilesByPath(ctx context.Context, filesToDelete,
 		return err
 	}
 
-	return t.apply(updates, reqs)
+	// Keep validator registration atomic with staging so Commit cannot run
+	// between the two.
+	t.mx.Lock()
+	defer t.mx.Unlock()
+	if err := t.applyLocked(updates, reqs); err != nil {
+		return err
+	}
+	if len(filesToAdd) > 0 {
+		// A replacement gets a newer data sequence number, so it would stop a
+		// concurrent equality delete from applying to the old file's rows.
+		t.validators = append(t.validators, rewriteValidator(markedForDeletion))
+	}
+
+	return nil
 }
 
 type partitionValidationField struct {
@@ -1646,7 +1667,7 @@ func (t *Transaction) ensureNameMapping() error {
 		return err
 	}
 
-	if meta.NameMapping() == nil {
+	if _, exists := meta.props[DefaultNameMappingKey]; !exists {
 		nameMapping := meta.CurrentSchema().NameMapping()
 		mappingJson, err := json.Marshal(nameMapping)
 		if err != nil {
@@ -1891,7 +1912,22 @@ func (t *Transaction) ReplaceDataFiles(ctx context.Context, filesToDelete, files
 		return err
 	}
 
-	return t.apply(updates, reqs)
+	// Keep validator registration atomic with staging so Commit cannot run
+	// between the two.
+	t.mx.Lock()
+	defer t.mx.Unlock()
+	if err := t.applyLocked(updates, reqs); err != nil {
+		return err
+	}
+	if len(filesToAdd) > 0 || cfg.rewriteSemantics {
+		// Replacing data files must preserve deletes committed after the
+		// replacement was planned. This is independent of overwrite isolation:
+		// a newer replacement file would otherwise stop an older equality
+		// delete from applying.
+		t.validators = append(t.validators, rewriteValidator(markedForDeletion))
+	}
+
+	return nil
 }
 
 // ReplaceFiles atomically replaces data files and removes associated delete files
@@ -2303,11 +2339,22 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 		return err
 	}
 
-	if err := t.apply(updates, reqs); err != nil {
+	var validator conflictValidatorFunc
+	if len(rewriteValidationFiles) > 0 {
+		validator = rewriteValidatorWithReferencedDataFiles(rewriteValidationFiles, referencedDataFilePaths)
+	} else if cfg.rewriteSemantics && len(markedDataForDeletion) > 0 {
+		validator = rewriteValidator(markedDataForDeletion)
+	}
+
+	// Keep validator registration atomic with staging so Commit cannot run
+	// between the two.
+	t.mx.Lock()
+	defer t.mx.Unlock()
+	if err := t.applyLocked(updates, reqs); err != nil {
 		return err
 	}
-	if len(rewriteValidationFiles) > 0 {
-		t.addValidator(rewriteValidatorWithReferencedDataFiles(rewriteValidationFiles, referencedDataFilePaths))
+	if validator != nil {
+		t.validators = append(t.validators, validator)
 	}
 
 	return nil
@@ -2412,16 +2459,13 @@ func (t *Transaction) AddDataFilesByPath(ctx context.Context, filePaths []string
 		}
 	}
 
-	if meta.NameMapping() == nil {
-		nameMapping := meta.CurrentSchema().NameMapping()
-		mappingJson, err := json.Marshal(nameMapping)
-		if err != nil {
+	if len(filePaths) > 0 {
+		if err := validateNameMappingProperty(meta.props, meta.NameMapping()); err != nil {
 			return err
 		}
-		err = t.SetProperties(iceberg.Properties{DefaultNameMappingKey: string(mappingJson)})
-		if err != nil {
-			return err
-		}
+	}
+	if err := t.ensureNameMapping(); err != nil {
+		return err
 	}
 
 	// SetProperties above may have staged a name mapping, rebuilding t.meta;

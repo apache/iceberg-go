@@ -117,6 +117,36 @@ func TestApplyNameMappingUsesAlias(t *testing.T) {
 	assert.Equal(t, 1, result.Field(0).ID)
 }
 
+// Name mappings may omit field-id for columns that exist only in imported files.
+// Those columns should remain without Iceberg IDs, even when they are nested.
+func TestApplyNameMappingWithIDLessFields(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: -1, Name: "mapped", Type: iceberg.PrimitiveTypes.Int64},
+		iceberg.NestedField{
+			ID: -1, Name: "import_only",
+			Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
+				{ID: -1, Name: "extra", Type: iceberg.PrimitiveTypes.String},
+			}},
+		},
+	)
+	mapping := iceberg.NameMapping{
+		{FieldID: new(1), Names: []string{"mapped"}},
+		{Names: []string{"import_only"}, Fields: []iceberg.MappedField{
+			{Names: []string{"extra"}},
+		}},
+	}
+
+	result, err := iceberg.ApplyNameMapping(schema, mapping)
+	require.NoError(t, err)
+	require.Equal(t, 1, result.Field(0).ID)
+	require.Equal(t, -1, result.Field(1).ID)
+
+	nested, ok := result.Field(1).Type.(*iceberg.StructType)
+	require.True(t, ok)
+	require.Len(t, nested.FieldList, 1)
+	require.Equal(t, -1, nested.FieldList[0].ID)
+}
+
 func TestMappedFieldFindFieldByName(t *testing.T) {
 	root := iceberg.MappedField{Fields: []iceberg.MappedField{
 		{

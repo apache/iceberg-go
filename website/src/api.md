@@ -323,6 +323,24 @@ Each batch is the scan projection followed by three columns:
 
 Added data files are inserts. Removed data files are deletes of the rows in that file. Delete files added in the range emit the rows they newly remove. A rewritten file emits a DELETE and an INSERT for every row in that file, including rows that did not change. `UPDATE` rows are not produced. Delete-file handling is iceberg-go behavior.
 
+Use `ToNormalizedArrowRecords` to remove matching DELETE/INSERT occurrences of unchanged rows within each snapshot. Set `ComputeUpdates` to label remaining rows with the same identifier as `UPDATE_BEFORE` and `UPDATE_AFTER`:
+
+```go
+schema, batches, err := tbl.NewIncrementalChangelogScan(
+    table.WithSelectedFields("id", "name"),
+).FromSnapshotExclusive(startSnapshotID).ToNormalizedArrowRecords(ctx,
+    table.ChangelogNormalizationOptions{
+        ComputeUpdates:   true,
+        IdentifierFields: []string{"id"},
+    })
+```
+
+The zero options value only removes carryovers. Update images use `IdentifierFields`, or the effective schema's identifier fields when the list is empty. Explicit identifiers may be nullable primitive columns, including paths through structs, and follow the scan's case sensitivity. After removing carryovers, an identifier must have at most one DELETE and one INSERT per snapshot. Duplicate identifiers return an error instead of selecting an ambiguous update image.
+
+Normalization compares complete rows before applying row filters, projection, and the output limit. Row-lineage columns do not affect matching. Variant values are compared by their encoded metadata/value bytes, with physical NULL distinct from an encoded Variant null. Changes from different snapshots are kept separate. Output follows snapshot and source-task order, with each UPDATE_AFTER immediately following its UPDATE_BEFORE. A batch boundary or row limit may split the pair. Callers release each returned batch.
+
+The reader buffers one snapshot at a time. `MaxBufferedBytes` defaults to 64 MiB of retained Arrow buffers and encoded matching keys, and `MaxBufferedRows` defaults to 1,000,000 input rows per snapshot. Exceeding either limit returns `ErrChangelogBufferLimit` through the iterator before emitting that snapshot. Decoding, temporary key encoding, output batches, and per-row indexes need additional memory. Temporary keys are individually capped at `MaxBufferedBytes`. `WithArrowBatchSize` also caps output batch rows; the default output batch size is 4096.
+
 ## Writing data
 
 The shortcut methods on `Table` open a transaction, perform the write, and commit. Use `NewTransaction` directly when you need to combine multiple operations.
@@ -533,6 +551,35 @@ if err := us.Commit(); err != nil { /* ... */ }
 
 Available transforms (root `iceberg` package): `IdentityTransform{}`, `YearTransform{}`, `MonthTransform{}`, `DayTransform{}`, `HourTransform{}`, `BucketTransform{NumBuckets: N}`, `TruncateTransform{Width: W}`.
 
+### Sort order evolution
+
+Use the transaction builder to replace the full default sort order. It binds column names against the transaction's staged schema. An empty builder resets the order to unsorted:
+
+~~~go
+txn := tbl.NewTransaction()
+builder := txn.NewReplaceSortOrder(true).
+    Asc("event_time", table.NullsLast).
+    AddField("user_id", iceberg.BucketTransform{NumBuckets: 16}, table.SortASC, table.NullsFirst)
+if err := builder.Commit(); err != nil { /* ... */ }
+
+newTbl, err := txn.Commit(ctx)
+~~~
+
+Call `Transaction.ReplaceSortOrder` directly when you already have a `table.SortOrder`, such as one built from field IDs:
+
+~~~go
+order, err := table.NewSortOrder(1, []table.SortField{{
+    SourceIDs: []int{1}, Transform: iceberg.IdentityTransform{},
+    Direction: table.SortASC, NullOrder: table.NullsFirst,
+}})
+if err != nil { /* ... */ }
+if err := txn.ReplaceSortOrder(order); err != nil { /* ... */ }
+~~~
+
+Replacing the default sort order affects future writes; it does not rewrite existing data files. To physically reorder existing data, run a separate sort compaction.
+
+The Go writers currently support only top-level sort columns. A nested-field order can be registered, as in Java, but a later append fails until the default order is replaced.
+
 ## Snapshots and refs
 
 ### Inspecting
@@ -600,6 +647,44 @@ _, _, err := cat.CommitTable(ctx, tbl.Identifier(), reqs, []table.Update{update}
 
 Constants `table.MainBranch`, `table.BranchRef`, `table.TagRef` live in [`table/refs.go`](https://github.com/apache/iceberg-go/blob/main/table/refs.go). A higher-level builder is on the roadmap.
 
+### Branch promotion and replacement
+
+Use a transaction to advance a branch to another branch or tag, or to move it
+to an existing snapshot. Fast-forward checks that the target's current snapshot
+is an ancestor of the source. It creates the target when missing, while
+`ReplaceBranch` requires an existing target branch.
+
+```go
+txn, err := tbl.NewTransactionOnBranch("main")
+if err != nil { /* ... */ }
+if err := txn.FastForwardBranch("main", "audit"); err != nil { /* ... */ }
+updated, err := txn.Commit(ctx)
+
+// Without ancestry checks (can move a branch backwards or across histories):
+txn, err = updated.NewTransactionOnBranch("main")
+if err != nil { /* ... */ }
+err = txn.ReplaceBranch("main", snapshotID)
+// Or use ReplaceBranchFromRef("main", "audit"), which can create a missing target.
+```
+
+For a non-main target, call `tbl.NewTransactionOnBranch(target)` rather than
+`tbl.NewTransaction()`. The latter uses `main` as its commit branch, so a
+concurrent append to `main` can reject an otherwise independent promotion.
+
+Existing branch retention settings are preserved. Both the target and source
+snapshot IDs are pinned when promoting from a ref, and the target is pinned
+when replacing by ID. If the source snapshot was staged in the same transaction,
+the commit branch is pinned too, preventing retry from changing its ancestry.
+A pinned ref that moves prevents the normal retry of a co-staged append. A retention-only change with the same snapshot ID cannot
+be detected by snapshot-ID requirements in any catalog. REST catalogs also
+cannot detect ref type changes with the same ID.
+
+Fast-forward needs the complete snapshot ancestry. REST catalogs using
+`snapshot-loading-mode=refs` can omit intermediate ancestors, causing valid
+fast-forwards to fail. Load with `snapshot-loading-mode=all` instead.
+Replacing by snapshot ID can also fail if the requested historical snapshot
+was omitted. See [Concurrent Writes](./concurrent-writes.md).
+
 ### Expiration and rollback
 
 ```go
@@ -650,6 +735,40 @@ The file uniqueness and manifest requirements come from the
 and [manifest list spec](https://iceberg.apache.org/spec/#manifest-lists).
 
 ## Maintenance
+
+### Partition statistics (v1-v3)
+
+`ComputePartitionStatistics` writes a Parquet statistics file for the transaction's
+current branch head and stages its registration. Use a fresh transaction and
+commit it to publish the reference:
+
+```go
+txn := tbl.NewTransaction()
+stats, err := txn.ComputePartitionStatistics(ctx)
+if err != nil { /* ... */ }
+newTbl, err := txn.Commit(ctx)
+```
+
+The operation recomputes statistics from live manifest entries without reading
+data files, delete-file contents, or Puffin blobs. It groups rows by partition
+spec ID and partition tuple and sorts by the unified tuple with NULL first.
+V2 includes position and equality delete metrics. V3 also counts deletion vectors
+in `dv_count`; their records contribute to `position_delete_record_count`, while
+`position_delete_file_count` counts classic files only, including V2 files
+retained after an upgrade.
+
+`total_record_count` is exact for tables without deletes and for DV-only tables
+whose live targets, partitions, sequence numbers, and record counts can be
+validated from metadata. A live classic position or equality delete makes this
+field NULL for every partition, since deletes may apply across specs. Unknown DV
+sequence numbers also leave the affected total NULL. Optional last-updated
+fields are left NULL. `PartitionStatisticsSchema` exposes the versioned schema;
+`PartitionStatisticsSchemaV1` remains available.
+
+The table must have a snapshot and at least one partition field in its spec
+history. Dropped partition source fields and changed transform result types are
+not supported. A concurrent change to the target branch, current schema, or
+partition layout rejects the commit. Statistics do not create a new snapshot.
 
 ### Orphan file cleanup
 
@@ -704,6 +823,16 @@ result, err := txn.RewriteDataFiles(ctx, groups /* from plan.Groups */, table.Re
 ```
 
 When every file of a group already records the order's `sort_order_id` (for example, files written by an earlier sort rewrite), every sort field is identity, and no partition of the group has more files than the scan concurrency (`table.WithCompactionScanConcurrency`, `GOMAXPROCS` by default), the files are streamed and merged, holding up to about five batches per file instead of the whole group. Otherwise a sort rewrite holds each group decoded in memory, and with the batches queued for the writer that can reach about twice the group's decoded size, so keep `compaction.Config.MaxGroupSizeBytes` within what one rewrite can hold. The first sort rewrite of a table always takes this in-memory path, since its files do not record the order yet. The CLI equivalent is `iceberg compact run --sort [--rewrite-all] [--max-group-size BYTES]`, which uses the table's default sort order.
+
+To cluster spatially instead, pass `table.WithCompactionGeometryHilbertOrder` with the name of a top-level geometry or geography column. Each partition of a group is ordered along a Hilbert curve over the centre of every geometry's XY bounding box, snapped to a grid of `2^bits` cells per axis (`table.WithHilbertBits`, 16 by default) over the extent of the data (`table.WithHilbertBounds` fixes the extent). Rows close in space tend to share the same file and row group, so per-file geometry bounds overlap little and spatial filters prune files. Rows with no location (a null or empty geometry) go last. Geography is accepted but ordered on planar x/y, with no antimeridian wrapping. This is not the multi-column `hilbert(c1, c2)` sort order of Java's rewrite procedure; it orders one geometry column by location. A Hilbert rewrite always holds the whole group decoded in memory, so keep `compaction.Config.MaxGroupSizeBytes` within what one rewrite can hold. The option cannot be combined with `table.WithCompactionSortOrder`, and because a Hilbert order is not an Iceberg sort order, output files record no `sort_order_id`:
+
+```go
+result, err := txn.RewriteDataFiles(ctx, groups, table.RewriteDataFilesOptions{
+    GroupOptions: []table.CompactionGroupOption{
+        table.WithCompactionGeometryHilbertOrder("geom", table.WithHilbertBits(12)),
+    },
+})
+```
 
 ### Expiring snapshots
 

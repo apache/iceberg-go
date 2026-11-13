@@ -1986,6 +1986,63 @@ func TestAddSnapshotStaleValuesAreCommitConflicts(t *testing.T) {
 	})
 }
 
+func TestAddSnapshotV3RejectsFirstRowIDAheadOfNextRowID(t *testing.T) {
+	builder := freshMetadataBuilder(t, 3)
+	firstRowID, addedRows := int64(1), int64(1)
+	snapshot := freshBuilderSnapshot(1, nil, 0, time.Now().UnixMilli())
+	snapshot.FirstRowID, snapshot.AddedRows = &firstRowID, &addedRows
+
+	err := builder.AddSnapshot(&snapshot)
+	require.ErrorIs(t, err, ErrInvalidRowLineage)
+	require.ErrorContains(t, err, "first-row-id 1 is ahead of table next-row-id 0")
+	require.Zero(t, builder.NextRowID())
+
+	meta, err := builder.Build()
+	require.NoError(t, err)
+	require.Empty(t, meta.Snapshots())
+}
+
+func TestAddSnapshotV3RejectsForwardRowIDAfterAllocation(t *testing.T) {
+	builder := freshMetadataBuilder(t, 3)
+	now := time.Now().UnixMilli()
+	startRowID, addedRows := int64(0), int64(5)
+	committed := freshBuilderSnapshot(1, nil, 1, now)
+	committed.FirstRowID, committed.AddedRows = &startRowID, &addedRows
+	require.NoError(t, builder.AddSnapshot(&committed))
+	require.Equal(t, int64(5), builder.NextRowID())
+
+	parentID := int64(1)
+	forwardRowID, moreRows := int64(6), int64(1)
+	invalid := freshBuilderSnapshot(2, &parentID, 2, now+1)
+	invalid.FirstRowID, invalid.AddedRows = &forwardRowID, &moreRows
+	updateCount := len(builder.updates)
+	lastUpdated := builder.LastUpdatedMS()
+	lastSequence := builder.currentLastSequenceNumber()
+	err := builder.AddSnapshot(&invalid)
+	require.ErrorIs(t, err, ErrInvalidRowLineage)
+	require.NotErrorIs(t, err, ErrCommitFailed)
+	require.Equal(t, int64(5), builder.NextRowID())
+	require.Len(t, builder.updates, updateCount)
+	require.Equal(t, lastUpdated, builder.LastUpdatedMS())
+	require.Equal(t, lastSequence, builder.currentLastSequenceNumber())
+
+	meta, err := builder.Build()
+	require.NoError(t, err)
+	require.Len(t, meta.Snapshots(), 1)
+	require.Equal(t, int64(1), meta.Snapshots()[0].SnapshotID)
+
+	firstRowID := builder.NextRowID()
+	invalid.FirstRowID = &firstRowID
+	require.NoError(t, builder.AddSnapshot(&invalid))
+	require.Equal(t, int64(6), builder.NextRowID())
+	require.Len(t, builder.updates, updateCount+1)
+
+	meta, err = builder.Build()
+	require.NoError(t, err)
+	require.Len(t, meta.Snapshots(), 2)
+	require.Equal(t, int64(2), meta.Snapshots()[1].SnapshotID)
+}
+
 func TestAddSnapshotUpdateOnBuilderWithoutBase(t *testing.T) {
 	builder := freshMetadataBuilder(t, 2)
 	parentSnapshotID := int64(1)
@@ -3211,6 +3268,74 @@ func TestNewMetadataRejectsReservedFieldIDsBeforeReassignment(t *testing.T) {
 			assert.Contains(t, err.Error(), "reserved metadata column ID")
 		})
 	}
+}
+
+// With two fields at ID 0, day(created_at) could randomly become
+// day(event) (#2393).
+func TestNewMetadataRejectsDuplicateFieldIDs(t *testing.T) {
+	newInput := func(createdAtID, eventID int) (*iceberg.Schema, iceberg.PartitionSpec) {
+		sc := iceberg.NewSchema(0,
+			iceberg.NestedField{ID: createdAtID, Name: "created_at", Type: iceberg.PrimitiveTypes.TimestampTz, Required: true},
+			iceberg.NestedField{ID: eventID, Name: "event", Type: iceberg.PrimitiveTypes.String, Required: true},
+		)
+		spec, err := iceberg.NewPartitionSpecOpts(
+			iceberg.AddPartitionFieldByName("created_at", "created_day", iceberg.DayTransform{}, sc, nil))
+		require.NoError(t, err)
+
+		return sc, spec
+	}
+
+	t.Run("partitioned, both ids unset", func(t *testing.T) {
+		sc, spec := newInput(0, 0)
+		_, err := NewMetadata(sc, &spec, UnsortedSortOrder, "s3://bucket/table", nil)
+		require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+		assert.ErrorContains(t, err, "multiple fields for id 0: created_at and event")
+	})
+
+	t.Run("unpartitioned, both ids unset", func(t *testing.T) {
+		sc, _ := newInput(0, 0)
+		_, err := NewMetadata(sc, iceberg.UnpartitionedSpec, UnsortedSortOrder, "s3://bucket/table", nil)
+		require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+	})
+
+	t.Run("single zero id keeps the partition on its column", func(t *testing.T) {
+		sc, spec := newInput(0, 1)
+		meta, err := NewMetadata(sc, &spec, UnsortedSortOrder, "s3://bucket/table", nil)
+		require.NoError(t, err)
+
+		gotSpec := meta.PartitionSpec()
+		col, ok := meta.CurrentSchema().FindColumnName(gotSpec.Field(0).FirstSourceID())
+		require.True(t, ok)
+		assert.Equal(t, "created_at", col)
+	})
+
+	// Sort source IDs go through the same lookup. A REST create-table request
+	// can carry source-id 0 (e.g. Spark numbers new columns from zero), so the
+	// order is decoded unbound.
+	sortOnFirstColumn := func(t *testing.T) SortOrder {
+		var order UnboundSortOrder
+		require.NoError(t, json.Unmarshal([]byte(`{"order-id": 1, "fields": [
+			{"transform": "identity", "source-id": 0, "direction": "asc", "null-order": "nulls-first"}]}`), &order))
+
+		return order.SortOrder
+	}
+
+	t.Run("sorted, both ids unset", func(t *testing.T) {
+		sc, _ := newInput(0, 0)
+		_, err := NewMetadata(sc, iceberg.UnpartitionedSpec, sortOnFirstColumn(t), "s3://bucket/table", nil)
+		require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+		assert.ErrorContains(t, err, "multiple fields for id 0: created_at and event")
+	})
+
+	t.Run("single zero id keeps the sort on its column", func(t *testing.T) {
+		sc, _ := newInput(0, 1)
+		meta, err := NewMetadata(sc, iceberg.UnpartitionedSpec, sortOnFirstColumn(t), "s3://bucket/table", nil)
+		require.NoError(t, err)
+
+		col, ok := meta.CurrentSchema().FindColumnName(meta.SortOrder().Field(0).SourceIDs[0])
+		require.True(t, ok)
+		assert.Equal(t, "created_at", col)
+	})
 }
 
 // TestCheckSchemaCompatibilityReservedIDs locks in the deliberate asymmetry of

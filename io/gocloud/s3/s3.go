@@ -45,13 +45,6 @@ import (
 
 // ParseAWSConfig parses S3 properties and returns a configuration.
 func ParseAWSConfig(ctx context.Context, props map[string]string) (*aws.Config, error) {
-	// Remote S3 request signing is not implemented yet.
-	if v, ok := props[io.S3RemoteSigningEnabled]; ok {
-		if enabled, err := strconv.ParseBool(v); err == nil && enabled {
-			return nil, errors.New("remote S3 request signing is not supported")
-		}
-	}
-
 	opts := []func(*config.LoadOptions) error{}
 	var httpClient *awshttp.BuildableClient
 
@@ -72,7 +65,9 @@ func ParseAWSConfig(ctx context.Context, props map[string]string) (*aws.Config, 
 	if err := internalaws.ValidateStaticCredentials(io.S3AccessKeyID, io.S3SecretAccessKey, io.S3SessionToken, accessKey, secretAccessKey, token); err != nil {
 		return nil, err
 	}
-	if accessKey != "" {
+	if remoteSigningEnabled(props) {
+		opts = append(opts, config.WithCredentialsProvider(aws.AnonymousCredentials{}))
+	} else if accessKey != "" {
 		opts = append(opts, config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(
 			accessKey, secretAccessKey, token,
 		)))
@@ -213,6 +208,10 @@ func resolveS3AWSConfig(ctx context.Context, props map[string]string) (*aws.Conf
 		)
 	}
 
+	if remoteSigningEnabled(props) {
+		cfg.Credentials = aws.AnonymousCredentials{}
+	}
+
 	return &cfg, nil
 }
 
@@ -227,6 +226,12 @@ func createS3Bucket(ctx context.Context, parsed *url.URL, props map[string]strin
 	// the S3 transport tuning applied (see applyS3TransportTuning).
 	if awscfg.HTTPClient == nil {
 		awscfg.HTTPClient = newS3BuildableClient()
+	}
+
+	if remoteSigningEnabled(props) {
+		if err := configureRemoteSigning(ctx, props, awscfg); err != nil {
+			return nil, err
+		}
 	}
 
 	endpoint, ok := props[io.S3EndpointURL]
@@ -249,12 +254,21 @@ func createS3Bucket(ctx context.Context, parsed *url.URL, props map[string]strin
 			o.APIOptions = append(o.APIOptions, stripS3InputChecksumAlgorithm)
 			o.APIOptions = append(o.APIOptions, stripGCSIncompatibleSignedHeaders)
 		}
+		if remoteSigningEnabled(props) {
+			o.RequestChecksumCalculation = aws.RequestChecksumCalculationWhenRequired
+			o.APIOptions = append(o.APIOptions, disableRemoteSigningUploadChecksums)
+			applyRemoteSigningOptions(o)
+		}
 		o.UsePathStyle = resolveUsePathStyle(endpoint, props)
 		o.DisableLogOutputChecksumValidationSkipped = true
 	})
 
 	// Create a *blob.Bucket.
-	bucket, err := s3blob.OpenBucketV2(ctx, client, parsed.Host, nil)
+	var bucketOpts *s3blob.Options
+	if remoteSigningEnabled(props) {
+		bucketOpts = &s3blob.Options{RequestChecksumCalculation: aws.RequestChecksumCalculationWhenRequired}
+	}
+	bucket, err := s3blob.OpenBucketV2(ctx, client, parsed.Host, bucketOpts)
 	if err != nil {
 		return nil, err
 	}

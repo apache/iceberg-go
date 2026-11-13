@@ -61,18 +61,33 @@ func newManifestEvaluator(spec iceberg.PartitionSpec, schema *iceberg.Schema, pa
 		return nil, err
 	}
 
-	return (&manifestEvalVisitor{partitionFilter: boundFilter}).Eval, nil
+	return (&manifestEvalVisitor{
+		partitionFilter:     boundFilter,
+		partitionFieldCount: spec.NumFields(),
+	}).Eval, nil
 }
 
 type manifestEvalVisitor struct {
-	partitionFields []iceberg.FieldSummary
-	partitionFilter iceberg.BooleanExpression
+	partitionFields     []iceberg.FieldSummary
+	partitionFilter     iceberg.BooleanExpression
+	partitionFieldCount int
 }
 
 func (m *manifestEvalVisitor) Eval(manifest iceberg.ManifestFile) (bool, error) {
 	parts := manifestFilePartitions(manifest)
-	if len(parts) == 0 {
+	if len(parts) == 0 || len(parts) != m.partitionFieldCount {
+		// Summaries are positional. An incomplete or oversized list cannot
+		// safely exclude a data or delete manifest.
 		return rowsMightMatch, nil
+	}
+	for _, part := range parts {
+		missingNonNullBounds := part.LowerBound == nil && !part.ContainsNull &&
+			(part.ContainsNaN == nil || !*part.ContainsNaN)
+		if missingNonNullBounds || (part.LowerBound == nil) != (part.UpperBound == nil) {
+			// Legacy empty-string partitions can have missing bounds (#2407).
+			// Keep both data and delete manifests when the summary is inconclusive.
+			return rowsMightMatch, nil
+		}
 	}
 
 	// Use a per-call visitor so concurrent callers of the same cached Eval
@@ -94,10 +109,10 @@ func (m *manifestEvalVisitor) Eval(manifest iceberg.ManifestFile) (bool, error) 
 
 func removeBoundCmp[T iceberg.LiteralType](bound iceberg.Literal, vals []iceberg.Literal, cmpToDelete int) []iceberg.Literal {
 	val := bound.(iceberg.TypedLiteral[T])
-	cmp := val.Comparator()
+	cmp := getPredicateCmpLiteral(val)
 
 	return slices.DeleteFunc(vals, func(v iceberg.Literal) bool {
-		return cmp(val.Value(), v.(iceberg.TypedLiteral[T]).Value()) == cmpToDelete
+		return cmp(val, v) == cmpToDelete
 	})
 }
 
@@ -135,10 +150,10 @@ func removeBoundCheck(bound iceberg.Literal, vals []iceberg.Literal, toDelete in
 
 func allBoundCmp[T iceberg.LiteralType](bound iceberg.Literal, set iceberg.Set[iceberg.Literal], want int) bool {
 	val := bound.(iceberg.TypedLiteral[T])
-	cmp := val.Comparator()
+	cmp := getPredicateCmpLiteral(val)
 
 	return set.All(func(e iceberg.Literal) bool {
-		return cmp(val.Value(), e.(iceberg.TypedLiteral[T]).Value()) == want
+		return cmp(val, e) == want
 	})
 }
 
@@ -232,9 +247,53 @@ func (m *manifestEvalVisitor) visitIn(term iceberg.BoundTerm, literals iceberg.S
 	return rowsMightMatch
 }
 
+// uniqueValue returns a partition value only when the manifest summary proves
+// that every partition has that value. Unknown NaN information is not sufficient
+// for floating-point fields because NaNs are excluded from the bounds.
+func (m *manifestEvalVisitor) uniqueValue(term iceberg.BoundTerm) iceberg.Literal {
+	field := m.partitionFields[term.Ref().Pos()]
+	if field.ContainsNull || field.LowerBound == nil || field.UpperBound == nil {
+		return nil
+	}
+	// Different encodings may still compare equal, so keep those manifests.
+	if !slices.Equal(*field.LowerBound, *field.UpperBound) {
+		return nil
+	}
+
+	switch term.Ref().Type().(type) {
+	case iceberg.Float32Type, iceberg.Float64Type:
+		if field.ContainsNaN == nil || *field.ContainsNaN {
+			return nil
+		}
+	}
+
+	// Bounds are only an optimization here. If decoding fails, do not prune.
+	lower, err := iceberg.LiteralFromBytes(term.Ref().Type(), *field.LowerBound)
+	if err != nil {
+		return nil
+	}
+	// Go's literal set treats signed zeros as equal, but Arrow's is_in row
+	// filter can distinguish them. Keep zero-valued float partitions for the
+	// row filter to evaluate.
+	switch value := lower.(type) {
+	case iceberg.Float32Literal:
+		if value == 0 {
+			return nil
+		}
+	case iceberg.Float64Literal:
+		if value == 0 {
+			return nil
+		}
+	}
+
+	return lower
+}
+
 func (m *manifestEvalVisitor) VisitNotIn(term iceberg.BoundTerm, literals iceberg.Set[iceberg.Literal]) bool {
-	// because the bounds are not necessarily a min or max value, this cannot be answered using them
-	// notIn(col, {X, ...}) with (X, Y) doesn't guarantee that X is a value in col
+	if value := m.uniqueValue(term); value != nil && literals.Contains(value) {
+		return rowsCannotMatch
+	}
+
 	return rowsMightMatch
 }
 
@@ -299,6 +358,32 @@ func getCmp[T iceberg.LiteralType](b iceberg.TypedLiteral[T]) func(iceberg.Liter
 	}
 }
 
+// Predicate comparisons follow Arrow's IEEE equality for signed zeros. Bounds
+// and sorting still use the literal's total-order comparator.
+func getFloatPredicateCmp[T float32 | float64](boundary iceberg.TypedLiteral[T]) func(iceberg.Literal, iceberg.Literal) int {
+	compare := boundary.Comparator()
+
+	return func(left, right iceberg.Literal) int {
+		a, b := left.(iceberg.TypedLiteral[T]).Value(), right.(iceberg.TypedLiteral[T]).Value()
+		if a == 0 && b == 0 {
+			return 0
+		}
+
+		return compare(a, b)
+	}
+}
+
+func getPredicateCmpLiteral(boundary iceberg.Literal) func(iceberg.Literal, iceberg.Literal) int {
+	switch value := boundary.(type) {
+	case iceberg.TypedLiteral[float32]:
+		return getFloatPredicateCmp(value)
+	case iceberg.TypedLiteral[float64]:
+		return getFloatPredicateCmp(value)
+	default:
+		return getCmpLiteral(boundary)
+	}
+}
+
 func getCmpLiteral(boundary iceberg.Literal) func(iceberg.Literal, iceberg.Literal) int {
 	switch l := boundary.(type) {
 	case iceberg.TypedLiteral[bool]:
@@ -347,8 +432,9 @@ func compareLiteralValues[T iceberg.LiteralType](left, right iceberg.Literal) in
 	return leftValue.Comparator()(leftValue.Value(), rightValue.Value())
 }
 
-// Keep this dispatch aligned with getCmpLiteral, removeBoundCheck, and
-// allBoundCheck when adding a new literal type.
+// compareBoundLiterals compares a file or manifest bound with an IN predicate
+// extremum. Treating opposite signed zeros as equal keeps pruning conservative.
+// Keep this dispatch aligned with getCmpLiteral when adding a literal type.
 func compareBoundLiterals(left, right iceberg.Literal) int {
 	switch left.(type) {
 	case iceberg.TypedLiteral[bool]:
@@ -357,10 +443,8 @@ func compareBoundLiterals(left, right iceberg.Literal) int {
 		return compareLiteralValues[int32](left, right)
 	case iceberg.TypedLiteral[int64]:
 		return compareLiteralValues[int64](left, right)
-	case iceberg.TypedLiteral[float32]:
-		return compareLiteralValues[float32](left, right)
-	case iceberg.TypedLiteral[float64]:
-		return compareLiteralValues[float64](left, right)
+	case iceberg.TypedLiteral[float32], iceberg.TypedLiteral[float64]:
+		return getPredicateCmpLiteral(left)(left, right)
 	case iceberg.TypedLiteral[iceberg.Date]:
 		return compareLiteralValues[iceberg.Date](left, right)
 	case iceberg.TypedLiteral[iceberg.Time]:
@@ -400,7 +484,7 @@ func (m *manifestEvalVisitor) VisitEqual(term iceberg.BoundTerm, lit iceberg.Lit
 		panic(err)
 	}
 
-	cmp := getCmpLiteral(lower)
+	cmp := getPredicateCmpLiteral(lower)
 	if cmp(lower, lit) == 1 {
 		return rowsCannotMatch
 	}
@@ -418,8 +502,10 @@ func (m *manifestEvalVisitor) VisitEqual(term iceberg.BoundTerm, lit iceberg.Lit
 }
 
 func (m *manifestEvalVisitor) VisitNotEqual(term iceberg.BoundTerm, lit iceberg.Literal) bool {
-	// because bounds are not necessarily a min or max, this cannot be answered
-	// using them. notEq(col, X) with (X, Y) doesn't guarantee X is a value in col
+	if value := m.uniqueValue(term); value != nil && getCmpLiteral(value)(value, lit) == 0 {
+		return rowsCannotMatch
+	}
+
 	return rowsMightMatch
 }
 
@@ -436,7 +522,7 @@ func (m *manifestEvalVisitor) VisitGreaterEqual(term iceberg.BoundTerm, lit iceb
 		panic(err)
 	}
 
-	if getCmpLiteral(upper)(lit, upper) == 1 {
+	if getPredicateCmpLiteral(upper)(lit, upper) == 1 {
 		return rowsCannotMatch
 	}
 
@@ -456,7 +542,7 @@ func (m *manifestEvalVisitor) VisitGreater(term iceberg.BoundTerm, lit iceberg.L
 		panic(err)
 	}
 
-	if getCmpLiteral(upper)(lit, upper) >= 0 {
+	if getPredicateCmpLiteral(upper)(lit, upper) >= 0 {
 		return rowsCannotMatch
 	}
 
@@ -476,7 +562,7 @@ func (m *manifestEvalVisitor) VisitLessEqual(term iceberg.BoundTerm, lit iceberg
 		panic(err)
 	}
 
-	if getCmpLiteral(lower)(lit, lower) == -1 {
+	if getPredicateCmpLiteral(lower)(lit, lower) == -1 {
 		return rowsCannotMatch
 	}
 
@@ -496,7 +582,7 @@ func (m *manifestEvalVisitor) VisitLess(term iceberg.BoundTerm, lit iceberg.Lite
 		panic(err)
 	}
 
-	if getCmpLiteral(lower)(lit, lower) <= 0 {
+	if getPredicateCmpLiteral(lower)(lit, lower) <= 0 {
 		return rowsCannotMatch
 	}
 
@@ -1110,7 +1196,7 @@ func (m *inclusiveMetricsEval) VisitLess(t iceberg.BoundTerm, lit iceberg.Litera
 			return rowsMightMatch
 		}
 
-		if getCmpLiteral(lowerBound)(lowerBound, lit) >= 0 {
+		if getPredicateCmpLiteral(lowerBound)(lowerBound, lit) >= 0 {
 			return rowsCannotMatch
 		}
 	}
@@ -1131,7 +1217,7 @@ func (m *inclusiveMetricsEval) VisitLessEqual(t iceberg.BoundTerm, lit iceberg.L
 			return rowsMightMatch
 		}
 
-		if getCmpLiteral(lowerBound)(lowerBound, lit) > 0 {
+		if getPredicateCmpLiteral(lowerBound)(lowerBound, lit) > 0 {
 			return rowsCannotMatch
 		}
 	}
@@ -1147,7 +1233,7 @@ func (m *inclusiveMetricsEval) VisitGreater(t iceberg.BoundTerm, lit iceberg.Lit
 	}
 
 	if upperBound, ok := m.boundFor(t, m.upperBounds[fieldID]); ok {
-		if getCmpLiteral(upperBound)(upperBound, lit) <= 0 {
+		if getPredicateCmpLiteral(upperBound)(upperBound, lit) <= 0 {
 			if m.isNan(upperBound) {
 				return rowsMightMatch
 			}
@@ -1167,7 +1253,7 @@ func (m *inclusiveMetricsEval) VisitGreaterEqual(t iceberg.BoundTerm, lit iceber
 	}
 
 	if upperBound, ok := m.boundFor(t, m.upperBounds[fieldID]); ok {
-		if getCmpLiteral(upperBound)(upperBound, lit) < 0 {
+		if getPredicateCmpLiteral(upperBound)(upperBound, lit) < 0 {
 			if m.isNan(upperBound) {
 				return rowsMightMatch
 			}
@@ -1191,7 +1277,7 @@ func (m *inclusiveMetricsEval) VisitEqual(t iceberg.BoundTerm, lit iceberg.Liter
 			return rowsMightMatch
 		}
 
-		if getCmpLiteral(lowerBound)(lowerBound, lit) == 1 {
+		if getPredicateCmpLiteral(lowerBound)(lowerBound, lit) == 1 {
 			return rowsCannotMatch
 		}
 	}
@@ -1201,7 +1287,7 @@ func (m *inclusiveMetricsEval) VisitEqual(t iceberg.BoundTerm, lit iceberg.Liter
 			return rowsMightMatch
 		}
 
-		if getCmpLiteral(upperBound)(upperBound, lit) == -1 {
+		if getPredicateCmpLiteral(upperBound)(upperBound, lit) == -1 {
 			return rowsCannotMatch
 		}
 	}
@@ -1578,7 +1664,7 @@ func (m *strictMetricsEval) VisitLess(t iceberg.BoundTerm, lit iceberg.Literal) 
 			panic(err)
 		}
 
-		if getCmpLiteral(upperBound)(upperBound, lit) < 0 {
+		if getPredicateCmpLiteral(upperBound)(upperBound, lit) < 0 {
 			return rowsMustMatch
 		}
 	}
@@ -1600,7 +1686,7 @@ func (m *strictMetricsEval) VisitLessEqual(t iceberg.BoundTerm, lit iceberg.Lite
 			panic(err)
 		}
 
-		if getCmpLiteral(upperBound)(upperBound, lit) <= 0 {
+		if getPredicateCmpLiteral(upperBound)(upperBound, lit) <= 0 {
 			return rowsMustMatch
 		}
 	}
@@ -1627,7 +1713,7 @@ func (m *strictMetricsEval) VisitGreater(t iceberg.BoundTerm, lit iceberg.Litera
 			return rowsMightNotMatch
 		}
 
-		if getCmpLiteral(lowerBound)(lowerBound, lit) > 0 {
+		if getPredicateCmpLiteral(lowerBound)(lowerBound, lit) > 0 {
 			return rowsMustMatch
 		}
 	}
@@ -1654,7 +1740,7 @@ func (m *strictMetricsEval) VisitGreaterEqual(t iceberg.BoundTerm, lit iceberg.L
 			return rowsMightNotMatch
 		}
 
-		if getCmpLiteral(lowerBound)(lowerBound, lit) >= 0 {
+		if getPredicateCmpLiteral(lowerBound)(lowerBound, lit) >= 0 {
 			return rowsMustMatch
 		}
 	}
@@ -1682,7 +1768,7 @@ func (m *strictMetricsEval) VisitEqual(t iceberg.BoundTerm, lit iceberg.Literal)
 		if err != nil {
 			panic(err)
 		}
-		if getCmpLiteral(lowerBound)(lowerBound, lit) != 0 || getCmpLiteral(upperBound)(upperBound, lit) != 0 {
+		if getPredicateCmpLiteral(lowerBound)(lowerBound, lit) != 0 || getPredicateCmpLiteral(upperBound)(upperBound, lit) != 0 {
 			return rowsMightNotMatch
 		} else {
 			return rowsMustMatch
@@ -1711,7 +1797,7 @@ func (m *strictMetricsEval) VisitNotEqual(t iceberg.BoundTerm, lit iceberg.Liter
 			return rowsMightNotMatch
 		}
 
-		cmp = getCmpLiteral(lowerBound)
+		cmp = getPredicateCmpLiteral(lowerBound)
 		if cmp(lowerBound, lit) == 1 {
 			return rowsMustMatch
 		}
@@ -1727,7 +1813,7 @@ func (m *strictMetricsEval) VisitNotEqual(t iceberg.BoundTerm, lit iceberg.Liter
 			return rowsMightNotMatch
 		}
 
-		cmp = getCmpLiteral(upperBound)
+		cmp = getPredicateCmpLiteral(upperBound)
 		if cmp(upperBound, lit) == -1 {
 			return rowsMustMatch
 		}
@@ -1752,6 +1838,11 @@ func (m *strictMetricsEval) VisitIn(t iceberg.BoundTerm, s iceberg.Set[iceberg.L
 		if err != nil {
 			panic(err)
 		}
+		if isFloatZero(lowerBound) {
+			// Literal sets use Go equality, but Arrow's IN kernel distinguishes
+			// signed zeros. Do not use set membership to prove every row matches.
+			return rowsMightNotMatch
+		}
 		if !s.Contains(lowerBound) {
 			return rowsMightNotMatch
 		}
@@ -1759,6 +1850,9 @@ func (m *strictMetricsEval) VisitIn(t iceberg.BoundTerm, s iceberg.Set[iceberg.L
 		upperBound, err := iceberg.LiteralFromBytes(field.Type, upperBytes)
 		if err != nil {
 			panic(err)
+		}
+		if isFloatZero(upperBound) {
+			return rowsMightNotMatch
 		}
 		if !s.Contains(upperBound) {
 			return rowsMightNotMatch
@@ -1772,6 +1866,17 @@ func (m *strictMetricsEval) VisitIn(t iceberg.BoundTerm, s iceberg.Set[iceberg.L
 	}
 
 	return rowsMightNotMatch
+}
+
+func isFloatZero(lit iceberg.Literal) bool {
+	switch v := lit.(type) {
+	case iceberg.TypedLiteral[float32]:
+		return v.Value() == 0
+	case iceberg.TypedLiteral[float64]:
+		return v.Value() == 0
+	default:
+		return false
+	}
 }
 
 func (m *strictMetricsEval) VisitNotIn(t iceberg.BoundTerm, s iceberg.Set[iceberg.Literal]) bool {
