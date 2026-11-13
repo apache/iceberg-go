@@ -356,7 +356,7 @@ func getRecordPartitions(spec iceberg.PartitionSpec, schema *iceberg.Schema, rec
 }
 
 func newPartitionExtractionPlan(spec iceberg.PartitionSpec, schema *iceberg.Schema, recordSchema *arrow.Schema) (*partitionExtractionPlan, error) {
-	partitionFields := spec.PartitionType(schema).FieldList
+	partitionFields := spec.PartitionType(schema).Fields()
 	partitionFieldsInfo := make([]partitionFieldInfo, len(partitionFields))
 	pathPlan := partitionPathPlan{fields: make([]partitionPathField, len(partitionFields))}
 	specFieldsByID := make(map[int]iceberg.PartitionField, spec.NumFields())

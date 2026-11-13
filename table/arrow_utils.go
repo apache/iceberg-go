@@ -264,7 +264,7 @@ func (convertToIceberg) Schema(_ *arrow.Schema, result iceberg.NestedField) iceb
 
 func (convertToIceberg) Struct(_ *arrow.StructType, results []iceberg.NestedField) iceberg.NestedField {
 	return iceberg.NestedField{
-		Type: &iceberg.StructType{FieldList: results},
+		Type: iceberg.NewStructType(results...),
 	}
 }
 
@@ -287,11 +287,7 @@ func (c convertToIceberg) List(dt arrow.ListLikeType, elemResult iceberg.NestedF
 	elemID := c.fieldID(elemField)
 
 	return iceberg.NestedField{
-		Type: &iceberg.ListType{
-			ElementID:       elemID,
-			Element:         elemResult.Type,
-			ElementRequired: !elemField.Nullable,
-		},
+		Type: iceberg.NewListType(elemID, elemResult.Type, !elemField.Nullable),
 	}
 }
 
@@ -300,13 +296,7 @@ func (c convertToIceberg) Map(m *arrow.MapType, keyResult, valueResult iceberg.N
 	keyID, valID := c.fieldID(keyField), c.fieldID(valField)
 
 	return iceberg.NestedField{
-		Type: &iceberg.MapType{
-			KeyID:         keyID,
-			KeyType:       keyResult.Type,
-			ValueID:       valID,
-			ValueType:     valueResult.Type,
-			ValueRequired: !valField.Nullable,
-		},
+		Type: iceberg.NewMapType(keyID, keyResult.Type, valID, valueResult.Type, !valField.Nullable),
 	}
 }
 
@@ -481,7 +471,7 @@ func ArrowTypeToIceberg(dt arrow.DataType, downcastNsTimestamp bool) (iceberg.Ty
 		return nil, err
 	}
 
-	return out.Type.(*iceberg.StructType).FieldList[0].Type, nil
+	return out.Type.(*iceberg.StructType).Field(0).Type, nil
 }
 
 func ArrowSchemaToIceberg(sc *arrow.Schema, downcastNsTimestamp bool, nameMapping iceberg.NameMapping) (*iceberg.Schema, error) {
@@ -526,7 +516,7 @@ func ArrowSchemaToIcebergWithOptions(sc *arrow.Schema, opts ArrowToIcebergOption
 			return nil, err
 		}
 
-		return iceberg.NewSchema(0, out.Type.(*iceberg.StructType).FieldList...), nil
+		return iceberg.NewSchema(0, out.Type.(*iceberg.StructType).Fields()...), nil
 	case opts.NameMapping != nil:
 		schemaWithoutIDs, err := arrowToSchemaWithoutIDs(sc, opts.DowncastNsTimestamp)
 		if err != nil {
@@ -558,7 +548,7 @@ func arrowToSchemaWithoutIDs(sc *arrow.Schema, downcastNsTimestamp bool) (*icebe
 		return nil, err
 	}
 
-	schemaWithoutIDs := iceberg.NewSchema(0, withoutIDs.Type.(*iceberg.StructType).FieldList...)
+	schemaWithoutIDs := iceberg.NewSchema(0, withoutIDs.Type.(*iceberg.StructType).Fields()...)
 
 	return schemaWithoutIDs, nil
 }
@@ -1269,9 +1259,9 @@ func (a *arrowProjectionVisitor) Struct(st iceberg.StructType, structArr arrow.A
 		return nil
 	}
 
-	fieldArrs := make([]arrow.Array, len(st.FieldList))
-	fields := make([]arrow.Field, len(st.FieldList))
-	for i, field := range st.FieldList {
+	fieldArrs := make([]arrow.Array, st.NumFields())
+	fields := make([]arrow.Field, st.NumFields())
+	for i, field := range st.Fields() {
 		arr := fieldResults[i]
 		if arr != nil {
 			if ownsChildResult(arr) {
@@ -1743,7 +1733,7 @@ func statsPlanFieldCount(field iceberg.NestedField) int {
 	switch typ := field.Type.(type) {
 	case *iceberg.StructType:
 		count := 0
-		for _, nestedField := range typ.FieldList {
+		for _, nestedField := range typ.Fields() {
 			count += statsPlanFieldCount(nestedField)
 		}
 
@@ -1760,7 +1750,7 @@ func statsPlanFieldCount(field iceberg.NestedField) int {
 func collectStatsPlanField(visitor *arrowStatsCollector, result map[int]tblutils.StatisticsCollector, field iceberg.NestedField, isNested bool) {
 	switch typ := field.Type.(type) {
 	case *iceberg.StructType:
-		for _, nestedField := range typ.FieldList {
+		for _, nestedField := range typ.Fields() {
 			collectStatsPlanField(visitor, result, nestedField, true)
 		}
 	case *iceberg.ListType:

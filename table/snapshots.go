@@ -646,12 +646,12 @@ func (s *SnapshotSummaryCollector) partitionPath(partition map[int]any, sc *iceb
 	plan, ok := s.partitionPathPlans[key]
 	if !ok {
 		partitionType := spec.PartitionType(sc)
-		pathPlan := partitionPathPlan{fields: make([]partitionPathField, 0, len(partitionType.FieldList))}
+		pathPlan := partitionPathPlan{fields: make([]partitionPathField, 0, partitionType.NumFields())}
 		for i, field := range spec.Fields() {
 			pathField := partitionPathField{
 				escapedName: field.EscapedName(),
 				transform:   field.Transform,
-				resultType:  partitionType.FieldList[i].Type,
+				resultType:  partitionType.Field(i).Type,
 			}
 			pathPlan.fields = append(pathPlan.fields, pathField)
 			pathPlan.estimatedSize += len(pathField.escapedName) + 20

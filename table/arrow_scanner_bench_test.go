@@ -42,10 +42,10 @@ func benchmarkScanSchema(fieldCount int) *iceberg.Schema {
 		fields[i] = iceberg.NestedField{
 			ID:   baseID,
 			Name: fmt.Sprintf("field_%d", i),
-			Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
-				{ID: baseID + 1, Name: "value", Type: iceberg.PrimitiveTypes.String},
-				{ID: baseID + 2, Name: "count", Type: iceberg.PrimitiveTypes.Int64},
-			}},
+			Type: iceberg.NewStructType(
+				iceberg.NestedField{ID: baseID + 1, Name: "value", Type: iceberg.PrimitiveTypes.String},
+				iceberg.NestedField{ID: baseID + 2, Name: "count", Type: iceberg.PrimitiveTypes.Int64},
+			),
 		}
 	}
 
@@ -516,16 +516,14 @@ func benchmarkPhysicalSchemaCases() []struct {
 		{ID: 5, Name: "price", Type: iceberg.MustDecimalTypeOf(20, 4)},
 		{ID: 6, Name: "created", Type: iceberg.PrimitiveTypes.TimestampTzNs},
 		{ID: 7, Name: "payload", Type: iceberg.VariantType{}},
-		{ID: 8, Name: "tags", Type: &iceberg.ListType{
-			ElementID: 9, Element: iceberg.PrimitiveTypes.String,
-		}},
+		{ID: 8, Name: "tags", Type: iceberg.NewListType(9, iceberg.PrimitiveTypes.String, false)},
 	}
 	nestedSchema := func(depth int) *iceberg.Schema {
 		var typ iceberg.Type = iceberg.PrimitiveTypes.Int64
 		for id := depth + 1; id > 1; id-- {
-			typ = &iceberg.StructType{FieldList: []iceberg.NestedField{
-				{ID: id, Name: "child", Type: typ},
-			}}
+			typ = iceberg.NewStructType(
+				iceberg.NestedField{ID: id, Name: "child", Type: typ},
+			)
 		}
 
 		return iceberg.NewSchema(1, iceberg.NestedField{ID: 1, Name: "root", Type: typ})
@@ -539,7 +537,7 @@ func benchmarkPhysicalSchemaCases() []struct {
 		{"nested_depth_3", nestedSchema(3)},
 		{"nested_depth_8", nestedSchema(8)},
 		{"wide_struct_100", iceberg.NewSchema(1, iceberg.NestedField{
-			ID: 1, Name: "root", Type: &iceberg.StructType{FieldList: wideFields},
+			ID: 1, Name: "root", Type: iceberg.NewStructType(wideFields...),
 		})},
 		{"mixed_types", iceberg.NewSchema(1, mixedFields...)},
 	}

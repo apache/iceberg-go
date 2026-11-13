@@ -166,7 +166,7 @@ func (r *requestedArrowFieldResolver) visit(fields []iceberg.NestedField) {
 		}
 
 		if nested, ok := field.Type.(*iceberg.StructType); ok {
-			r.visit(nested.FieldList)
+			r.visit(nested.Fields())
 		}
 
 		r.path = r.path[:parentLen]
@@ -592,9 +592,7 @@ func mergeEqualityProjectionFields(
 			existingStruct, existingIsStruct := fields[i].Type.(*iceberg.StructType)
 			projectedStruct, projectedIsStruct := projectedField.Type.(*iceberg.StructType)
 			if existingIsStruct && projectedIsStruct {
-				fields[i].Type = &iceberg.StructType{
-					FieldList: mergeEqualityProjectionFields(existingStruct.FieldList, projectedStruct.FieldList),
-				}
+				fields[i].Type = iceberg.NewStructType(mergeEqualityProjectionFields(existingStruct.Fields(), projectedStruct.Fields())...)
 			}
 
 			merged = true

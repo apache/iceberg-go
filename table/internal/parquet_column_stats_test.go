@@ -64,17 +64,17 @@ func TestResolveParquetStatsColumnPaths(t *testing.T) {
 	schema := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32},
 		iceberg.NestedField{ID: 2, Name: "display name", Type: iceberg.PrimitiveTypes.String},
-		iceberg.NestedField{ID: 3, Name: "parent", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
-			{ID: 4, Name: "child", Type: iceberg.PrimitiveTypes.Int32},
-		}}},
+		iceberg.NestedField{ID: 3, Name: "parent", Type: iceberg.NewStructType(
+			iceberg.NestedField{ID: 4, Name: "child", Type: iceberg.PrimitiveTypes.Int32},
+		)},
 		iceberg.NestedField{ID: 5, Name: "items", Type: iceberg.NewListType(6, iceberg.PrimitiveTypes.Int32, false)},
 		iceberg.NestedField{ID: 7, Name: "properties", Type: iceberg.NewMapType(8, iceberg.PrimitiveTypes.String, 9, iceberg.PrimitiveTypes.Int32, false)},
-		iceberg.NestedField{ID: 10, Name: "entries", Type: iceberg.NewListType(11, &iceberg.StructType{FieldList: []iceberg.NestedField{
-			{ID: 12, Name: "price", Type: iceberg.PrimitiveTypes.Int32},
-		}}, false)},
-		iceberg.NestedField{ID: 13, Name: "lookup", Type: iceberg.NewMapType(14, iceberg.PrimitiveTypes.String, 15, &iceberg.StructType{FieldList: []iceberg.NestedField{
-			{ID: 16, Name: "price", Type: iceberg.PrimitiveTypes.Int32},
-		}}, false)},
+		iceberg.NestedField{ID: 10, Name: "entries", Type: iceberg.NewListType(11, iceberg.NewStructType(
+			iceberg.NestedField{ID: 12, Name: "price", Type: iceberg.PrimitiveTypes.Int32},
+		), false)},
+		iceberg.NestedField{ID: 13, Name: "lookup", Type: iceberg.NewMapType(14, iceberg.PrimitiveTypes.String, 15, iceberg.NewStructType(
+			iceberg.NestedField{ID: 16, Name: "price", Type: iceberg.PrimitiveTypes.Int32},
+		), false)},
 	)
 	fileSchema, err := iceberg.SanitizeColumnNames(schema)
 	require.NoError(t, err)
@@ -205,16 +205,16 @@ func TestResolveParquetStatsColumnPathsRenamedProjection(t *testing.T) {
 	tableSchema := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "renamed", Type: iceberg.PrimitiveTypes.Int32},
 		iceberg.NestedField{ID: 2, Name: "only in table", Type: iceberg.PrimitiveTypes.Int32},
-		iceberg.NestedField{ID: 4, Name: "parent", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
-			{ID: 5, Name: "renamed child", Type: iceberg.PrimitiveTypes.Int32},
-		}}},
+		iceberg.NestedField{ID: 4, Name: "parent", Type: iceberg.NewStructType(
+			iceberg.NestedField{ID: 5, Name: "renamed child", Type: iceberg.PrimitiveTypes.Int32},
+		)},
 	)
 	fileSchema := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "old_name", Type: iceberg.PrimitiveTypes.Int32},
 		iceberg.NestedField{ID: 3, Name: "file_only", Type: iceberg.PrimitiveTypes.Int32},
-		iceberg.NestedField{ID: 4, Name: "parent", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
-			{ID: 5, Name: "original_child", Type: iceberg.PrimitiveTypes.Int32},
-		}}},
+		iceberg.NestedField{ID: 4, Name: "parent", Type: iceberg.NewStructType(
+			iceberg.NestedField{ID: 5, Name: "original_child", Type: iceberg.PrimitiveTypes.Int32},
+		)},
 	)
 	mapping, err := internal.GetFileFormat(iceberg.ParquetFile).PathToIDMapping(fileSchema)
 	require.NoError(t, err)

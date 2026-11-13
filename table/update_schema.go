@@ -725,7 +725,7 @@ func (u *UpdateSchema) unionField(path []string, newField iceberg.NestedField) e
 
 	switch t := newField.Type.(type) {
 	case *iceberg.StructType:
-		for _, child := range t.FieldList {
+		for _, child := range t.Fields() {
 			if err := u.unionField(childPath(path, child.Name), child); err != nil {
 				return err
 			}
@@ -901,7 +901,7 @@ func (u *UpdateSchema) setWriteDefault(existing iceberg.NestedField, fieldType i
 func validateNestedDefaults(t iceberg.Type) error {
 	switch typ := t.(type) {
 	case *iceberg.StructType:
-		for _, f := range typ.FieldList {
+		for _, f := range typ.Fields() {
 			if err := validateFieldDefaults(f); err != nil {
 				return err
 			}
@@ -1191,7 +1191,7 @@ func (u *UpdateSchema) Apply() (*iceberg.Schema, error) {
 	}
 
 	identifierFieldIDs := make([]int, 0)
-	newSchema := iceberg.NewSchema(0, st.(*iceberg.StructType).FieldList...)
+	newSchema := iceberg.NewSchema(0, st.(*iceberg.StructType).Fields()...)
 	for name := range u.identifierFieldNames {
 		var field iceberg.NestedField
 		var ok bool
@@ -1224,7 +1224,7 @@ func (u *UpdateSchema) Apply() (*iceberg.Schema, error) {
 		}).ID
 	}
 
-	return iceberg.NewSchemaWithIdentifiers(nextSchemaID, identifierFieldIDs, st.(*iceberg.StructType).FieldList...), nil
+	return iceberg.NewSchemaWithIdentifiers(nextSchemaID, identifierFieldIDs, st.(*iceberg.StructType).Fields()...), nil
 }
 
 func (u *UpdateSchema) Commit() error {
@@ -1256,7 +1256,7 @@ func (a *applyChanges) Schema(schema *iceberg.Schema, structResult iceberg.Type)
 
 	if len(added) > 0 || len(moves) > 0 {
 		if newFields := addAndMoveFields(structResult.(*iceberg.StructType).Fields(), added, moves); newFields != nil {
-			return &iceberg.StructType{FieldList: newFields}
+			return iceberg.NewStructType(newFields...)
 		}
 	}
 
@@ -1308,7 +1308,7 @@ func (a *applyChanges) Struct(structType iceberg.StructType, fieldResults []iceb
 	}
 
 	if hasChanges {
-		return &iceberg.StructType{FieldList: newFields}
+		return iceberg.NewStructType(newFields...)
 	}
 
 	return &structType
@@ -1331,9 +1331,9 @@ func (a *applyChanges) Field(field iceberg.NestedField, fieldResult iceberg.Type
 	added := a.adds[field.ID]
 	moves := a.moves[field.ID]
 	if len(added) > 0 || len(moves) > 0 {
-		newFields := addAndMoveFields(st.FieldList, added, moves)
+		newFields := addAndMoveFields(st.Fields(), added, moves)
 		if len(newFields) > 0 {
-			return &iceberg.StructType{FieldList: newFields}
+			return iceberg.NewStructType(newFields...)
 		}
 	}
 
@@ -1361,11 +1361,7 @@ func (a *applyChanges) List(listType iceberg.ListType, elementResult iceberg.Typ
 		panic(fmt.Sprintf("cannot delete element type from list: %s", elementResult))
 	}
 
-	return &iceberg.ListType{
-		ElementID:       listType.ElementID,
-		Element:         elementType,
-		ElementRequired: a.updatedRequired(listType.ElementID, listType.ElementRequired),
-	}
+	return iceberg.NewListType(listType.ElementID, elementType, a.updatedRequired(listType.ElementID, listType.ElementRequired))
 }
 
 func (a *applyChanges) Map(mapType iceberg.MapType, keyResult, valueResult iceberg.Type) iceberg.Type {
@@ -1393,13 +1389,7 @@ func (a *applyChanges) Map(mapType iceberg.MapType, keyResult, valueResult icebe
 		panic(fmt.Errorf("cannot delete value type from map: %s", mapType.String()))
 	}
 
-	return &iceberg.MapType{
-		KeyID:         mapType.KeyID,
-		KeyType:       mapType.KeyType,
-		ValueID:       mapType.ValueID,
-		ValueType:     valueType,
-		ValueRequired: a.updatedRequired(mapType.ValueID, mapType.ValueRequired),
-	}
+	return iceberg.NewMapType(mapType.KeyID, mapType.KeyType, mapType.ValueID, valueType, a.updatedRequired(mapType.ValueID, mapType.ValueRequired))
 }
 
 func (a *applyChanges) Primitive(primitive iceberg.PrimitiveType) iceberg.Type {
