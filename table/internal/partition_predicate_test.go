@@ -642,11 +642,9 @@ func TestBuildPartitionMatchPredicate_CoercesRawDayValue(t *testing.T) {
 
 func TestBuildPartitionMatchPredicate_UsesNestedSourcePath(t *testing.T) {
 	schema := iceberg.NewSchema(0,
-		iceberg.NestedField{ID: 10, Name: "location", Type: &iceberg.StructType{
-			FieldList: []iceberg.NestedField{
-				{ID: 11, Name: "category", Type: iceberg.PrimitiveTypes.String},
-			},
-		}},
+		iceberg.NestedField{ID: 10, Name: "location", Type: iceberg.NewStructType(
+			iceberg.NestedField{ID: 11, Name: "category", Type: iceberg.PrimitiveTypes.String},
+		)},
 		iceberg.NestedField{ID: 12, Name: "category", Type: iceberg.PrimitiveTypes.String},
 	)
 	spec := specWithFields(iceberg.PartitionField{

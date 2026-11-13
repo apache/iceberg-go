@@ -118,7 +118,7 @@ func benchmarkUpdateSpecSchema(fieldCount int, nested bool) (*iceberg.Schema, []
 			ID:       i + 1,
 			Name:     name,
 			Required: true,
-			Type:     &iceberg.StructType{FieldList: nestedFields},
+			Type:     iceberg.NewStructType(nestedFields...),
 		}
 		names[i] += ".value"
 	}

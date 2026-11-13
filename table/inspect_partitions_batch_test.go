@@ -35,9 +35,9 @@ func inspectPartitionBatchFixture(
 ) (*iceberg.StructType, *arrow.Schema, []*inspectPartitionAggregate) {
 	tb.Helper()
 
-	partitionType := &iceberg.StructType{FieldList: []iceberg.NestedField{
-		{ID: 1000, Name: "part", Type: iceberg.PrimitiveTypes.Int32, Required: true},
-	}}
+	partitionType := iceberg.NewStructType(
+		iceberg.NestedField{ID: 1000, Name: "part", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+	)
 	arrowSchema, err := SchemaToArrowSchema(PartitionsSchema(partitionType), nil, true, false)
 	if err != nil {
 		tb.Fatal(err)
