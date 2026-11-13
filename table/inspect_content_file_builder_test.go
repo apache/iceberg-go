@@ -29,7 +29,7 @@ import (
 // The cached appender must bind by field ID again when the record builder
 // changes, even when the next batch presents the fields in a different order.
 func TestInspectContentFileAppenderRebindsAcrossRecordBuilders(t *testing.T) {
-	partitionType := &iceberg.StructType{}
+	partitionType := iceberg.NewStructType()
 	fields := inspectContentFileFields(partitionType)
 	reordered := append(append([]iceberg.NestedField(nil), fields[1:]...), fields[0])
 	file := newTestDataFile(t, *iceberg.UnpartitionedSpec,

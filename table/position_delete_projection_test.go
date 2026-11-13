@@ -195,19 +195,19 @@ func TestMergeOnReadDeleteProjectsNestedPredicate(t *testing.T) {
 			data := `[{"id":1,"details":{"unused":"a","target":1}},{"id":2,"details":{"unused":"b","target":2}},{"id":3,"details":null}]`
 			if deep {
 				name, path = "deep second child", "details.target.value"
-				target = &iceberg.StructType{FieldList: []iceberg.NestedField{
-					{ID: 5, Name: "unused", Type: iceberg.PrimitiveTypes.String},
-					{ID: 6, Name: "value", Type: iceberg.PrimitiveTypes.Int64},
-				}}
+				target = iceberg.NewStructType(
+					iceberg.NestedField{ID: 5, Name: "unused", Type: iceberg.PrimitiveTypes.String},
+					iceberg.NestedField{ID: 6, Name: "value", Type: iceberg.PrimitiveTypes.Int64},
+				)
 				data = `[{"id":1,"details":{"unused":"a","target":{"unused":"x","value":1}}},{"id":2,"details":{"unused":"b","target":{"unused":"y","value":2}}},{"id":3,"details":null}]`
 			}
 			t.Run(version+"/"+name, func(t *testing.T) {
 				schema := iceberg.NewSchema(0,
 					iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
-					iceberg.NestedField{ID: 2, Name: "details", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
-						{ID: 3, Name: "unused", Type: iceberg.PrimitiveTypes.String},
-						{ID: 4, Name: "target", Type: target},
-					}}})
+					iceberg.NestedField{ID: 2, Name: "details", Type: iceberg.NewStructType(
+						iceberg.NestedField{ID: 3, Name: "unused", Type: iceberg.PrimitiveTypes.String},
+						iceberg.NestedField{ID: 4, Name: "target", Type: target},
+					)})
 				tbl := newProjectedDeleteTable(t, schema, iceberg.Properties{table.PropertyFormatVersion: version})
 				tbl = appendProjectedDeleteRows(t, tbl, data)
 				tbl, err := tbl.Delete(t.Context(), iceberg.EqualTo(iceberg.Reference(path), int64(2)), nil)

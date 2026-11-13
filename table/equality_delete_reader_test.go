@@ -288,9 +288,9 @@ func TestEqualityDeleteReadProjectsNestedInitialDefaultForOlderDataFiles(t *test
 	properties := iceberg.Properties{table.PropertyFormatVersion: "3"}
 	iceSchema := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
-		iceberg.NestedField{ID: 2, Name: "loc", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
-			{ID: 3, Name: "city", Type: iceberg.PrimitiveTypes.String},
-		}}},
+		iceberg.NestedField{ID: 2, Name: "loc", Type: iceberg.NewStructType(
+			iceberg.NestedField{ID: 3, Name: "city", Type: iceberg.PrimitiveTypes.String},
+		)},
 	)
 	tbl := newEqDeleteReadTestTableWithSchema(t, iceSchema, properties)
 
@@ -317,9 +317,9 @@ func TestEqualityDeleteReadProjectsNestedInitialDefaultForOlderDataFiles(t *test
 
 	deletePath := tbl.Location() + "/data/eq-del-default-country.parquet"
 	deleteSchema := iceberg.NewSchema(0, iceberg.NestedField{
-		ID: 2, Name: "loc", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
-			{ID: 4, Name: "country", Type: iceberg.PrimitiveTypes.String},
-		}},
+		ID: 2, Name: "loc", Type: iceberg.NewStructType(
+			iceberg.NestedField{ID: 4, Name: "country", Type: iceberg.PrimitiveTypes.String},
+		),
 	})
 	deleteArrowSchema, err := table.SchemaToArrowSchema(deleteSchema, nil, true, false)
 	require.NoError(t, err)
@@ -350,9 +350,9 @@ func TestEqualityDeleteReadTaskCacheUsesDeleteFieldProjection(t *testing.T) {
 	properties := iceberg.Properties{table.PropertyFormatVersion: "3"}
 	iceSchema := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
-		iceberg.NestedField{ID: 2, Name: "loc", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
-			{ID: 3, Name: "city", Type: iceberg.PrimitiveTypes.String},
-		}}},
+		iceberg.NestedField{ID: 2, Name: "loc", Type: iceberg.NewStructType(
+			iceberg.NestedField{ID: 3, Name: "city", Type: iceberg.PrimitiveTypes.String},
+		)},
 	)
 	tbl := newEqDeleteReadTestTableWithSchema(t, iceSchema, properties)
 
@@ -377,9 +377,9 @@ func TestEqualityDeleteReadTaskCacheUsesDeleteFieldProjection(t *testing.T) {
 
 	deletePath := tbl.Location() + "/data/delete-country.parquet"
 	deleteSchema := iceberg.NewSchema(0, iceberg.NestedField{
-		ID: 2, Name: "loc", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
-			{ID: 4, Name: "country", Type: iceberg.PrimitiveTypes.String},
-		}},
+		ID: 2, Name: "loc", Type: iceberg.NewStructType(
+			iceberg.NestedField{ID: 4, Name: "country", Type: iceberg.PrimitiveTypes.String},
+		),
 	})
 	deleteArrowSchema, err := table.SchemaToArrowSchema(deleteSchema, nil, true, false)
 	require.NoError(t, err)

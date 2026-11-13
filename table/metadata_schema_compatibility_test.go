@@ -70,29 +70,21 @@ func TestUnknownTypeValidatorRetainsErrorBehavior(t *testing.T) {
 		{
 			name: "list element requires optional unknown",
 			validate: func() error {
-				return validator.List(iceberg.ListType{
-					ElementID: 2, Element: iceberg.UnknownType{}, ElementRequired: true,
-				}, nil)
+				return validator.List(*iceberg.NewListType(2, iceberg.UnknownType{}, true), nil)
 			},
 			want: "unknown type field 'element' (id: 2) must be optional, but was marked required",
 		},
 		{
 			name: "map key requires optional unknown",
 			validate: func() error {
-				return validator.Map(iceberg.MapType{
-					KeyID: 3, KeyType: iceberg.UnknownType{},
-					ValueID: 4, ValueType: iceberg.StringType{},
-				}, nil, nil)
+				return validator.Map(*iceberg.NewMapType(3, iceberg.UnknownType{}, 4, iceberg.StringType{}, false), nil, nil)
 			},
 			want: "unknown type field 'key' (id: 3) must be optional, but was marked required",
 		},
 		{
 			name: "map value requires optional unknown",
 			validate: func() error {
-				return validator.Map(iceberg.MapType{
-					KeyID: 3, KeyType: iceberg.StringType{},
-					ValueID: 4, ValueType: iceberg.UnknownType{}, ValueRequired: true,
-				}, nil, nil)
+				return validator.Map(*iceberg.NewMapType(3, iceberg.StringType{}, 4, iceberg.UnknownType{}, true), nil, nil)
 			},
 			want: "unknown type field 'value' (id: 4) must be optional, but was marked required",
 		},
@@ -168,14 +160,9 @@ func TestUnknownTypeValidatorPreservesChildErrorPriority(t *testing.T) {
 	require.ErrorIs(t, validator.Field(iceberg.NestedField{
 		ID: 1, Name: "field", Type: iceberg.UnknownType{}, Required: true,
 	}, childErr), childErr)
-	require.ErrorIs(t, validator.List(iceberg.ListType{
-		ElementID: 2, Element: iceberg.UnknownType{}, ElementRequired: true,
-	}, childErr), childErr)
+	require.ErrorIs(t, validator.List(*iceberg.NewListType(2, iceberg.UnknownType{}, true), childErr), childErr)
 
-	mapType := iceberg.MapType{
-		KeyID: 3, KeyType: iceberg.UnknownType{},
-		ValueID: 4, ValueType: iceberg.UnknownType{}, ValueRequired: true,
-	}
+	mapType := *iceberg.NewMapType(3, iceberg.UnknownType{}, 4, iceberg.UnknownType{}, true)
 	require.ErrorIs(t, validator.Map(mapType, childErr, nil), childErr)
 	require.ErrorIs(t, validator.Map(mapType, nil, childErr), childErr)
 }
@@ -190,52 +177,52 @@ func TestValidateComplexDefaultRetainsShapeRules(t *testing.T) {
 	}{
 		{
 			name: "struct initial default must be object",
-			typ:  &iceberg.StructType{}, initial: "wrong",
+			typ:  iceberg.NewStructType(), initial: "wrong",
 			want: "struct type field 'field' (id: 5) must have null or JSON object initial-default, but got: wrong",
 		},
 		{
 			name: "struct write default must be object",
-			typ:  &iceberg.StructType{}, write: "wrong",
+			typ:  iceberg.NewStructType(), write: "wrong",
 			want: "struct type field 'field' (id: 5) must have null or JSON object write-default, but got: wrong",
 		},
 		{
 			name: "list initial default must be array",
-			typ:  &iceberg.ListType{}, initial: "wrong",
+			typ:  iceberg.NewListType(0, nil, false), initial: "wrong",
 			want: "list type field 'field' (id: 5) must have null or JSON array initial-default, but got: wrong",
 		},
 		{
 			name: "list write default must be array",
-			typ:  &iceberg.ListType{}, write: "wrong",
+			typ:  iceberg.NewListType(0, nil, false), write: "wrong",
 			want: "list type field 'field' (id: 5) must have null or JSON array write-default, but got: wrong",
 		},
 		{
 			name: "map initial default must be object",
-			typ:  &iceberg.MapType{}, initial: "wrong",
+			typ:  iceberg.NewMapType(0, nil, 0, nil, false), initial: "wrong",
 			want: "map type field 'field' (id: 5) must have null or JSON object initial-default, but got: wrong",
 		},
 		{
 			name: "map write default must be object",
-			typ:  &iceberg.MapType{}, write: "wrong",
+			typ:  iceberg.NewMapType(0, nil, 0, nil, false), write: "wrong",
 			want: "map type field 'field' (id: 5) must have null or JSON object write-default, but got: wrong",
 		},
 		{
 			name: "initial default error takes priority",
-			typ:  &iceberg.ListType{}, initial: "initial", write: "write",
+			typ:  iceberg.NewListType(0, nil, false), initial: "initial", write: "write",
 			want: "list type field 'field' (id: 5) must have null or JSON array initial-default, but got: initial",
 		},
 		{
 			name:    "struct accepts object defaults",
-			typ:     &iceberg.StructType{},
+			typ:     iceberg.NewStructType(),
 			initial: map[string]any{"a": 1}, write: map[string]any(nil),
 		},
 		{
 			name:    "list accepts array defaults",
-			typ:     &iceberg.ListType{},
+			typ:     iceberg.NewListType(0, nil, false),
 			initial: []any{"a"}, write: []any(nil),
 		},
 		{
 			name:    "map accepts object defaults",
-			typ:     &iceberg.MapType{},
+			typ:     iceberg.NewMapType(0, nil, 0, nil, false),
 			initial: map[string]any{"a": 1}, write: map[string]any{"b": 2},
 		},
 		{
