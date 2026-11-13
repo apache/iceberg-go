@@ -29,14 +29,14 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestInspectSnapshotManifestPrefetchPreservesOrderAndBoundsReads(t *testing.T) {
+func TestSnapshotManifestPrefetchPreservesOrderAndBoundsReads(t *testing.T) {
 	snapshots := make([]Snapshot, 25)
 	for i := range snapshots {
 		snapshots[i].SnapshotID = int64(i + 1)
 	}
 
 	ctx := t.Context()
-	started := make(chan int64, inspectSnapshotManifestPrefetch)
+	started := make(chan int64, snapshotManifestPrefetch)
 	release := make(chan struct{})
 	defer func() {
 		select {
@@ -61,7 +61,7 @@ func TestInspectSnapshotManifestPrefetchPreservesOrderAndBoundsReads(t *testing.
 					}
 				}
 
-				if snapshot.SnapshotID <= inspectSnapshotManifestPrefetch {
+				if snapshot.SnapshotID <= snapshotManifestPrefetch {
 					started <- snapshot.SnapshotID
 				}
 				select {
@@ -89,7 +89,7 @@ func TestInspectSnapshotManifestPrefetchPreservesOrderAndBoundsReads(t *testing.
 	}()
 
 	var firstWindow []int64
-	for range inspectSnapshotManifestPrefetch {
+	for range snapshotManifestPrefetch {
 		select {
 		case id := <-started:
 			firstWindow = append(firstWindow, id)
@@ -101,7 +101,7 @@ func TestInspectSnapshotManifestPrefetchPreservesOrderAndBoundsReads(t *testing.
 	for i, id := range firstWindow {
 		require.Equal(t, int64(i+1), id)
 	}
-	require.EqualValues(t, inspectSnapshotManifestPrefetch, maxActive.Load())
+	require.EqualValues(t, snapshotManifestPrefetch, maxActive.Load())
 	close(release)
 
 	select {
@@ -114,10 +114,10 @@ func TestInspectSnapshotManifestPrefetchPreservesOrderAndBoundsReads(t *testing.
 		t.Fatal("manifest prefetch failed to finish")
 	}
 	require.EqualValues(t, 0, active.Load())
-	require.LessOrEqual(t, maxActive.Load(), int32(inspectSnapshotManifestPrefetch))
+	require.LessOrEqual(t, maxActive.Load(), int32(snapshotManifestPrefetch))
 }
 
-func TestInspectSnapshotManifestPrefetchUsesCachedSets(t *testing.T) {
+func TestSnapshotManifestPrefetchUsesCachedSets(t *testing.T) {
 	snapshots := make([]Snapshot, 12)
 	cachedSets := make(map[int64]snapshotManifestSet)
 	for i := range snapshots {
@@ -158,7 +158,7 @@ func TestInspectSnapshotManifestPrefetchUsesCachedSets(t *testing.T) {
 	}
 }
 
-func TestInspectSnapshotManifestPrefetchDeduplicatesPaths(t *testing.T) {
+func TestSnapshotManifestPrefetchDeduplicatesPaths(t *testing.T) {
 	snapshots := []Snapshot{{SnapshotID: 1}, {SnapshotID: 2}, {SnapshotID: 3}}
 	manifests := [][]string{{"a.avro", "shared.avro"}, {"shared.avro", "b.avro"}, {"a.avro", "c.avro"}}
 	var paths []string
@@ -181,7 +181,7 @@ func TestInspectSnapshotManifestPrefetchDeduplicatesPaths(t *testing.T) {
 	require.Equal(t, []string{"a.avro", "shared.avro", "b.avro", "c.avro"}, paths)
 }
 
-func TestInspectSnapshotManifestPrefetchStopsReadersOnEarlyExit(t *testing.T) {
+func TestSnapshotManifestPrefetchStopsReadersOnEarlyExit(t *testing.T) {
 	snapshots := make([]Snapshot, 30)
 	for i := range snapshots {
 		snapshots[i].SnapshotID = int64(i + 1)
@@ -212,7 +212,7 @@ func TestInspectSnapshotManifestPrefetchStopsReadersOnEarlyExit(t *testing.T) {
 	require.EqualValues(t, 0, active.Load(), "all workers must finish before return")
 }
 
-func TestInspectSnapshotManifestPrefetchReportsFirstOrderedError(t *testing.T) {
+func TestSnapshotManifestPrefetchReportsFirstOrderedError(t *testing.T) {
 	failure := errors.New("manifest load failed")
 	snapshots := []Snapshot{{SnapshotID: 1}, {SnapshotID: 2}, {SnapshotID: 3}}
 	var paths []string
@@ -244,7 +244,7 @@ func TestInspectSnapshotManifestPrefetchReportsFirstOrderedError(t *testing.T) {
 	require.ErrorContains(t, gotErr, "snapshot 2")
 }
 
-func BenchmarkInspectSnapshotManifestListPrefetch(b *testing.B) {
+func BenchmarkSnapshotManifestListPrefetch(b *testing.B) {
 	const snapshotCount = 64
 	snapshots := make([]Snapshot, snapshotCount)
 	for i := range snapshots {
@@ -289,7 +289,7 @@ func BenchmarkInspectSnapshotManifestListPrefetch(b *testing.B) {
 	})
 }
 
-func BenchmarkInspectSnapshotManifestListCacheHit(b *testing.B) {
+func BenchmarkSnapshotManifestListCacheHit(b *testing.B) {
 	cache := newSnapshotManifestCache()
 
 	for _, count := range []int{1, 64} {
