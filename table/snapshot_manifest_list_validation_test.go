@@ -69,3 +69,26 @@ func TestAddSnapshotKeepsV1EmbeddedManifests(t *testing.T) {
 	require.NoError(t, builder.AddSnapshot(&snapshot))
 	require.Len(t, builder.snapshotList, 1)
 }
+
+func TestAddSnapshotRequiresManifestSourceForV1(t *testing.T) {
+	builder := builderWithoutChanges(1)
+	snapshot := freshBuilderSnapshot(101, nil, 1, time.Now().UnixMilli())
+	snapshot.ManifestList = ""
+	snapshot.ManifestLocations = nil
+
+	err := builder.AddSnapshot(&snapshot)
+	require.ErrorIs(t, err, ErrInvalidMetadata)
+	require.ErrorContains(t, err, "snapshot 101 requires manifest-list or manifests")
+	require.Empty(t, builder.snapshotList)
+	require.Empty(t, builder.updates)
+}
+
+func TestAddSnapshotAcceptsEmptyEmbeddedManifestsForV1(t *testing.T) {
+	builder := builderWithoutChanges(1)
+	snapshot := freshBuilderSnapshot(101, nil, 1, time.Now().UnixMilli())
+	snapshot.ManifestList = ""
+	snapshot.ManifestLocations = []string{}
+
+	require.NoError(t, builder.AddSnapshot(&snapshot))
+	require.Len(t, builder.snapshotList, 1)
+}
