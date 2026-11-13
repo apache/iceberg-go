@@ -113,8 +113,7 @@ type UpdateSchema struct {
 // UpdateSchemaOption is a functional option for configuring UpdateSchema.
 type UpdateSchemaOption func(*UpdateSchema)
 
-// WithNameMapping configures the UpdateSchema to use the provided name mapping
-// for tracking field name changes and ensuring consistency during schema evolution.
+// WithNameMapping overrides the table's name mapping for this schema update.
 func WithNameMapping(nameMapping iceberg.NameMapping) UpdateSchemaOption {
 	return func(u *UpdateSchema) {
 		u.nameMapping = nameMapping
@@ -166,6 +165,7 @@ func NewUpdateSchema(txn *Transaction, caseSensitive bool, allowIncompatibleChan
 
 		return u
 	}
+	u.nameMapping = meta.NameMapping()
 
 	// Seed from the larger of metadata's last-column-id and the highest
 	// field id in any schema, including historical ones. Per the Iceberg
