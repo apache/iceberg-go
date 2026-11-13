@@ -503,6 +503,16 @@ func TestSnapshotUnmarshalAcceptsExplicitZeroValues(t *testing.T) {
 	assert.Zero(t, snapshot.SnapshotID)
 	assert.Zero(t, snapshot.TimestampMs)
 	assert.NotNil(t, snapshot.ManifestLocations)
+
+	// The v1 empty array must not disappear during JSON serialization.
+	encoded, err := json.Marshal(snapshot)
+	require.NoError(t, err)
+	var fields map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(encoded, &fields))
+	assert.JSONEq(t, `[]`, string(fields["manifests"]))
+	var roundTripped table.Snapshot
+	require.NoError(t, json.Unmarshal(encoded, &roundTripped))
+	require.NotNil(t, roundTripped.ManifestLocations)
 }
 
 func TestSnapshotUnmarshalPreservesRequiredFields(t *testing.T) {
