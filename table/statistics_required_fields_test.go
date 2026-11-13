@@ -70,7 +70,17 @@ func TestStatisticsJSONRequiresFields(t *testing.T) {
 
 						data, err := json.Marshal(obj)
 						require.NoError(t, err)
-						err = json.Unmarshal(data, tt.newValue())
+						decoded := tt.newValue()
+						err = json.Unmarshal(data, decoded)
+						if mode == "null" && (field == "blob-metadata" || field == "fields") {
+							require.NoError(t, err)
+							encoded, err := json.Marshal(decoded)
+							require.NoError(t, err)
+							var normalized map[string]json.RawMessage
+							require.NoError(t, json.Unmarshal(encoded, &normalized))
+							assert.JSONEq(t, "[]", string(normalized[field]))
+							return
+						}
 						require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
 						assert.ErrorContains(t, err, field)
 					})
@@ -90,4 +100,37 @@ func TestParseMetadataRejectsMissingStatisticsFields(t *testing.T) {
 	_, err = ParseMetadataBytes(data)
 	require.ErrorIs(t, err, ErrInvalidMetadata)
 	assert.ErrorContains(t, err, "blob-metadata")
+}
+
+func TestParseMetadataAcceptsLegacyNullStatisticsFields(t *testing.T) {
+	check := func(t *testing.T, statistics string, wantBlobs int) {
+		t.Helper()
+		var obj map[string]json.RawMessage
+		require.NoError(t, json.Unmarshal([]byte(ExampleTableMetadataV2), &obj))
+		obj["statistics"] = json.RawMessage(statistics)
+
+		data, err := json.Marshal(obj)
+		require.NoError(t, err)
+		meta, err := ParseMetadataBytes(data)
+		require.NoError(t, err)
+
+		var stats []StatisticsFile
+		for stat := range meta.Statistics() {
+			stats = append(stats, stat)
+		}
+		require.Len(t, stats, 1)
+		require.Len(t, stats[0].BlobMetadata, wantBlobs)
+		require.NotNil(t, stats[0].BlobMetadata)
+		if wantBlobs > 0 {
+			require.Empty(t, stats[0].BlobMetadata[0].Fields)
+			require.NotNil(t, stats[0].BlobMetadata[0].Fields)
+		}
+	}
+
+	t.Run("null blob-metadata", func(t *testing.T) {
+		check(t, `[{"snapshot-id":3055729675574597004,"statistics-path":"s3://bucket/stats.puffin","file-size-in-bytes":100,"file-footer-size-in-bytes":20,"blob-metadata":null}]`, 0)
+	})
+	t.Run("null fields", func(t *testing.T) {
+		check(t, `[{"snapshot-id":3055729675574597004,"statistics-path":"s3://bucket/stats.puffin","file-size-in-bytes":100,"file-footer-size-in-bytes":20,"blob-metadata":[{"type":"vendor-sketch-v1","snapshot-id":3055729675574597004,"sequence-number":0,"fields":null}]}]`, 1)
+	})
 }
