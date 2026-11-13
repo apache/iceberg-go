@@ -115,8 +115,8 @@ func (t *inspectPartitionAggregateTree) lookupPartition(
 	partitionType *iceberg.StructType,
 ) *inspectPartitionAggregate {
 	node := t
-	for _, field := range partitionType.FieldList {
-		child, ok := node.child(partition[field.ID])
+	for i := range partitionType.NumFields() {
+		child, ok := node.child(partition[partitionType.Field(i).ID])
 		if !ok {
 			return nil
 		}
@@ -414,14 +414,15 @@ func (i InspectTable) updatePartitionTimestamp(
 }
 
 func inspectCoercePartition(values map[int]any, partitionType *iceberg.StructType) map[int]any {
-	if partitionType == nil || len(partitionType.FieldList) == 0 {
+	if partitionType == nil || partitionType.NumFields() == 0 {
 		return nil
 	}
 
-	coerced := make(map[int]any, len(partitionType.FieldList))
-	for _, field := range partitionType.FieldList {
-		if value, ok := values[field.ID]; ok {
-			coerced[field.ID] = value
+	coerced := make(map[int]any, partitionType.NumFields())
+	for i := range partitionType.NumFields() {
+		id := partitionType.Field(i).ID
+		if value, ok := values[id]; ok {
+			coerced[id] = value
 		}
 	}
 
@@ -499,7 +500,7 @@ func cloneInspectPartition(partition map[int]any) map[int]any {
 // unpartitioned table the partition and spec_id columns are omitted, matching
 // Java's PartitionsTable behavior.
 func PartitionsSchema(partitionType *iceberg.StructType) *iceberg.Schema {
-	if partitionType == nil || len(partitionType.FieldList) == 0 {
+	if partitionType == nil || partitionType.NumFields() == 0 {
 		return iceberg.NewSchema(0,
 			iceberg.NestedField{ID: 2, Name: "record_count", Type: iceberg.PrimitiveTypes.Int64, Required: true},
 			iceberg.NestedField{ID: 3, Name: "file_count", Type: iceberg.PrimitiveTypes.Int32, Required: true},
@@ -530,11 +531,12 @@ func PartitionsSchema(partitionType *iceberg.StructType) *iceberg.Schema {
 
 func appendPartitionAggregate(bldr *array.RecordBuilder, partitionType *iceberg.StructType, aggregate inspectPartitionAggregate) error {
 	idx := 0
-	if partitionType != nil && len(partitionType.FieldList) > 0 {
+	if partitionType != nil && partitionType.NumFields() > 0 {
 		partition := bldr.Field(idx).(*array.StructBuilder)
 		arrowType := partition.Type().(*arrow.StructType)
 		partition.Append(true)
-		for fieldIndex, field := range partitionType.FieldList {
+		for fieldIndex := range partitionType.NumFields() {
+			field := partitionType.Field(fieldIndex)
 			value := aggregate.partition[field.ID]
 			if value == nil {
 				partition.FieldBuilder(fieldIndex).AppendNull()

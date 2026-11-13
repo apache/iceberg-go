@@ -124,9 +124,9 @@ func TestPositionDeleteAppenderReusesFileMetadata(t *testing.T) {
 }
 
 func TestPositionDeleteAppenderCopiesBinaryPartitionValueWhenPreparingMetadata(t *testing.T) {
-	partitionType := &iceberg.StructType{FieldList: []iceberg.NestedField{
-		{ID: 1000, Name: "part", Type: iceberg.PrimitiveTypes.Binary, Required: false},
-	}}
+	partitionType := iceberg.NewStructType(
+		iceberg.NestedField{ID: 1000, Name: "part", Type: iceberg.PrimitiveTypes.Binary, Required: false},
+	)
 	outputSchema, err := SchemaToArrowSchema(
 		PositionDeletesSchema(simpleSchema(), partitionType, 2), nil, true, false)
 	require.NoError(t, err)
@@ -154,12 +154,12 @@ func TestPositionDeleteAppenderDoesNotReadUnpartitionedPartition(t *testing.T) {
 			"mem://position-deletes/table/data/delete.parquet", 1, 128),
 	}
 	outputSchema, err := SchemaToArrowSchema(
-		PositionDeletesSchema(simpleSchema(), &iceberg.StructType{}, 2), nil, true, false)
+		PositionDeletesSchema(simpleSchema(), iceberg.NewStructType(), 2), nil, true, false)
 	require.NoError(t, err)
 	bldr := array.NewRecordBuilder(memory.DefaultAllocator, outputSchema)
 	defer bldr.Release()
 	appender, err := newPositionDeleteRecordAppender(
-		bldr, &iceberg.StructType{}, nil, 2)
+		bldr, iceberg.NewStructType(), nil, 2)
 	require.NoError(t, err)
 
 	meta := appender.prepareFile(file)
