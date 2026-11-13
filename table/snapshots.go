@@ -574,9 +574,53 @@ type MetadataLogEntry struct {
 	TimestampMs  int64  `json:"timestamp-ms"`
 }
 
+// UnmarshalJSON requires both fields that identify an entry in the metadata log.
+// Decoding into non-pointer fields would silently accept missing or null fields
+// as an empty file path or a timestamp of zero.
+func (e *MetadataLogEntry) UnmarshalJSON(data []byte) error {
+	var wire struct {
+		MetadataFile *string `json:"metadata-file"`
+		TimestampMs  *int64  `json:"timestamp-ms"`
+	}
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	if wire.MetadataFile == nil {
+		return fmt.Errorf("%w: metadata-log entry is missing required metadata-file", ErrInvalidMetadata)
+	}
+	if wire.TimestampMs == nil {
+		return fmt.Errorf("%w: metadata-log entry is missing required timestamp-ms", ErrInvalidMetadata)
+	}
+
+	*e = MetadataLogEntry{MetadataFile: *wire.MetadataFile, TimestampMs: *wire.TimestampMs}
+
+	return nil
+}
+
 type SnapshotLogEntry struct {
 	SnapshotID  int64 `json:"snapshot-id"`
 	TimestampMs int64 `json:"timestamp-ms"`
+}
+
+// UnmarshalJSON distinguishes absent or null log fields from valid zero values.
+func (e *SnapshotLogEntry) UnmarshalJSON(data []byte) error {
+	var wire struct {
+		SnapshotID  *int64 `json:"snapshot-id"`
+		TimestampMs *int64 `json:"timestamp-ms"`
+	}
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	if wire.SnapshotID == nil {
+		return fmt.Errorf("%w: snapshot-log entry is missing required snapshot-id", ErrInvalidMetadata)
+	}
+	if wire.TimestampMs == nil {
+		return fmt.Errorf("%w: snapshot-log entry is missing required timestamp-ms", ErrInvalidMetadata)
+	}
+
+	*e = SnapshotLogEntry{SnapshotID: *wire.SnapshotID, TimestampMs: *wire.TimestampMs}
+
+	return nil
 }
 
 // SnapshotLogEntryAsOf returns the snapshot-log entry with the greatest
@@ -646,12 +690,12 @@ func (s *SnapshotSummaryCollector) partitionPath(partition map[int]any, sc *iceb
 	plan, ok := s.partitionPathPlans[key]
 	if !ok {
 		partitionType := spec.PartitionType(sc)
-		pathPlan := partitionPathPlan{fields: make([]partitionPathField, 0, len(partitionType.FieldList))}
+		pathPlan := partitionPathPlan{fields: make([]partitionPathField, 0, partitionType.NumFields())}
 		for i, field := range spec.Fields() {
 			pathField := partitionPathField{
 				escapedName: field.EscapedName(),
 				transform:   field.Transform,
-				resultType:  partitionType.FieldList[i].Type,
+				resultType:  partitionType.Field(i).Type,
 			}
 			pathPlan.fields = append(pathPlan.fields, pathField)
 			pathPlan.estimatedSize += len(pathField.escapedName) + 20

@@ -147,9 +147,9 @@ func TestMissingEqualityProjectionNestedPhysicalCarriers(t *testing.T) {
 		typ  iceberg.Type
 		data string
 	}{
-		{"struct", &iceberg.StructType{FieldList: []iceberg.NestedField{{ID: 2, Name: "existing", Type: iceberg.PrimitiveTypes.String}}}, `[{"payload":null},{"payload":{"existing":"x"}},{"payload":{}}]`},
+		{"struct", iceberg.NewStructType(iceberg.NestedField{ID: 2, Name: "existing", Type: iceberg.PrimitiveTypes.String}), `[{"payload":null},{"payload":{"existing":"x"}},{"payload":{}}]`},
 		{"list", iceberg.NewListType(2, iceberg.PrimitiveTypes.String, false), `[{"payload":null},{"payload":[]},{"payload":["x",null]}]`},
-		{"map", &iceberg.MapType{KeyID: 2, KeyType: iceberg.PrimitiveTypes.String, ValueID: 3, ValueType: iceberg.PrimitiveTypes.String}, `[{"payload":null},{"payload":[]},{"payload":[{"key":"a","value":"x"}]}]`},
+		{"map", iceberg.NewMapType(2, iceberg.PrimitiveTypes.String, 3, iceberg.PrimitiveTypes.String, false), `[{"payload":null},{"payload":[]},{"payload":[{"key":"a","value":"x"}]}]`},
 	}
 	for _, tc := range cases {
 		for _, fileCount := range []int{1, 2} {
