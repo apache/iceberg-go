@@ -44,6 +44,7 @@ func newMetadataWithLastSeqNum(t *testing.T, lastSeqNum int64) Metadata {
 		SnapshotID:     1000,
 		SequenceNumber: lastSeqNum,
 		TimestampMs:    meta.LastUpdatedMillis() + 1,
+		ManifestList:   "file:///tmp/seqtest/metadata/snap-1000.avro",
 		Summary:        &Summary{Operation: OpAppend},
 	}
 	require.NoError(t, builder.AddSnapshot(&snap))
@@ -69,6 +70,7 @@ func newV3MetadataWithNextRowID(t *testing.T, nextRowID int64) Metadata {
 		SnapshotID:     1000,
 		SequenceNumber: 1,
 		TimestampMs:    txn.meta.base.LastUpdatedMillis() + 1,
+		ManifestList:   "mem://default/table-location/metadata/snap-1000.avro",
 		Summary:        &Summary{Operation: OpAppend},
 		FirstRowID:     &firstRowID,
 		AddedRows:      &addedRows,

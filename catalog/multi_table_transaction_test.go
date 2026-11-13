@@ -305,6 +305,7 @@ func mtxGraftSnapshot(t *testing.T, base table.Metadata, id int64, parent *int64
 		ParentSnapshotID: parent,
 		SequenceNumber:   base.LastSequenceNumber() + 1,
 		TimestampMs:      base.LastUpdatedMillis() + 1,
+		ManifestList:     "s3://test/multi-table-manifest-list.avro",
 		Summary:          &table.Summary{Operation: table.OpAppend},
 	}))
 	require.NoError(t, builder.SetSnapshotRef(table.MainBranch, id, table.BranchRef))

@@ -113,6 +113,7 @@ func runPosDeleteConflictCheck(t *testing.T, rewrittenFiles []iceberg.DataFile, 
 		SnapshotID:     writerBaseID,
 		SequenceNumber: 1,
 		TimestampMs:    baseMeta.LastUpdatedMillis() + 1,
+		ManifestList:   "s3://test/conflict-base-manifest-list.avro",
 		Summary:        &Summary{Operation: OpAppend},
 	}
 	require.NoError(t, baseBuilder.AddSnapshot(&baseSnap))
@@ -240,6 +241,16 @@ func newConflictTestMetadata(t *testing.T, branchHead *int64) Metadata {
 // need to drive doCommit's retry budget knobs.
 func newConflictTestMetadataWithProps(t *testing.T, branchHead *int64, extraProps iceberg.Properties) Metadata {
 	t.Helper()
+
+	return newConflictTestMetadataWithPropsAndWriter(t, branchHead, extraProps, func(snapshotID int64) string {
+		return writeTestManifestList(t, t.TempDir(), snapshotID, nil)
+	})
+}
+
+// newConflictTestMetadataWithPropsAndWriter lets tests write the fixture's
+// manifest list through the same IO used when reading the table.
+func newConflictTestMetadataWithPropsAndWriter(t *testing.T, branchHead *int64, extraProps iceberg.Properties, writeList func(int64) string) Metadata {
+	t.Helper()
 	schema := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
 	)
@@ -261,6 +272,7 @@ func newConflictTestMetadataWithProps(t *testing.T, branchHead *int64, extraProp
 		SnapshotID:     *branchHead,
 		SequenceNumber: 1,
 		TimestampMs:    meta.LastUpdatedMillis() + 1,
+		ManifestList:   writeList(*branchHead),
 		Summary:        &Summary{Operation: OpAppend},
 	}
 	require.NoError(t, builder.AddSnapshot(&snap))
@@ -293,6 +305,7 @@ func newConflictTestMetadataWithChain(t *testing.T, ids []int64) Metadata {
 			SnapshotID:     id,
 			SequenceNumber: int64(i + 1),
 			TimestampMs:    meta.LastUpdatedMillis() + int64(i+1),
+			ManifestList:   writeTestManifestList(t, t.TempDir(), id, nil),
 			Summary:        &Summary{Operation: OpAppend},
 		}
 		if i > 0 {

@@ -129,6 +129,7 @@ func graftSnapshotOnto(t *testing.T, base Metadata, branch string, childID int64
 		ParentSnapshotID: &parentID,
 		SequenceNumber:   parent.SequenceNumber + 1,
 		TimestampMs:      base.LastUpdatedMillis() + 1,
+		ManifestList:     writeTestManifestList(t, t.TempDir(), childID, nil),
 		Summary:          &Summary{Operation: OpAppend},
 	}))
 	require.NoError(t, builder.SetSnapshotRef(branch, childID, BranchRef))
@@ -278,7 +279,8 @@ func TestResumeDeterministicRejectionsMakeTransactionUnusable(t *testing.T) {
 				return rebuild(t, base, func(b *MetadataBuilder) {
 					require.NoError(t, b.AddSnapshot(&Snapshot{
 						SnapshotID: 300, SequenceNumber: 2, TimestampMs: base.LastUpdatedMillis() + 1,
-						Summary: &Summary{Operation: OpAppend},
+						ManifestList: "s3://test/replay-peer-300.avro",
+						Summary:      &Summary{Operation: OpAppend},
 					}))
 					require.NoError(t, b.SetSnapshotRef(MainBranch, 300, BranchRef))
 				})

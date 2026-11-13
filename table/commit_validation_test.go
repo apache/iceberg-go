@@ -77,6 +77,7 @@ func newValidationTestTable(t *testing.T, props iceberg.Properties) (*Table, *co
 		SnapshotID:     head,
 		SequenceNumber: 1,
 		TimestampMs:    meta.LastUpdatedMillis() + 1,
+		ManifestList:   writeTestManifestList(t, t.TempDir(), head, nil),
 		Summary:        &Summary{Operation: OpAppend},
 	}))
 	require.NoError(t, builder.SetSnapshotRef(MainBranch, head, BranchRef))

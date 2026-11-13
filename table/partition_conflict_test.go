@@ -66,6 +66,7 @@ func partitionedConflictMeta(t *testing.T, schema *iceberg.Schema, partColID int
 		SnapshotID:     *branchHead,
 		SequenceNumber: 1,
 		TimestampMs:    meta.LastUpdatedMillis() + 1,
+		ManifestList:   writeTestManifestList(t, t.TempDir(), *branchHead, nil),
 		Summary:        &Summary{Operation: OpAppend},
 	}
 	require.NoError(t, builder.AddSnapshot(&snap))
@@ -128,7 +129,14 @@ func writeTestManifestList(
 	t.Helper()
 
 	listPath := filepath.ToSlash(filepath.Join(dir, fmt.Sprintf("snap-%d-manifests.avro", snapshotID)))
-	fs := iceio.LocalFS{}
+
+	return writeTestManifestListToIO(t, iceio.LocalFS{}, listPath, snapshotID, manifests)
+}
+
+// writeTestManifestListToIO writes a real manifest list using the IO the test table reads.
+func writeTestManifestListToIO(t *testing.T, fs iceio.WriteFileIO, listPath string, snapshotID int64, manifests []iceberg.ManifestFile) string {
+	t.Helper()
+
 	f, err := fs.Create(context.Background(), listPath)
 	require.NoError(t, err)
 
@@ -426,7 +434,8 @@ func TestRowDeltaValidate_NestedPartitionSources(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, builder.AddSnapshot(&Snapshot{
 		SnapshotID: baseID, SequenceNumber: 1, TimestampMs: meta.LastUpdatedMillis() + 1,
-		Summary: &Summary{Operation: OpAppend},
+		ManifestList: writeTestManifestList(t, t.TempDir(), baseID, nil),
+		Summary:      &Summary{Operation: OpAppend},
 	}))
 	require.NoError(t, builder.SetSnapshotRef(MainBranch, baseID, BranchRef))
 	meta, err = builder.Build()
@@ -774,6 +783,7 @@ func TestRowDeltaValidate_UnpartitionedTableFallsBackToAlwaysTrue(t *testing.T) 
 		SnapshotID:     writerBaseID,
 		SequenceNumber: 1,
 		TimestampMs:    emptyMeta.LastUpdatedMillis() + 1,
+		ManifestList:   writeTestManifestList(t, t.TempDir(), writerBaseID, nil),
 		Summary:        &Summary{Operation: OpAppend},
 	}
 	require.NoError(t, builderBase.AddSnapshot(&baseSnap))
@@ -846,6 +856,7 @@ func TestRowDeltaValidate_SpecEvolutionConflictDetected(t *testing.T) {
 		SnapshotID:     writerBaseID,
 		SequenceNumber: 1,
 		TimestampMs:    initialMeta.LastUpdatedMillis() + 1,
+		ManifestList:   writeTestManifestList(t, t.TempDir(), writerBaseID, nil),
 		Summary:        &Summary{Operation: OpAppend},
 	}
 	require.NoError(t, builder.AddSnapshot(&baseSnap))
@@ -932,8 +943,9 @@ func TestRowDeltaValidate_BucketTransformFallsBackToAlwaysTrue(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, b.AddSnapshot(&Snapshot{
 		SnapshotID: writerBaseID, SequenceNumber: 1,
-		TimestampMs: meta.LastUpdatedMillis() + 1,
-		Summary:     &Summary{Operation: OpAppend},
+		TimestampMs:  meta.LastUpdatedMillis() + 1,
+		ManifestList: writeTestManifestList(t, t.TempDir(), writerBaseID, nil),
+		Summary:      &Summary{Operation: OpAppend},
 	}))
 	require.NoError(t, b.SetSnapshotRef(MainBranch, writerBaseID, BranchRef))
 	baseMeta, err := b.Build()
@@ -996,8 +1008,9 @@ func TestRowDeltaValidate_DayTransformFallsBackToAlwaysTrue(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, b.AddSnapshot(&Snapshot{
 		SnapshotID: writerBaseID, SequenceNumber: 1,
-		TimestampMs: meta.LastUpdatedMillis() + 1,
-		Summary:     &Summary{Operation: OpAppend},
+		TimestampMs:  meta.LastUpdatedMillis() + 1,
+		ManifestList: writeTestManifestList(t, t.TempDir(), writerBaseID, nil),
+		Summary:      &Summary{Operation: OpAppend},
 	}))
 	require.NoError(t, b.SetSnapshotRef(MainBranch, writerBaseID, BranchRef))
 	baseMeta, err := b.Build()

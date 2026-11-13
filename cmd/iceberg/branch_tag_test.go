@@ -841,7 +841,8 @@ func newBranchPromotionTestCatalog(t *testing.T) *branchPromotionCatalog {
 	require.NoError(t, b.AddSnapshot(&table.Snapshot{
 		SnapshotID: 6000, ParentSnapshotID: &parent,
 		SequenceNumber: 2, TimestampMs: original.SnapshotByID(5000).TimestampMs + 1000,
-		Summary: &table.Summary{Operation: table.OpAppend},
+		ManifestList: "s3://test/branch-promotion-manifest-list.avro",
+		Summary:      &table.Summary{Operation: table.OpAppend},
 	}))
 	require.NoError(t, b.SetSnapshotRef("audit", 6000, table.BranchRef))
 	meta, err := b.Build()

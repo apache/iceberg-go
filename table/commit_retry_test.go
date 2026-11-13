@@ -658,12 +658,18 @@ func TestDoCommit_OrphanCleanedOnCommitDiverged(t *testing.T) {
 
 	// freshMeta has a snapshot on MainBranch so validators run on the retry attempt.
 	freshID := int64(42)
-	freshMeta := newConflictTestMetadataWithProps(t, &freshID, iceberg.Properties{
+	freshMeta := newConflictTestMetadataWithPropsAndWriter(t, &freshID, iceberg.Properties{
 		CommitNumRetriesKey:          "3",
 		CommitMinRetryWaitMsKey:      "1",
 		CommitMaxRetryWaitMsKey:      "2",
 		CommitTotalRetryTimeoutMsKey: "60000",
+	}, func(id int64) string {
+		path := fmt.Sprintf("mem://default/table-location/metadata/peer-%d-manifests.avro", id)
+
+		return writeTestManifestListToIO(t, wfs, path, id, nil)
 	})
+	peerManifestList := freshMeta.CurrentSnapshot().ManifestList
+	require.Contains(t, wfs.files, peerManifestList, "peer manifest list must be readable by the table's IO")
 	freshBuilder, err := MetadataBuilderFromBase(freshMeta, "")
 	require.NoError(t, err)
 	require.NoError(t, freshBuilder.SetUUID(meta.TableUUID()))
@@ -702,6 +708,7 @@ func TestDoCommit_OrphanCleanedOnCommitDiverged(t *testing.T) {
 	require.ErrorIs(t, err, ErrCommitDiverged)
 
 	assertOnlyManifestList(t, wfs, originalManifestList)
+	require.Contains(t, wfs.files, peerManifestList, "peer manifest list must not be cleaned up as an orphan")
 }
 
 func assertOnlyManifestList(t *testing.T, wfs *memIO, want ...string) {
@@ -1231,6 +1238,7 @@ func TestTransactionCommit_ResumeRebuildsAfterPeerSnapshotOnAnotherBranch(t *tes
 		ParentSnapshotID: &mainHead,
 		SequenceNumber:   peerSeq,
 		TimestampMs:      cat.metadata.LastUpdatedMillis() + 1,
+		ManifestList:     "s3://test/commit-retry-peer-manifest-list.avro",
 		Summary:          &Summary{Operation: OpAppend},
 	}))
 	require.NoError(t, builder.SetSnapshotRef("other", mainHead+1, BranchRef))

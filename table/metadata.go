@@ -927,6 +927,21 @@ func (b *MetadataBuilder) AddPartitionSpec(spec *iceberg.PartitionSpec, initial 
 	return nil
 }
 
+// validateSnapshotManifestList prevents new snapshots from committing without a
+// manifest source. New v2/v3 snapshots require a manifest list, while v1 may
+// use an embedded manifests array (including an explicitly empty array).
+func validateSnapshotManifestList(formatVersion int, snapshotID int64, manifestList string, hasEmbeddedManifests bool) error {
+	if (formatVersion == 2 || formatVersion == 3) && manifestList == "" {
+		return fmt.Errorf("%w: snapshot %d: manifest-list is required for format version %d",
+			ErrInvalidMetadata, snapshotID, formatVersion)
+	}
+	if manifestList == "" && !hasEmbeddedManifests {
+		return fmt.Errorf("%w: snapshot %d requires manifest-list or manifests", ErrInvalidMetadata, snapshotID)
+	}
+
+	return nil
+}
+
 func (b *MetadataBuilder) AddSnapshot(snapshot *Snapshot) error {
 	return b.addSnapshotInternal(snapshot, nil)
 }
@@ -953,6 +968,10 @@ func (b *MetadataBuilder) AddSnapshotUpdate(u *addSnapshotUpdate) error {
 func (b *MetadataBuilder) addSnapshotInternal(snapshot *Snapshot, preserveUpdate *addSnapshotUpdate) error {
 	if snapshot == nil {
 		return nil
+	}
+
+	if err := validateSnapshotManifestList(b.formatVersion, snapshot.SnapshotID, snapshot.ManifestList, snapshot.ManifestLocations != nil); err != nil {
+		return err
 	}
 
 	lastSeqNum := b.currentLastSequenceNumber()

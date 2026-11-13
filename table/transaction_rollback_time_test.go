@@ -108,6 +108,7 @@ func TestRollbackToTimeIgnoresOrphanSnapshots(t *testing.T) {
 		SnapshotID:     40,
 		SequenceNumber: 4,
 		TimestampMs:    base.LastUpdatedMillis() + 1,
+		ManifestList:   "s3://test/rollback-orphan-snapshot.avro",
 		Summary:        &Summary{Operation: OpAppend},
 	}
 	require.NoError(t, builder.AddSnapshot(&orphan))

@@ -38,8 +38,9 @@ func manageSnapshotRefsFixture(t *testing.T) Metadata {
 	require.NoError(t, builder.SetSnapshotRef("release", 300, TagRef, WithMaxRefAgeMs(5000)))
 	require.NoError(t, builder.AddSnapshot(&Snapshot{
 		SnapshotID: 900, SequenceNumber: 4,
-		TimestampMs: base.LastUpdatedMillis() + 1000,
-		Summary:     &Summary{Operation: OpAppend},
+		TimestampMs:  base.LastUpdatedMillis() + 1000,
+		ManifestList: "s3://test/manage-refs-900.avro",
+		Summary:      &Summary{Operation: OpAppend},
 	}))
 	require.NoError(t, builder.SetSnapshotRef("diverged", 900, BranchRef))
 	result, err := builder.Build()

@@ -81,8 +81,8 @@ func TestMetadataBuilderSnapshotIndexFollowsUpdates(t *testing.T) {
 	baseTimestamp := builder.base.LastUpdatedMillis()
 	parentID := int64(1)
 
-	first := Snapshot{SnapshotID: 1, TimestampMs: baseTimestamp + 1}
-	second := Snapshot{SnapshotID: 2, ParentSnapshotID: &parentID, SequenceNumber: 1, TimestampMs: baseTimestamp + 2}
+	first := Snapshot{SnapshotID: 1, TimestampMs: baseTimestamp + 1, ManifestList: "s3://test/snapshot-index-1.avro"}
+	second := Snapshot{SnapshotID: 2, ParentSnapshotID: &parentID, SequenceNumber: 1, TimestampMs: baseTimestamp + 2, ManifestList: "s3://test/snapshot-index-2.avro"}
 	require.NoError(t, builder.AddSnapshot(&first))
 	require.NoError(t, builder.AddSnapshot(&second))
 
