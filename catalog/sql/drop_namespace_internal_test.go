@@ -21,6 +21,7 @@ import (
 	"context"
 	dbsql "database/sql"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -48,45 +49,75 @@ const (
 	updatePropertiesOperation namespaceRaceOperation = "update-properties"
 )
 
-type namespaceRaceHook struct {
-	dropAtDelete       chan struct{}
-	createAtInsert     chan struct{}
-	updateAtInsert     chan struct{}
-	releaseDrop        chan struct{}
-	dropDone           chan struct{}
-	releaseUpdate      chan struct{}
-	dropAtDeleteOnce   sync.Once
-	createAtInsertOnce sync.Once
-	updateAtInsertOnce sync.Once
+// racePause stops one operation, tagged on its context, at the first statement
+// match accepts. It closes reached there and, unless release is nil, waits for
+// release before the statement runs.
+type racePause struct {
+	operation namespaceRaceOperation
+	match     func(*bun.QueryEvent) bool
+	reached   chan struct{}
+	release   chan struct{}
+	once      sync.Once
 }
+
+func newRacePause(operation namespaceRaceOperation, match func(*bun.QueryEvent) bool, blocking bool) *racePause {
+	p := &racePause{operation: operation, match: match, reached: make(chan struct{})}
+	if blocking {
+		p.release = make(chan struct{})
+	}
+
+	return p
+}
+
+func (p *racePause) await(t *testing.T, what string) {
+	t.Helper()
+	select {
+	case <-p.reached:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("%s did not reach its pause point", what)
+	}
+}
+
+func isWriteLock(event *bun.QueryEvent) bool { return event.Query == sqliteWriteLockQuery }
+
+func isNamespaceDelete(event *bun.QueryEvent) bool {
+	return event.Operation() == "DELETE" && strings.Contains(event.Query, "iceberg_namespace_properties")
+}
+
+func isObjectInsert(event *bun.QueryEvent) bool {
+	return event.Operation() == "INSERT" && strings.Contains(event.Query, "iceberg_tables")
+}
+
+func isPropertiesInsert(event *bun.QueryEvent) bool {
+	return event.Operation() == "INSERT" && strings.Contains(event.Query, "iceberg_namespace_properties")
+}
+
+type namespaceRaceHook struct{ pauses []*racePause }
 
 func (h *namespaceRaceHook) BeforeQuery(ctx context.Context, event *bun.QueryEvent) context.Context {
 	operation, _ := ctx.Value(namespaceRaceContextKey{}).(namespaceRaceOperation)
-	query := event.Query
-
-	switch {
-	case operation == dropNamespaceOperation && event.Operation() == "DELETE" && strings.Contains(query, "iceberg_namespace_properties"):
-		h.dropAtDeleteOnce.Do(func() { close(h.dropAtDelete) })
-		<-h.releaseDrop
-	case operation == createObjectOperation && event.Operation() == "INSERT" && strings.Contains(query, "iceberg_tables"):
-		h.createAtInsertOnce.Do(func() { close(h.createAtInsert) })
-		<-h.releaseDrop
-		<-h.dropDone
-	case operation == updatePropertiesOperation && event.Operation() == "INSERT" && strings.Contains(query, "iceberg_namespace_properties"):
-		h.updateAtInsertOnce.Do(func() { close(h.updateAtInsert) })
-		<-h.releaseUpdate
+	for _, p := range h.pauses {
+		if p.operation == operation && p.match(event) {
+			p.once.Do(func() {
+				close(p.reached)
+				if p.release != nil {
+					<-p.release
+				}
+			})
+		}
 	}
 
 	return ctx
 }
-
 func (*namespaceRaceHook) AfterQuery(context.Context, *bun.QueryEvent) {}
 
 func newNamespaceRaceCatalog(t *testing.T) *Catalog {
 	t.Helper()
 
+	// The busy timeout makes a writer that finds the lock held wait for it, on
+	// both drivers sqliteshim selects, instead of each driver's own default.
 	dbPath := filepath.Join(t.TempDir(), "catalog.db")
-	db, err := dbsql.Open(sqliteshim.ShimName, dbPath)
+	db, err := dbsql.Open(sqliteshim.ShimName, dbPath+"?_busy_timeout=5000")
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
 	db.SetMaxOpenConns(4)
@@ -181,6 +212,8 @@ func TestRetryableSerializableError(t *testing.T) {
 	}
 
 	require.False(t, isRetryableSerializableError(errors.New("constraint violation")))
+	require.False(t, isRetryableSerializableError(fmt.Errorf("create: %w", &sqliteLockWaitError{err: errors.New("database is locked")})),
+		"a lock SQLite already waited busy_timeout for must not be retried")
 }
 
 func TestRetryableSerializableErrorFromSQLiteDriver(t *testing.T) {
@@ -212,11 +245,14 @@ func TestRetryableSerializableErrorFromSQLiteDriver(t *testing.T) {
 	require.True(t, isRetryableSerializableError(lockErr), "unexpected SQLite lock error type %T: %v", lockErr, lockErr)
 }
 
+// TestDropNamespaceDoesNotRaceWithObjectCreation pins that DropNamespace and an object
+// create serialize on SQLite's write lock, in either order, and never leave an object
+// without its namespace.
 func TestDropNamespaceDoesNotRaceWithObjectCreation(t *testing.T) {
 	schema := iceberg.NewSchema(1, iceberg.NestedField{
 		ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true,
 	})
-	tests := []struct {
+	creates := []struct {
 		name   string
 		create func(*testing.T, context.Context, *Catalog, table.Identifier) error
 		exists func(context.Context, *Catalog, table.Identifier) (bool, error)
@@ -257,131 +293,181 @@ func TestDropNamespaceDoesNotRaceWithObjectCreation(t *testing.T) {
 		},
 	}
 
-	for _, tt := range tests {
+	dropCtx := context.WithValue(context.Background(), namespaceRaceContextKey{}, dropNamespaceOperation)
+	createCtx := context.WithValue(context.Background(), namespaceRaceContextKey{}, createObjectOperation)
+	namespace := table.Identifier{"race_namespace"}
+	objectID := table.Identifier{"race_namespace", "race_object"}
+
+	for _, tt := range creates {
 		t.Run(tt.name, func(t *testing.T) {
-			cat := newNamespaceRaceCatalog(t)
-			namespace := table.Identifier{"race_namespace"}
-			objectID := table.Identifier{"race_namespace", "race_object"}
-			require.NoError(t, cat.CreateNamespace(context.Background(), namespace, nil))
+			t.Run("create waits for drop", func(t *testing.T) {
+				cat := newNamespaceRaceCatalog(t)
+				require.NoError(t, cat.CreateNamespace(context.Background(), namespace, nil))
 
-			hook := &namespaceRaceHook{
-				dropAtDelete:   make(chan struct{}),
-				createAtInsert: make(chan struct{}),
-				releaseDrop:    make(chan struct{}),
-				dropDone:       make(chan struct{}),
-			}
-			cat.db = cat.db.WithQueryHook(hook)
+				// The drop pauses holding the write lock; the create reaches its own
+				// lock statement and waits behind it.
+				dropPause := newRacePause(dropNamespaceOperation, isNamespaceDelete, true)
+				createPause := newRacePause(createObjectOperation, isWriteLock, false)
+				cat.db = cat.db.WithQueryHook(&namespaceRaceHook{pauses: []*racePause{dropPause, createPause}})
+				defer func() {
+					select {
+					case <-dropPause.release:
+					default:
+						close(dropPause.release)
+					}
+				}()
 
-			released := false
-			defer func() {
-				if !released {
-					close(hook.releaseDrop)
-				}
-			}()
+				dropErrCh := make(chan error, 1)
+				go func() { dropErrCh <- cat.DropNamespace(dropCtx, namespace) }()
+				dropPause.await(t, "drop")
 
-			dropCtx := context.WithValue(context.Background(), namespaceRaceContextKey{}, dropNamespaceOperation)
-			createCtx := context.WithValue(context.Background(), namespaceRaceContextKey{}, createObjectOperation)
-			dropErrCh := make(chan error, 1)
-			createErrCh := make(chan error, 1)
+				createErrCh := make(chan error, 1)
+				go func() { createErrCh <- tt.create(t, createCtx, cat, objectID) }()
+				createPause.await(t, "create")
 
-			go func() {
-				dropErr := cat.DropNamespace(dropCtx, namespace)
-				close(hook.dropDone)
-				dropErrCh <- dropErr
-			}()
-			select {
-			case <-hook.dropAtDelete:
-			case <-time.After(5 * time.Second):
-				t.Fatal("drop did not reach namespace deletion")
-			}
+				close(dropPause.release)
+				require.NoError(t, <-dropErrCh)
+				require.ErrorIs(t, <-createErrCh, catalog.ErrNoSuchNamespace)
 
-			go func() { createErrCh <- tt.create(t, createCtx, cat, objectID) }()
-			select {
-			case <-hook.createAtInsert:
-			case <-time.After(5 * time.Second):
-				t.Fatal("creator did not reach catalog insertion")
-			}
-
-			close(hook.releaseDrop)
-			released = true
-			dropErr := <-dropErrCh
-			createErr := <-createErrCh
-			require.False(t, dropErr == nil && createErr == nil, "drop and create must not both report success")
-
-			objectExists, err := tt.exists(context.Background(), cat, objectID)
-			require.NoError(t, err)
-			namespaceExists, err := cat.CheckNamespaceExists(context.Background(), namespace)
-			require.NoError(t, err)
-
-			switch {
-			case createErr == nil:
-				require.Error(t, dropErr)
-				require.True(t, objectExists)
-				require.True(t, namespaceExists)
-			case dropErr == nil:
+				objectExists, err := tt.exists(context.Background(), cat, objectID)
+				require.NoError(t, err)
 				require.False(t, objectExists)
+				namespaceExists, err := cat.CheckNamespaceExists(context.Background(), namespace)
+				require.NoError(t, err)
 				require.False(t, namespaceExists)
-			default:
-				require.Equal(t, namespaceExists, objectExists,
-					"failed operations must not leave an object without its namespace")
-			}
+			})
+
+			t.Run("drop waits for create", func(t *testing.T) {
+				cat := newNamespaceRaceCatalog(t)
+				require.NoError(t, cat.CreateNamespace(context.Background(), namespace, nil))
+
+				// The create pauses at its insert holding the write lock; the drop
+				// cannot finish until the create commits, and then finds the object.
+				createPause := newRacePause(createObjectOperation, isObjectInsert, true)
+				cat.db = cat.db.WithQueryHook(&namespaceRaceHook{pauses: []*racePause{createPause}})
+				defer func() {
+					select {
+					case <-createPause.release:
+					default:
+						close(createPause.release)
+					}
+				}()
+
+				createErrCh := make(chan error, 1)
+				go func() { createErrCh <- tt.create(t, createCtx, cat, objectID) }()
+				createPause.await(t, "create")
+
+				dropErrCh := make(chan error, 1)
+				go func() { dropErrCh <- cat.DropNamespace(dropCtx, namespace) }()
+				select {
+				case err := <-dropErrCh:
+					t.Fatalf("drop finished while the create held the write lock: %v", err)
+				case <-time.After(100 * time.Millisecond):
+				}
+
+				close(createPause.release)
+				require.NoError(t, <-createErrCh)
+				require.ErrorIs(t, <-dropErrCh, catalog.ErrNamespaceNotEmpty)
+
+				objectExists, err := tt.exists(context.Background(), cat, objectID)
+				require.NoError(t, err)
+				require.True(t, objectExists)
+				namespaceExists, err := cat.CheckNamespaceExists(context.Background(), namespace)
+				require.NoError(t, err)
+				require.True(t, namespaceExists)
+			})
 		})
 	}
 }
 
+// TestDropNamespaceDoesNotRaceWithUpdateNamespaceProperties pins that DropNamespace and
+// UpdateNamespaceProperties serialize on SQLite's write lock, in either order, and leave
+// no properties behind for a dropped namespace.
 func TestDropNamespaceDoesNotRaceWithUpdateNamespaceProperties(t *testing.T) {
-	cat := newNamespaceRaceCatalog(t)
-	namespace := table.Identifier{"race_namespace"}
-	require.NoError(t, cat.CreateNamespace(context.Background(), namespace, iceberg.Properties{"owner": "before"}))
-
-	hook := &namespaceRaceHook{
-		updateAtInsert: make(chan struct{}),
-		releaseUpdate:  make(chan struct{}),
-	}
-	cat.db = cat.db.WithQueryHook(hook)
-
-	released := false
-	defer func() {
-		if !released {
-			close(hook.releaseUpdate)
-		}
-	}()
-
+	dropCtx := context.WithValue(context.Background(), namespaceRaceContextKey{}, dropNamespaceOperation)
 	updateCtx := context.WithValue(context.Background(), namespaceRaceContextKey{}, updatePropertiesOperation)
-	updateErrCh := make(chan error, 1)
-	go func() {
-		_, err := cat.UpdateNamespaceProperties(updateCtx, namespace, nil, iceberg.Properties{"owner": "after"})
-		updateErrCh <- err
-	}()
+	namespace := table.Identifier{"race_namespace"}
 
-	select {
-	case <-hook.updateAtInsert:
-	case <-time.After(5 * time.Second):
-		t.Fatal("property update did not reach namespace property insertion")
-	}
-
-	dropErrCh := make(chan error, 1)
-	go func() { dropErrCh <- cat.DropNamespace(context.Background(), namespace) }()
-	select {
-	case err := <-dropErrCh:
+	propertyRows := func(t *testing.T, cat *Catalog) int64 {
+		t.Helper()
+		n, err := cat.db.NewSelect().Model((*sqlIcebergNamespaceProps)(nil)).
+			Where("catalog_name = ?", cat.name).
+			Where("namespace = ?", strings.Join(namespace, ".")).
+			Count(context.Background())
 		require.NoError(t, err)
-	case <-time.After(5 * time.Second):
-		t.Fatal("namespace drop did not complete while property update was paused")
+
+		return n
+	}
+	update := func(cat *Catalog) error {
+		_, err := cat.UpdateNamespaceProperties(updateCtx, namespace, nil, iceberg.Properties{"owner": "after"})
+
+		return err
 	}
 
-	close(hook.releaseUpdate)
-	released = true
+	t.Run("update waits for drop", func(t *testing.T) {
+		cat := newNamespaceRaceCatalog(t)
+		require.NoError(t, cat.CreateNamespace(context.Background(), namespace, iceberg.Properties{"owner": "before"}))
 
-	select {
-	case err := <-updateErrCh:
-		require.ErrorIs(t, err, catalog.ErrNoSuchNamespace)
-	case <-time.After(5 * time.Second):
-		t.Fatal("property update did not finish after namespace drop")
-	}
+		updatePause := newRacePause(updatePropertiesOperation, isWriteLock, true)
+		cat.db = cat.db.WithQueryHook(&namespaceRaceHook{pauses: []*racePause{updatePause}})
+		defer func() {
+			select {
+			case <-updatePause.release:
+			default:
+				close(updatePause.release)
+			}
+		}()
 
-	exists, err := cat.CheckNamespaceExists(context.Background(), namespace)
-	require.NoError(t, err)
-	require.False(t, exists)
+		updateErrCh := make(chan error, 1)
+		go func() { updateErrCh <- update(cat) }()
+		updatePause.await(t, "property update")
+
+		require.NoError(t, cat.DropNamespace(dropCtx, namespace))
+
+		close(updatePause.release)
+		require.ErrorIs(t, <-updateErrCh, catalog.ErrNoSuchNamespace)
+
+		exists, err := cat.CheckNamespaceExists(context.Background(), namespace)
+		require.NoError(t, err)
+		require.False(t, exists)
+		require.Zero(t, propertyRows(t, cat))
+	})
+
+	t.Run("drop waits for update", func(t *testing.T) {
+		cat := newNamespaceRaceCatalog(t)
+		require.NoError(t, cat.CreateNamespace(context.Background(), namespace, iceberg.Properties{"owner": "before"}))
+
+		updatePause := newRacePause(updatePropertiesOperation, isPropertiesInsert, true)
+		cat.db = cat.db.WithQueryHook(&namespaceRaceHook{pauses: []*racePause{updatePause}})
+		defer func() {
+			select {
+			case <-updatePause.release:
+			default:
+				close(updatePause.release)
+			}
+		}()
+
+		updateErrCh := make(chan error, 1)
+		go func() { updateErrCh <- update(cat) }()
+		updatePause.await(t, "property update")
+
+		dropErrCh := make(chan error, 1)
+		go func() { dropErrCh <- cat.DropNamespace(dropCtx, namespace) }()
+		select {
+		case err := <-dropErrCh:
+			t.Fatalf("drop finished while the property update held the write lock: %v", err)
+		case <-time.After(100 * time.Millisecond):
+		}
+
+		close(updatePause.release)
+		require.NoError(t, <-updateErrCh)
+		require.NoError(t, <-dropErrCh)
+
+		exists, err := cat.CheckNamespaceExists(context.Background(), namespace)
+		require.NoError(t, err)
+		require.False(t, exists)
+		require.Zero(t, propertyRows(t, cat))
+	})
 }
 
 func createTestView(ctx context.Context, cat *Catalog, identifier table.Identifier, schema *iceberg.Schema, representation view.Representation, props iceberg.Properties) error {
