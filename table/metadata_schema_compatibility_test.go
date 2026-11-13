@@ -178,12 +178,12 @@ func TestValidateComplexDefaultRetainsShapeRules(t *testing.T) {
 		{
 			name: "struct initial default must be object",
 			typ:  iceberg.NewStructType(), initial: "wrong",
-			want: "struct type field 'field' (id: 5) must have null or JSON object initial-default, but got: wrong",
+			want: "struct type field 'field' (id: 5) must have null or empty JSON object initial-default, but got: wrong",
 		},
 		{
 			name: "struct write default must be object",
 			typ:  iceberg.NewStructType(), write: "wrong",
-			want: "struct type field 'field' (id: 5) must have null or JSON object write-default, but got: wrong",
+			want: "struct type field 'field' (id: 5) must have null or empty JSON object write-default, but got: wrong",
 		},
 		{
 			name: "list initial default must be array",
@@ -211,9 +211,19 @@ func TestValidateComplexDefaultRetainsShapeRules(t *testing.T) {
 			want: "list type field 'field' (id: 5) must have null or JSON array initial-default, but got: initial",
 		},
 		{
-			name:    "struct accepts object defaults",
+			name:    "struct accepts empty object defaults",
 			typ:     iceberg.NewStructType(),
-			initial: map[string]any{"a": 1}, write: map[string]any(nil),
+			initial: map[string]any{}, write: map[string]any{},
+		},
+		{
+			name: "struct initial default cannot contain fields",
+			typ:  iceberg.NewStructType(), initial: map[string]any{"x": 1},
+			want: "struct type field 'field' (id: 5) must have null or empty JSON object initial-default, but got: map[x:1]",
+		},
+		{
+			name: "struct write default cannot contain fields",
+			typ:  iceberg.NewStructType(), write: map[string]any{"x": 1},
+			want: "struct type field 'field' (id: 5) must have null or empty JSON object write-default, but got: map[x:1]",
 		},
 		{
 			name:    "list accepts array defaults",
@@ -242,6 +252,29 @@ func TestValidateComplexDefaultRetainsShapeRules(t *testing.T) {
 			} else {
 				require.EqualError(t, err, tt.want)
 			}
+		})
+	}
+}
+
+func TestCheckSchemaCompatibilityRejectsPopulatedStructDefaults(t *testing.T) {
+	pointType := iceberg.NewStructType(iceberg.NestedField{
+		ID: 2, Name: "x", Type: iceberg.PrimitiveTypes.Int32,
+	})
+	for _, tt := range []struct {
+		name    string
+		initial any
+		write   any
+	}{
+		{name: "initial", initial: map[string]any{"x": 1}},
+		{name: "write", write: map[string]any{"x": 1}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			schema := iceberg.NewSchema(0, iceberg.NestedField{
+				ID: 1, Name: "point", Type: pointType,
+				InitialDefault: tt.initial, WriteDefault: tt.write,
+			})
+			err := checkSchemaCompatibility(schema, 3)
+			require.ErrorContains(t, err, "must have null or empty JSON object "+tt.name+"-default")
 		})
 	}
 }

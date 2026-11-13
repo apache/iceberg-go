@@ -477,8 +477,9 @@ func validateComplexDefaultValue(field iceberg.NestedField, name string, value a
 	var valid bool
 	switch field.Type.(type) {
 	case *iceberg.StructType:
-		typeName, expectedShape = "struct", "JSON object"
-		_, valid = value.(map[string]any)
+		typeName, expectedShape = "struct", "empty JSON object"
+		obj, ok := value.(map[string]any)
+		valid = ok && len(obj) == 0
 	case *iceberg.ListType:
 		typeName, expectedShape = "list", "JSON array"
 		_, valid = value.([]any)
