@@ -18,6 +18,7 @@
 package table
 
 import (
+	"encoding/json"
 	"strconv"
 	"testing"
 	"time"
@@ -91,4 +92,16 @@ func TestAddSnapshotAcceptsEmptyEmbeddedManifestsForV1(t *testing.T) {
 
 	require.NoError(t, builder.AddSnapshot(&snapshot))
 	require.Len(t, builder.snapshotList, 1)
+
+	// The valid empty v1 array must survive a full metadata write and read.
+	built, err := builder.Build()
+	require.NoError(t, err)
+	encoded, err := json.Marshal(built)
+	require.NoError(t, err)
+	reloaded, err := ParseMetadataBytes(encoded)
+	require.NoError(t, err)
+	loaded := reloaded.SnapshotByID(snapshot.SnapshotID)
+	require.NotNil(t, loaded)
+	require.NotNil(t, loaded.ManifestLocations)
+	require.Empty(t, loaded.ManifestLocations)
 }
