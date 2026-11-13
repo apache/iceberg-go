@@ -1792,7 +1792,7 @@ func collectLeafIDs(typ iceberg.Type, fieldID int, idset set[int]) {
 		collectLeafIDs(t.Element, t.ElementID, idset)
 	case *iceberg.StructType:
 		// For structs, collect leaf IDs from all fields
-		for _, field := range t.FieldList {
+		for _, field := range t.Fields() {
 			collectLeafIDs(field.Type, field.ID, idset)
 		}
 	default:

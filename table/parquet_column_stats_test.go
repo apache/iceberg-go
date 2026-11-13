@@ -37,10 +37,10 @@ func statsSettingsSchema() *iceberg.Schema {
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32},
 		iceberg.NestedField{ID: 2, Name: "kept", Type: iceberg.PrimitiveTypes.Int32},
 		iceberg.NestedField{ID: 3, Name: "display name", Type: iceberg.PrimitiveTypes.Int32},
-		iceberg.NestedField{ID: 4, Name: "parent", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
-			{ID: 5, Name: "child", Type: iceberg.PrimitiveTypes.Int32},
-			{ID: 6, Name: "other", Type: iceberg.PrimitiveTypes.Int32},
-		}}},
+		iceberg.NestedField{ID: 4, Name: "parent", Type: iceberg.NewStructType(
+			iceberg.NestedField{ID: 5, Name: "child", Type: iceberg.PrimitiveTypes.Int32},
+			iceberg.NestedField{ID: 6, Name: "other", Type: iceberg.PrimitiveTypes.Int32},
+		)},
 		iceberg.NestedField{ID: 7, Name: "items", Type: iceberg.NewListType(8, iceberg.PrimitiveTypes.Int32, false)},
 		iceberg.NestedField{ID: 9, Name: "properties", Type: iceberg.NewMapType(10, iceberg.PrimitiveTypes.String, 11, iceberg.PrimitiveTypes.Int32, false)},
 	)

@@ -57,13 +57,13 @@ func TestCachedInspectFieldIDsRechecksKeys(t *testing.T) {
 }
 
 func TestInspectFileAppenderRechecksChangedStatsMapKeys(t *testing.T) {
-	schema, err := SchemaToArrowSchema(DataFilesSchema(&iceberg.StructType{}), nil, true, false)
+	schema, err := SchemaToArrowSchema(DataFilesSchema(iceberg.NewStructType()), nil, true, false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	builder := array.NewRecordBuilder(memory.DefaultAllocator, schema)
 	defer builder.Release()
-	appendFile := newInspectContentFileAppender(&iceberg.StructType{})
+	appendFile := newInspectContentFileAppender(iceberg.NewStructType())
 
 	values := []map[int]int64{
 		{1: 11, 3: 33},

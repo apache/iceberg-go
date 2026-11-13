@@ -155,14 +155,14 @@ func TestReplaceSortOrderBuilderInvalidLaterFieldPreservesStagedOrder(t *testing
 
 func TestReplaceSortOrderBuilderNestedCaseCollisionsAreScoped(t *testing.T) {
 	schema := iceberg.NewSchema(0,
-		iceberg.NestedField{ID: 1, Name: "payload", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
-			{ID: 2, Name: "ID", Type: iceberg.PrimitiveTypes.Int64},
-			{ID: 3, Name: "id", Type: iceberg.PrimitiveTypes.Int64},
-			{ID: 4, Name: "other", Type: iceberg.PrimitiveTypes.Int64},
-		}}},
-		iceberg.NestedField{ID: 5, Name: "sibling", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
-			{ID: 6, Name: "id", Type: iceberg.PrimitiveTypes.Int64},
-		}}},
+		iceberg.NestedField{ID: 1, Name: "payload", Type: iceberg.NewStructType(
+			iceberg.NestedField{ID: 2, Name: "ID", Type: iceberg.PrimitiveTypes.Int64},
+			iceberg.NestedField{ID: 3, Name: "id", Type: iceberg.PrimitiveTypes.Int64},
+			iceberg.NestedField{ID: 4, Name: "other", Type: iceberg.PrimitiveTypes.Int64},
+		)},
+		iceberg.NestedField{ID: 5, Name: "sibling", Type: iceberg.NewStructType(
+			iceberg.NestedField{ID: 6, Name: "id", Type: iceberg.PrimitiveTypes.Int64},
+		)},
 		iceberg.NestedField{ID: 7, Name: "unique", Type: iceberg.PrimitiveTypes.Int64},
 	)
 	meta, err := table.NewMetadata(schema, iceberg.UnpartitionedSpec, table.UnsortedSortOrder,

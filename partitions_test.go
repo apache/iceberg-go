@@ -1691,9 +1691,10 @@ func TestNewPartitionSpecOptsTimeTransformMembership(t *testing.T) {
 	require.IsType(t, iceberg.UnknownTransform{}, unknown)
 
 	tests := []struct {
-		name          string
-		trans         iceberg.Transform
-		wantRedundant bool
+		name             string
+		trans            iceberg.Transform
+		wantRedundant    bool
+		wantIncompatible bool
 	}{
 		{name: "year", trans: iceberg.YearTransform{}, wantRedundant: true},
 		{name: "month", trans: iceberg.MonthTransform{}, wantRedundant: true},
@@ -1701,17 +1702,26 @@ func TestNewPartitionSpecOptsTimeTransformMembership(t *testing.T) {
 		{name: "hour", trans: iceberg.HourTransform{}, wantRedundant: true},
 		{name: "identity", trans: iceberg.IdentityTransform{}, wantRedundant: false},
 		{name: "bucket", trans: iceberg.BucketTransform{NumBuckets: 16}, wantRedundant: false},
-		{name: "truncate", trans: iceberg.TruncateTransform{Width: 4}, wantRedundant: false},
+		{name: "truncate", trans: iceberg.TruncateTransform{Width: 4}, wantIncompatible: true},
 		{name: "unknown", trans: unknown, wantRedundant: false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			_, isTime := tt.trans.(iceberg.TimeTransform)
+			assert.Equal(t, tt.wantRedundant, isTime)
 			spec, err := iceberg.NewPartitionSpecOpts(
 				iceberg.WithSpecID(1),
 				iceberg.AddPartitionFieldByName("ts", "ts_day", iceberg.DayTransform{}, schema, nil),
 				iceberg.AddPartitionFieldByName("ts", "ts_other", tt.trans, schema, nil),
 			)
+
+			if tt.wantIncompatible {
+				require.ErrorIs(t, err, iceberg.ErrInvalidPartitionSpec)
+				assert.ErrorContains(t, err, "invalid source type")
+
+				return
+			}
 
 			if tt.wantRedundant {
 				require.ErrorIs(t, err, iceberg.ErrInvalidPartitionSpec)

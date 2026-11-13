@@ -163,9 +163,9 @@ func TestProcessEqualityDeletesNestedStringDoesNotBuildUnusedIndex(t *testing.T)
 	}
 	fileSchema := iceberg.NewSchema(0, iceberg.NestedField{
 		ID: 2, Name: "person",
-		Type: &iceberg.StructType{FieldList: []iceberg.NestedField{{
+		Type: iceberg.NewStructType(iceberg.NestedField{
 			ID: 1, Name: "name", Type: iceberg.PrimitiveTypes.String,
-		}}},
+		}),
 	})
 	_, err := processEqualityDeletesColumnarForFile(t.Context(),
 		[]*equalityDeleteSet{deleteSet}, fileSchema, "data.parquet")

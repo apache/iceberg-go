@@ -42,10 +42,10 @@ import (
 )
 
 func statsTestPartitionType() *iceberg.StructType {
-	return &iceberg.StructType{FieldList: []iceberg.NestedField{
-		{ID: 1000, Name: "day", Type: iceberg.PrimitiveTypes.Int32},
-		{ID: 1001, Name: "region", Type: iceberg.PrimitiveTypes.String},
-	}}
+	return iceberg.NewStructType(
+		iceberg.NestedField{ID: 1000, Name: "day", Type: iceberg.PrimitiveTypes.Int32},
+		iceberg.NestedField{ID: 1001, Name: "region", Type: iceberg.PrimitiveTypes.String},
+	)
 }
 
 func TestPartitionStatisticsSchemaV1(t *testing.T) {
@@ -63,7 +63,7 @@ func TestPartitionStatisticsSchemaV1(t *testing.T) {
 		require.True(t, fields[index].Required)
 	}
 	require.False(t, fields[5].Required)
-	require.Equal(t, 1000, fields[0].Type.(*iceberg.StructType).FieldList[0].ID)
+	require.Equal(t, 1000, fields[0].Type.(*iceberg.StructType).Field(0).ID)
 }
 
 func TestPartitionStatisticValuesNullFirstNumericAndBinary(t *testing.T) {
@@ -132,9 +132,9 @@ func TestSortPartitionStatisticsByTupleThenSpecID(t *testing.T) {
 
 func TestSortPartitionStatisticsFloatAndUUID(t *testing.T) {
 	t.Run("float", func(t *testing.T) {
-		pt := &iceberg.StructType{FieldList: []iceberg.NestedField{
-			{ID: 1000, Name: "value", Type: iceberg.PrimitiveTypes.Float64},
-		}}
+		pt := iceberg.NewStructType(
+			iceberg.NestedField{ID: 1000, Name: "value", Type: iceberg.PrimitiveTypes.Float64},
+		)
 		rows := []*inspectPartitionAggregate{
 			{partition: map[int]any{1000: math.NaN()}, specID: 6},
 			{partition: map[int]any{1000: float64(0)}, specID: 3},
@@ -153,9 +153,9 @@ func TestSortPartitionStatisticsFloatAndUUID(t *testing.T) {
 		require.True(t, math.IsNaN(rows[4].partition[1000].(float64)))
 	})
 	t.Run("uuid", func(t *testing.T) {
-		pt := &iceberg.StructType{FieldList: []iceberg.NestedField{
-			{ID: 1000, Name: "value", Type: iceberg.PrimitiveTypes.UUID},
-		}}
+		pt := iceberg.NewStructType(
+			iceberg.NestedField{ID: 1000, Name: "value", Type: iceberg.PrimitiveTypes.UUID},
+		)
 		rows := []*inspectPartitionAggregate{
 			{partition: map[int]any{1000: uuid.MustParse("7fffffff-ffff-ffff-0000-000000000000")}, specID: 4},
 			{partition: map[int]any{1000: uuid.MustParse("00000000-0000-0000-7fff-ffffffffffff")}, specID: 3},
@@ -268,9 +268,9 @@ func TestCollectPartitionStatisticsDecimalFromManifest(t *testing.T) {
 	schema := iceberg.NewSchema(0, iceberg.NestedField{
 		ID: 1, Name: "amount", Type: decimalType, Required: true,
 	})
-	partitionType := &iceberg.StructType{FieldList: []iceberg.NestedField{
-		{ID: 1000, Name: "amount", Type: decimalType},
-	}}
+	partitionType := iceberg.NewStructType(
+		iceberg.NestedField{ID: 1000, Name: "amount", Type: decimalType},
+	)
 	amount := iceberg.Decimal{Val: decimal128.FromI64(1234), Scale: 2}
 	const snapshotID = int64(7)
 	files := []iceberg.DataFile{
@@ -488,7 +488,7 @@ func TestPartitionStatisticsEmbeddedManifests(t *testing.T) {
 	write("mem://stats/spec7.avro", spec7, "b", int32(3), 20)
 	write("mem://stats/null.avro", spec7, "null", nil, 1)
 	snapshot := Snapshot{SnapshotID: 1, ManifestLocations: []string{"mem://stats/spec0.avro", "mem://stats/spec7.avro", "mem://stats/null.avro"}}
-	pt := &iceberg.StructType{FieldList: []iceberg.NestedField{{ID: 1000, Name: "id", Type: iceberg.Int32Type{}}}}
+	pt := iceberg.NewStructType(iceberg.NestedField{ID: 1000, Name: "id", Type: iceberg.Int32Type{}})
 	rows, err := collectPartitionStatistics(t.Context(), fs, snapshot, pt, []iceberg.PartitionSpec{spec0, spec7}, 1, nil)
 	require.NoError(t, err)
 	require.Len(t, rows, 3)
@@ -551,7 +551,7 @@ func TestPartitionStatisticsEmbeddedManifestWithoutSpecID(t *testing.T) {
 	}
 	const missingID = "mem://stats/missing.avro"
 	writeEmpty(missingID)
-	pt := &iceberg.StructType{FieldList: []iceberg.NestedField{{ID: 1000, Name: "id", Type: iceberg.Int32Type{}}}}
+	pt := iceberg.NewStructType(iceberg.NestedField{ID: 1000, Name: "id", Type: iceberg.Int32Type{}})
 	snapshot := Snapshot{SnapshotID: 1, ManifestLocations: []string{missingID}}
 	rows, err := collectPartitionStatistics(t.Context(), fs, snapshot, pt, []iceberg.PartitionSpec{spec}, 1, nil)
 	require.NoError(t, err)
