@@ -3660,7 +3660,7 @@ func TestComplexTypeDefaultValidation(t *testing.T) {
 		)
 		err := checkSchemaCompatibility(schema, 3)
 		require.Error(t, err)
-		require.ErrorContains(t, err, "struct type field 's' (id: 1) must have null or JSON object initial-default")
+		require.ErrorContains(t, err, "struct type field 's' (id: 1) must have null or empty JSON object initial-default")
 	})
 
 	t.Run("InvalidStructWriteDefault", func(t *testing.T) {
@@ -3671,7 +3671,7 @@ func TestComplexTypeDefaultValidation(t *testing.T) {
 		)
 		err := checkSchemaCompatibility(schema, 3)
 		require.Error(t, err)
-		require.ErrorContains(t, err, "struct type field 's' (id: 1) must have null or JSON object write-default")
+		require.ErrorContains(t, err, "struct type field 's' (id: 1) must have null or empty JSON object write-default")
 	})
 
 	t.Run("ValidStructNullDefault", func(t *testing.T) {
@@ -3684,11 +3684,11 @@ func TestComplexTypeDefaultValidation(t *testing.T) {
 		require.NoError(t, err)
 	})
 
-	t.Run("ValidStructObjectDefault", func(t *testing.T) {
+	t.Run("ValidStructEmptyObjectDefault", func(t *testing.T) {
 		schema := iceberg.NewSchema(1,
 			iceberg.NestedField{ID: 1, Name: "s", Type: iceberg.NewStructType(
 				iceberg.NestedField{ID: 2, Name: "x", Type: iceberg.Int32Type{}, Required: false},
-			), Required: false, InitialDefault: map[string]any{"x": float64(1)}},
+			), Required: false, InitialDefault: map[string]any{}},
 		)
 		err := checkSchemaCompatibility(schema, 3)
 		require.NoError(t, err)

@@ -2318,7 +2318,7 @@ func TestUnionByNameAddedComplexColumnDefault(t *testing.T) {
 
 	structType := func() *iceberg.StructType {
 		return iceberg.NewStructType(
-			iceberg.NestedField{ID: 3, Name: "zip", Type: iceberg.PrimitiveTypes.String, Required: false},
+			iceberg.NestedField{ID: 3, Name: "zip", Type: iceberg.PrimitiveTypes.String, Required: false, InitialDefault: "00000"},
 		)
 	}
 
@@ -2326,14 +2326,17 @@ func TestUnionByNameAddedComplexColumnDefault(t *testing.T) {
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
 		iceberg.NestedField{
 			ID: 2, Name: "addr", Required: false, Type: structType(),
-			InitialDefault: map[string]any{"zip": "00000"},
+			InitialDefault: map[string]any{},
 		},
 	)
 	applied, err := NewUpdateSchema(unionTxn(t, current), true, false).UnionByNameWith(valid).Apply()
 	require.NoError(t, err)
 	addr, ok := applied.FindFieldByName("addr")
 	require.True(t, ok)
-	assert.Equal(t, map[string]any{"zip": "00000"}, addr.InitialDefault)
+	assert.Equal(t, map[string]any{}, addr.InitialDefault)
+	zip, ok := applied.FindFieldByName("addr.zip")
+	require.True(t, ok)
+	assert.Equal(t, "00000", zip.InitialDefault)
 
 	invalid := iceberg.NewSchema(1,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
@@ -2343,7 +2346,17 @@ func TestUnionByNameAddedComplexColumnDefault(t *testing.T) {
 		},
 	)
 	_, err = NewUpdateSchema(unionTxn(t, current), true, false).UnionByNameWith(invalid).Apply()
-	require.ErrorContains(t, err, "must have null or JSON object initial-default")
+	require.ErrorContains(t, err, "must have null or empty JSON object initial-default")
+
+	populated := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{
+			ID: 2, Name: "addr", Required: false, Type: structType(),
+			InitialDefault: map[string]any{"zip": "00000"},
+		},
+	)
+	_, err = NewUpdateSchema(unionTxn(t, current), true, false).UnionByNameWith(populated).Apply()
+	require.ErrorContains(t, err, "must have null or empty JSON object initial-default")
 }
 
 func TestUnionByNameCannotExtendStructAddedByPriorOp(t *testing.T) {
