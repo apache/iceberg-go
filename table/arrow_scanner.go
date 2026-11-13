@@ -2651,6 +2651,14 @@ func (as *arrowScan) processRecordsWithPlans(
 		pruningFilter = iceberg.AlwaysTrue{}
 	}
 
+	// The ORC reader currently scans whole files. Remote partial-file tasks
+	// must fail instead of reading the complete file more than once.
+	if task.Value.File.FileFormat() == iceberg.OrcFile &&
+		(task.Value.Start != 0 ||
+			(task.Value.Length != 0 && task.Value.Length != task.Value.File.FileSizeBytes())) {
+		return fmt.Errorf("%w: partial ORC scan task ranges are not supported", iceberg.ErrNotImplemented)
+	}
+
 	// Avro's OCF reader currently reads the whole file. A remote planner may
 	// produce partial file ranges; reading each as a full OCF would duplicate rows.
 	if task.Value.File.FileFormat() == iceberg.AvroFile &&

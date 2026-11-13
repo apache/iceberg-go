@@ -42,6 +42,8 @@ func GetFile(ctx context.Context, fs iceio.IO, dataFile iceberg.DataFile, isPosD
 			fs:   fs,
 			file: dataFile,
 		}, nil
+	case iceberg.OrcFile:
+		return &ORCFileSource{fs: fs, file: dataFile}, nil
 	case iceberg.AvroFile:
 		return &AvroFileSource{fs: fs, file: dataFile}, nil
 	default:
