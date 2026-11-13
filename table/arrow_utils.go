@@ -2092,6 +2092,14 @@ func fileToDataFile(ctx context.Context, fileIO iceio.IO, filePath string, curre
 	if err := checkNoUnknownTransform(&currentSpec); err != nil {
 		panic(err)
 	}
+	for _, field := range currentSpec.Fields() {
+		if len(field.SourceIDs) > 1 {
+			panic(fmt.Errorf("%w: cannot write partition transform %s with multiple source fields", iceberg.ErrInvalidTransform, field.Transform))
+		}
+		if err := checkPartitionSource(field, currentSchema); err != nil {
+			panic(err)
+		}
+	}
 	if err := validateFilePartitionValues(currentSchema, currentSpec, supplied); err != nil {
 		panic(err)
 	}
@@ -2203,6 +2211,30 @@ type recordWritingArgs struct {
 	// into the newly written DV so a data file that already had a DV ends up
 	// with a single merged vector (the caller removes the superseded one).
 	existingDVs map[string]*dv.RoaringPositionBitmap
+}
+
+func checkPartitionSourceType(field iceberg.PartitionField, sourceType iceberg.Type) error {
+	if err := iceberg.ValidatePartitionTransformSourceType(field.Transform, sourceType); err != nil {
+		return fmt.Errorf("%w: %v", iceberg.ErrInvalidTransform, err)
+	}
+
+	return nil
+}
+
+func checkPartitionSource(field iceberg.PartitionField, schema *iceberg.Schema) error {
+	sourceID := field.FirstSourceID()
+	sourceType, ok := schema.FindTypeByID(sourceID)
+	if !ok {
+		switch field.Transform.(type) {
+		case iceberg.VoidTransform, *iceberg.VoidTransform:
+			// A void partition field may refer to a column dropped from the schema.
+			return nil
+		default:
+			return fmt.Errorf("%w: partition source field %d not found in schema", iceberg.ErrInvalidSchema, sourceID)
+		}
+	}
+
+	return checkPartitionSourceType(field, sourceType)
 }
 
 // checkNoUnknownTransform rejects writes against a spec containing an unknown

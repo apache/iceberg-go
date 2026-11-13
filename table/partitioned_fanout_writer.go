@@ -361,6 +361,9 @@ func newPartitionExtractionPlan(spec iceberg.PartitionSpec, schema *iceberg.Sche
 	pathPlan := partitionPathPlan{fields: make([]partitionPathField, len(partitionFields))}
 	specFieldsByID := make(map[int]iceberg.PartitionField, spec.NumFields())
 	for _, field := range spec.Fields() {
+		if len(field.SourceIDs) > 1 {
+			return nil, fmt.Errorf("%w: cannot write partition transform %s with multiple source fields", iceberg.ErrInvalidTransform, field.Transform)
+		}
 		specFieldsByID[field.FieldID] = field
 	}
 
@@ -388,6 +391,9 @@ func newPartitionExtractionPlan(spec iceberg.PartitionSpec, schema *iceberg.Sche
 		sourceType, ok := schema.FindTypeByID(sourceField.FirstSourceID())
 		if !ok {
 			return nil, fmt.Errorf("failed to find type for source field ID %d in schema", sourceField.FirstSourceID())
+		}
+		if err := checkPartitionSourceType(sourceField, sourceType); err != nil {
+			return nil, err
 		}
 		partitionFieldsInfo[i] = partitionFieldInfo{
 			sourceField: sourceField,
