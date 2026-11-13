@@ -1254,6 +1254,7 @@ func (s *SqliteCatalogTestSuite) TestCreateInNamespaceWithOnlyChildren() {
 			exists, err := cat.CheckNamespaceExists(ctx, ns)
 			s.Require().NoError(err)
 			s.Require().True(exists)
+
 			return ns
 		}
 
