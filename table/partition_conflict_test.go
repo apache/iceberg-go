@@ -129,7 +129,14 @@ func writeTestManifestList(
 	t.Helper()
 
 	listPath := filepath.ToSlash(filepath.Join(dir, fmt.Sprintf("snap-%d-manifests.avro", snapshotID)))
-	fs := iceio.LocalFS{}
+
+	return writeTestManifestListToIO(t, iceio.LocalFS{}, listPath, snapshotID, manifests)
+}
+
+// writeTestManifestListToIO writes a real manifest list using the IO the test table reads.
+func writeTestManifestListToIO(t *testing.T, fs iceio.WriteFileIO, listPath string, snapshotID int64, manifests []iceberg.ManifestFile) string {
+	t.Helper()
+
 	f, err := fs.Create(context.Background(), listPath)
 	require.NoError(t, err)
 
