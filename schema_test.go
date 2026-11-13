@@ -917,6 +917,42 @@ func TestUnmarshalSchemaRejectsDuplicateFieldIDs(t *testing.T) {
 			}`,
 			contains: "multiple fields for id 1: id and key",
 		},
+		{
+			name: "duplicate zero ids",
+			schema: `{
+				"type": "struct",
+				"fields": [
+					{"id": 0, "name": "created_at", "type": "timestamptz", "required": false},
+					{"id": 0, "name": "event", "type": "string", "required": false}
+				],
+				"schema-id": 0,
+				"identifier-field-ids": []
+			}`,
+			contains: "multiple fields for id 0: created_at and event",
+		},
+		{
+			name: "duplicate zero id nested in struct",
+			schema: `{
+				"type": "struct",
+				"fields": [
+					{"id": 0, "name": "id", "type": "long", "required": true},
+					{
+						"id": 1,
+						"name": "payload",
+						"type": {
+							"type": "struct",
+							"fields": [
+								{"id": 0, "name": "inner", "type": "string", "required": false}
+							]
+						},
+						"required": false
+					}
+				],
+				"schema-id": 0,
+				"identifier-field-ids": []
+			}`,
+			contains: "multiple fields for id 0: id and inner",
+		},
 	}
 
 	for _, tt := range tests {
