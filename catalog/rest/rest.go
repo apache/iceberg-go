@@ -763,7 +763,9 @@ func handleNon200(rsp *http.Response, override map[int]error, typeOverride map[s
 		e.wrapping = ErrRESTError
 	case 419:
 		e.wrapping = ErrAuthorizationExpired
-	case http.StatusNotImplemented:
+	case http.StatusNotAcceptable, http.StatusNotImplemented:
+		// 406 is the spec's UnsupportedOperationResponse; 501 is what a server
+		// without the operation may answer instead. Both are "not supported".
 		e.wrapping = iceberg.ErrNotImplemented
 	case http.StatusServiceUnavailable:
 		e.wrapping = ErrServiceUnavailable

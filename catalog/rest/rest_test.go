@@ -4986,3 +4986,38 @@ func TestUpdateTableKeepsOnlyCatalogScanPlanningDirective(t *testing.T) {
 		})
 	}
 }
+
+// TestUnsupportedOperationStatusesAreNotImplemented: 406, the spec's
+// UnsupportedOperationResponse, and 501 both mean the server does not support
+// the operation, so both surface as iceberg.ErrNotImplemented.
+func TestUnsupportedOperationStatusesAreNotImplemented(t *testing.T) {
+	for _, status := range []int{http.StatusNotAcceptable, http.StatusNotImplemented} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			mux := http.NewServeMux()
+			mux.HandleFunc("/v1/config", func(w http.ResponseWriter, req *http.Request) {
+				json.NewEncoder(w).Encode(map[string]any{
+					"defaults": map[string]any{}, "overrides": map[string]any{},
+					"endpoints": []string{"POST /v1/{prefix}/namespaces"},
+				})
+			})
+			mux.HandleFunc("/v1/namespaces", func(w http.ResponseWriter, req *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(status)
+				json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{
+					"message": "Cannot create namespace ns: metadata is not supported",
+					"type":    "UnsupportedOperationException",
+					"code":    status,
+				}})
+			})
+			srv := httptest.NewServer(mux)
+			defer srv.Close()
+
+			cat, err := rest.NewCatalog(context.Background(), "rest", srv.URL, rest.WithOAuthToken(TestToken))
+			require.NoError(t, err)
+
+			err = cat.CreateNamespace(context.Background(), table.Identifier{"ns"}, iceberg.Properties{"owner": "x"})
+			require.ErrorIs(t, err, iceberg.ErrNotImplemented)
+			assert.ErrorContains(t, err, "metadata is not supported")
+		})
+	}
+}
