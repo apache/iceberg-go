@@ -55,10 +55,15 @@ func (s StatisticsFile) MarshalJSON() ([]byte, error) {
 func (s *StatisticsFile) UnmarshalJSON(data []byte) error {
 	type plain StatisticsFile
 	var decoded plain
-	if err := unmarshalRequiredStatisticsFields(data, &decoded,
+	if err := unmarshalRequiredStatisticsFields(data, &decoded, "blob-metadata",
 		"snapshot-id", "statistics-path", "file-size-in-bytes",
 		"file-footer-size-in-bytes", "blob-metadata"); err != nil {
 		return err
+	}
+
+	// v0.7.0 wrote nil blob metadata slices as null. Treat those as empty.
+	if decoded.BlobMetadata == nil {
+		decoded.BlobMetadata = []BlobMetadata{}
 	}
 
 	*s = StatisticsFile(decoded)
@@ -90,9 +95,14 @@ func (b BlobMetadata) MarshalJSON() ([]byte, error) {
 func (b *BlobMetadata) UnmarshalJSON(data []byte) error {
 	type plain BlobMetadata
 	var decoded plain
-	if err := unmarshalRequiredStatisticsFields(data, &decoded,
+	if err := unmarshalRequiredStatisticsFields(data, &decoded, "fields",
 		"type", "snapshot-id", "sequence-number", "fields"); err != nil {
 		return err
+	}
+
+	// v0.7.0 wrote nil field ID slices as null. Treat those as empty.
+	if decoded.Fields == nil {
+		decoded.Fields = []int32{}
 	}
 
 	*b = BlobMetadata(decoded)
@@ -114,7 +124,7 @@ type PartitionStatisticsFile struct {
 func (p *PartitionStatisticsFile) UnmarshalJSON(data []byte) error {
 	type plain PartitionStatisticsFile
 	var decoded plain
-	if err := unmarshalRequiredStatisticsFields(data, &decoded,
+	if err := unmarshalRequiredStatisticsFields(data, &decoded, "",
 		"snapshot-id", "statistics-path", "file-size-in-bytes"); err != nil {
 		return err
 	}
@@ -126,8 +136,9 @@ func (p *PartitionStatisticsFile) UnmarshalJSON(data []byte) error {
 
 // unmarshalRequiredStatisticsFields checks presence and nullability at the
 // JSON boundary. Unmarshalling directly into value fields would silently
-// replace missing or null numbers and strings with zero values.
-func unmarshalRequiredStatisticsFields(data []byte, target any, required ...string) error {
+// replace missing or null numbers and strings with zero values. Legacy v0.7.0
+// encoded nil required slices as null, so allow only the named slice field.
+func unmarshalRequiredStatisticsFields(data []byte, target any, legacyNullableField string, required ...string) error {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(data, &fields); err != nil {
 		return err
@@ -138,7 +149,7 @@ func unmarshalRequiredStatisticsFields(data []byte, target any, required ...stri
 
 	for _, field := range required {
 		value, ok := fields[field]
-		if !ok || bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+		if !ok || (field != legacyNullableField && bytes.Equal(bytes.TrimSpace(value), []byte("null"))) {
 			return fmt.Errorf("%w: required statistics field %q is missing or null", iceberg.ErrInvalidArgument, field)
 		}
 	}
