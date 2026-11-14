@@ -271,6 +271,27 @@ func validateSortSourceIDs(ids []int, binding orderBinding) error {
 	return nil
 }
 
+// validateSortTransformSources rejects multiple sources for Iceberg's known
+// single-argument transforms when creating new orders. Existing metadata must
+// remain readable and serializable; unknown transforms may have multiple inputs.
+func validateSortTransformSources(field SortField) error {
+	switch field.Transform.(type) {
+	case iceberg.IdentityTransform, *iceberg.IdentityTransform,
+		iceberg.VoidTransform, *iceberg.VoidTransform,
+		iceberg.BucketTransform, *iceberg.BucketTransform,
+		iceberg.TruncateTransform, *iceberg.TruncateTransform,
+		iceberg.YearTransform, *iceberg.YearTransform,
+		iceberg.MonthTransform, *iceberg.MonthTransform,
+		iceberg.DayTransform, *iceberg.DayTransform,
+		iceberg.HourTransform, *iceberg.HourTransform:
+		if len(field.SourceIDs) != 1 {
+			return fmt.Errorf("%w: transform %s requires a single source ID", ErrInvalidSortSourceID, field.Transform)
+		}
+	}
+
+	return nil
+}
+
 const (
 	InitialSortOrderID  = 1
 	UnsortedSortOrderID = 0
@@ -315,7 +336,20 @@ type UnboundSortOrder struct {
 }
 
 func (u *UnboundSortOrder) UnmarshalJSON(b []byte) error {
-	return u.unmarshal(b, unboundOrder)
+	var next SortOrder
+	if err := next.unmarshal(b, unboundOrder); err != nil {
+		return err
+	}
+
+	for idx, field := range next.fields {
+		if err := validateSortTransformSources(field); err != nil {
+			return fmt.Errorf("sort field at index %d: %w", idx, err)
+		}
+	}
+
+	u.SortOrder = next
+
+	return nil
 }
 
 func (s SortOrder) OrderID() int {
@@ -440,6 +474,9 @@ func newSortOrder(orderID int, fields []SortField, validateSourceIDs bool) (Sort
 		if validateSourceIDs {
 			if err := validateSortSourceIDs(field.SourceIDs, boundOrder); err != nil {
 				return SortOrder{}, fmt.Errorf("sort field at index %d has invalid source IDs: %w", idx, err)
+			}
+			if err := validateSortTransformSources(field); err != nil {
+				return SortOrder{}, fmt.Errorf("sort field at index %d: %w", idx, err)
 			}
 		}
 	}

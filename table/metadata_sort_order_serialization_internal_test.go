@@ -93,3 +93,55 @@ func TestSetDefaultSortOrderIDReplayAfterReuse(t *testing.T) {
 		})
 	}
 }
+
+func TestLegacyBuiltInSortOrderWithExtraSourcesSurvivesMetadataCommit(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		defaultOrder bool
+	}{
+		{name: "historical non-default order"},
+		{name: "default order", defaultOrder: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var raw map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal([]byte(ExampleTableMetadataV2), &raw))
+
+			var orders []json.RawMessage
+			require.NoError(t, json.Unmarshal(raw["sort-orders"], &orders))
+			legacyOrder := json.RawMessage(`{"order-id":9,"fields":[{"source-ids":[2,3],"transform":"identity","direction":"asc","null-order":"nulls-first"}]}`)
+			orders = append(orders, legacyOrder)
+			var err error
+			raw["sort-orders"], err = json.Marshal(orders)
+			require.NoError(t, err)
+			if tc.defaultOrder {
+				raw["default-sort-order-id"] = json.RawMessage(`9`)
+			}
+
+			encoded, err := json.Marshal(raw)
+			require.NoError(t, err)
+			metadata, err := ParseMetadataBytes(encoded)
+			require.NoError(t, err)
+			require.Len(t, metadata.SortOrders(), 2)
+
+			builder, err := MetadataBuilderFromBase(metadata, "")
+			require.NoError(t, err)
+			require.NoError(t, builder.SetProperties(iceberg.Properties{"test.sort-order-compatibility": "true"}))
+			updated, err := builder.Build()
+			require.NoError(t, err)
+			serialized, err := json.Marshal(updated)
+			require.NoError(t, err)
+			require.Contains(t, string(serialized), `"source-ids":[2,3]`)
+
+			reloaded, err := ParseMetadataBytes(serialized)
+			require.NoError(t, err)
+			var found bool
+			for _, order := range reloaded.SortOrders() {
+				if order.OrderID() == 9 {
+					require.Equal(t, []int{2, 3}, order.Field(0).SourceIDs)
+					found = true
+				}
+			}
+			require.True(t, found, "legacy sort order should survive the metadata update")
+		})
+	}
+}

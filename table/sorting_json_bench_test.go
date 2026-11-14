@@ -37,7 +37,7 @@ func BenchmarkSortFieldUnmarshalJSON(b *testing.B) {
 		},
 		{
 			name:    "multi-source",
-			payload: []byte(`{"source-ids": [1, 2], "transform": "bucket[16]", "direction": "asc", "null-order": "nulls-first"}`),
+			payload: []byte(`{"source-ids": [1, 2], "transform": "future_multi", "direction": "asc", "null-order": "nulls-first"}`),
 		},
 	} {
 		b.Run(tt.name, func(b *testing.B) {
