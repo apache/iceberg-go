@@ -1341,6 +1341,8 @@ func (a *arrowProjectionVisitor) List(listType iceberg.ListType, listArr arrow.A
 	case arrow.LARGE_LIST:
 		outType = arrow.LargeListOfField(elemField)
 	case arrow.LIST_VIEW:
+		outType = arrow.ListViewOfField(elemField)
+	case arrow.LARGE_LIST_VIEW:
 		outType = arrow.LargeListViewOfField(elemField)
 	}
 
