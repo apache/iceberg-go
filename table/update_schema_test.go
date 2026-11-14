@@ -1316,6 +1316,55 @@ func TestBuildUpdates(t *testing.T) {
 	})
 }
 
+func TestBuildUpdatesSelectsAddedSchemaAfterConcurrentRegistration(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		otherFields []string
+	}{
+		{name: "different schema", otherFields: []string{"a", "b"}},
+		{name: "equivalent schema", otherFields: []string{"a", "c"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := iceberg.NestedField{ID: 1, Name: "a", Type: iceberg.PrimitiveTypes.Int32}
+			b := iceberg.NestedField{ID: 2, Name: "b", Type: iceberg.PrimitiveTypes.Int32}
+			c := iceberg.NestedField{ID: 3, Name: "c", Type: iceberg.PrimitiveTypes.Int32}
+			base, err := NewMetadata(iceberg.NewSchema(0, a, b, c), iceberg.UnpartitionedSpec, UnsortedSortOrder, "", nil)
+			require.NoError(t, err)
+
+			tbl := New([]string{"table"}, base, "", nil, nil)
+			updates, requirements, err := tbl.NewTransaction().UpdateSchema(true, false).
+				DeleteColumn([]string{"b"}).BuildUpdates()
+			require.NoError(t, err)
+
+			otherFields := make([]iceberg.NestedField, 0, len(tc.otherFields))
+			for _, name := range tc.otherFields {
+				field, ok := base.CurrentSchema().FindFieldByName(name)
+				require.True(t, ok)
+				otherFields = append(otherFields, field)
+			}
+			builder, err := MetadataBuilderFromBase(base, "")
+			require.NoError(t, err)
+			require.NoError(t, builder.AddSchema(iceberg.NewSchema(1, otherFields...)))
+			concurrent, err := builder.Build()
+			require.NoError(t, err)
+			require.Equal(t, base.CurrentSchema().ID, concurrent.CurrentSchema().ID)
+			require.NoError(t, AssertLastAssignedFieldID(base.LastColumnID()).Validate(concurrent))
+			for _, requirement := range requirements {
+				require.NoError(t, requirement.Validate(concurrent))
+			}
+
+			builder, err = MetadataBuilderFromBase(concurrent, "")
+			require.NoError(t, err)
+			for _, update := range updates {
+				require.NoError(t, update.Apply(builder))
+			}
+			committed, err := builder.Build()
+			require.NoError(t, err)
+			require.Equal(t, []iceberg.NestedField{a, c}, committed.CurrentSchema().Fields())
+		})
+	}
+}
+
 // TestAddColumnMonotonicFieldIDs exercises the case where the table's
 // last-column-id is greater than the current schema's highest field id — for
 // example because a previous schema was added that introduced higher ids, or
