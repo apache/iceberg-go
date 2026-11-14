@@ -309,9 +309,7 @@ func TestIncrementalChangelogReadListColumn(t *testing.T) {
 	location := filepath.ToSlash(t.TempDir())
 	schema := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
-		iceberg.NestedField{ID: 2, Name: "tags", Type: &iceberg.ListType{
-			ElementID: 3, Element: iceberg.PrimitiveTypes.String,
-		}},
+		iceberg.NestedField{ID: 2, Name: "tags", Type: iceberg.NewListType(3, iceberg.PrimitiveTypes.String, false)},
 	)
 	meta, err := table.NewMetadata(schema, iceberg.UnpartitionedSpec, table.UnsortedSortOrder, location,
 		iceberg.Properties{table.PropertyFormatVersion: "2"})
@@ -638,6 +636,54 @@ func TestIncrementalChangelogReadEqualityDeletes(t *testing.T) {
 		rec.Release()
 	}
 	require.Equal(t, []string{"b"}, deletedData)
+}
+
+func TestIncrementalChangelogReadProjectsAddedEqualityDeleteFieldForOlderDataFiles(t *testing.T) {
+	ctx := t.Context()
+	tbl := newChangelogMORTable(t, 2)
+	oldSchema := tbl.Metadata().CurrentSchema()
+	dataPath := tbl.Location() + "/data/data-before-category.parquet"
+	dataArrowSchema, err := table.SchemaToArrowSchema(oldSchema, nil, false, false)
+	require.NoError(t, err)
+	writeParquetFile(t, dataPath, dataArrowSchema, `[{"id":1,"data":"a"},{"id":2,"data":"b"}]`)
+	dataFile := changelogDataFile(t, dataPath, 2)
+
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.AddDataFilesByPath(ctx, []string{dataPath}, nil, false))
+	tbl, err = tx.Commit(ctx)
+	require.NoError(t, err)
+
+	tx = tbl.NewTransaction()
+	require.NoError(t, tx.UpdateSchema(true, false).
+		AddColumn([]string{"category"}, iceberg.PrimitiveTypes.String, "", false, nil).
+		Commit())
+	tbl, err = tx.Commit(ctx)
+	require.NoError(t, err)
+
+	deletePath := tbl.Location() + "/data/eq-del-null-category.parquet"
+	deleteSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 3, Name: "category", Type: iceberg.PrimitiveTypes.String},
+	)
+	deleteArrowSchema, err := table.SchemaToArrowSchema(deleteSchema, nil, true, false)
+	require.NoError(t, err)
+	writeParquetFile(t, deletePath, deleteArrowSchema, `[{"category":null}]`)
+	deleteInfo, err := os.Stat(deletePath)
+	require.NoError(t, err)
+	deleteBuilder, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec, iceberg.EntryContentEqDeletes,
+		deletePath, iceberg.ParquetFile, nil, nil, nil, 1, deleteInfo.Size())
+	require.NoError(t, err)
+	deleteBuilder.EqualityFieldIDs([]int{3})
+
+	deletedRows, err := table.NewDeletedRowsScanTask(
+		dataFile, []iceberg.DataFile{deleteBuilder.Build()}, nil, 1, 44)
+	require.NoError(t, err)
+	_, records, err := tbl.NewIncrementalChangelogScan(
+		table.WithSelectedFields("id", "data")).Read(ctx, []table.ChangelogScanTask{deletedRows})
+	require.NoError(t, err)
+
+	got := collectChangelogRows(t, records)
+	require.Equal(t, []int64{1, 2}, changelogIDs(got, table.ChangelogOpDelete))
 }
 
 func TestIncrementalChangelogReadSameSnapshotPositionDelete(t *testing.T) {

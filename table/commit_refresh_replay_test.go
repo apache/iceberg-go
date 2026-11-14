@@ -229,7 +229,7 @@ func TestDoCommit_ValidatorRejectsOnRefresh(t *testing.T) {
 // validator that fails to read must stay resumable.
 func TestResumeDeterministicRejectionsMakeTransactionUnusable(t *testing.T) {
 	head := int64(100)
-	noRetries := iceberg.Properties{}
+	noRetries := iceberg.Properties{CommitNumRetriesKey: "0"}
 	// Rejections formatted like the validators in conflict_validation.go.
 	rejectConcurrent := func(sentinel error) conflictValidatorFunc {
 		return func(cc *conflictContext) error {
@@ -268,7 +268,7 @@ func TestResumeDeterministicRejectionsMakeTransactionUnusable(t *testing.T) {
 		want                error
 		message             string
 		matchesCommitFailed bool
-		// mentionsRetry marks validator causes, whose text includes
+		// mentionsRetry marks validator causes whose text includes
 		// ErrCommitFailed's.
 		mentionsRetry bool
 	}{
@@ -302,10 +302,9 @@ func TestResumeDeterministicRejectionsMakeTransactionUnusable(t *testing.T) {
 		},
 		{
 			name: "data files missing", validator: rejectConcurrent(ErrDataFilesMissing),
-			peer:                func(t *testing.T, base Metadata) Metadata { return graftSnapshotOnto(t, base, MainBranch, 200) },
-			want:                ErrDataFilesMissing,
-			message:             "transaction cannot be committed again: validation conflict: commit failed, refresh and try again: referenced data files missing: snapshot 200 added f.parquet",
-			matchesCommitFailed: true, mentionsRetry: true,
+			peer:    func(t *testing.T, base Metadata) Metadata { return graftSnapshotOnto(t, base, MainBranch, 200) },
+			want:    ErrDataFilesMissing,
+			message: "transaction cannot be committed again: validation failed: referenced data files missing: snapshot 200 added f.parquet",
 		},
 		{
 			name: "wrapped conflict from any validator",

@@ -313,7 +313,7 @@ func (p *PartitionSpec) BindToSchema(schema *Schema, lastPartitionID *int, newSp
 				continue
 			}
 		}
-		opts = append(opts, AddPartitionFieldBySourceID(field.FirstSourceID(), field.Name, field.Transform, schema, &field.FieldID))
+		opts = append(opts, AddPartitionFieldBySourceIDs(field.SourceIDs, field.Name, field.Transform, schema, &field.FieldID))
 	}
 
 	// Replay, not authoring: the spec may come from another client, so it only
@@ -376,7 +376,7 @@ func AddPartitionFieldByName(sourceName string, targetName string, transform Tra
 		if !ok {
 			return fmt.Errorf("cannot find source column with name: %s in schema", sourceName)
 		}
-		err := p.addSpecFieldInternal(schema, targetName, field, transform, fieldID)
+		err := p.addSpecFieldInternal(schema, targetName, []NestedField{field}, transform, fieldID)
 		if err != nil {
 			return err
 		}
@@ -386,39 +386,96 @@ func AddPartitionFieldByName(sourceName string, targetName string, transform Tra
 }
 
 func AddPartitionFieldBySourceID(sourceID int, targetName string, transform Transform, schema *Schema, fieldID *int) PartitionOption {
+	return AddPartitionFieldBySourceIDs([]int{sourceID}, targetName, transform, schema, fieldID)
+}
+
+// AddPartitionFieldBySourceIDs adds a partition field from one or more source
+// columns. The source IDs are kept in the order provided for multi-argument
+// transforms.
+func AddPartitionFieldBySourceIDs(sourceIDs []int, targetName string, transform Transform, schema *Schema, fieldID *int) PartitionOption {
+	sourceIDs = slices.Clone(sourceIDs)
+
 	return func(p *PartitionSpec) error {
 		if schema == nil {
 			return errors.New("cannot add partition field with nil schema")
 		}
-		field, ok := schema.FindFieldByID(sourceID)
-		if !ok {
-			return fmt.Errorf("cannot find source column with id: %d in schema", sourceID)
-		}
-		err := p.addSpecFieldInternal(schema, targetName, field, transform, fieldID)
-		if err != nil {
-			return err
+		if len(sourceIDs) == 0 {
+			return errors.New("cannot add partition field without source IDs")
 		}
 
-		return nil
+		fields := make([]NestedField, len(sourceIDs))
+		for i, sourceID := range sourceIDs {
+			field, ok := schema.FindFieldByID(sourceID)
+			if !ok {
+				return fmt.Errorf("cannot find source column with id: %d in schema", sourceID)
+			}
+			fields[i] = field
+		}
+
+		return p.addSpecFieldInternal(schema, targetName, fields, transform, fieldID)
 	}
 }
 
-func (p *PartitionSpec) addSpecFieldInternal(schema *Schema, targetName string, field NestedField, transform Transform, fieldID *int) error {
+func (p *PartitionSpec) addSpecFieldInternal(schema *Schema, targetName string, sourceFields []NestedField, transform Transform, fieldID *int) error {
 	if targetName == "" {
 		return errors.New("cannot use empty partition name")
+	}
+	if len(sourceFields) == 0 {
+		return errors.New("cannot add partition field without source IDs")
+	}
+	if isNilTransform(transform) {
+		return fmt.Errorf("partition field %s has no transform", targetName)
 	}
 	if err := validateTransform(transform); err != nil {
 		return err
 	}
-	if _, ok := field.Type.(VariantType); ok {
-		return fmt.Errorf("%w: cannot partition by %s source field: %s", ErrInvalidArgument, field.Type, field.Name)
+	builtIn := isBuiltInPartitionTransform(transform)
+	if builtIn && len(sourceFields) > 1 {
+		return fmt.Errorf("%w: transform %s requires a single source field", ErrInvalidArgument, transform)
+	}
+	isVoid := isVoidPartitionTransform(transform)
+	var parents map[int]int
+	if !isVoid {
+		var err error
+		parents, err = schema.lazyIDToParent()
+		if err != nil {
+			return err
+		}
+	}
+	sourceIDs := make([]int, len(sourceFields))
+	for i, field := range sourceFields {
+		if _, ok := field.Type.(VariantType); ok {
+			return fmt.Errorf("%w: cannot partition by %s source field: %s", ErrInvalidArgument, field.Type, field.Name)
+		}
+		if !isVoid {
+			if _, ok := field.Type.(PrimitiveType); !ok {
+				return fmt.Errorf("%w: cannot partition by non-primitive source field: %s", ErrInvalidArgument, field.Name)
+			}
+			for parentID, ok := parents[field.ID]; ok; parentID, ok = parents[parentID] {
+				parent, found := schema.FindFieldByID(parentID)
+				if !found {
+					return fmt.Errorf("%w: cannot find parent field %d for %s", ErrInvalidArgument, parentID, field.Name)
+				}
+				if _, ok := parent.Type.(*StructType); !ok {
+					return fmt.Errorf("%w: partition source field %s cannot be nested in %s", ErrInvalidArgument, field.Name, parent.Name)
+				}
+			}
+		}
+		sourceIDs[i] = field.ID
+	}
+	// CanTransform describes a single input type. Multi-source transforms may
+	// accept different types for their other inputs, so check the first only.
+	if !isVoid {
+		if err := ValidatePartitionTransformSourceType(transform, sourceFields[0].Type); err != nil {
+			return fmt.Errorf("%w: %v", ErrInvalidArgument, err)
+		}
 	}
 	for _, existingField := range p.fields {
 		if existingField.Name == targetName {
 			return errors.New("duplicate partition name: " + targetName)
 		}
 	}
-	if err := validatePartitionNameAgainstSchema(schema, targetName, field.ID); err != nil {
+	if err := validatePartitionNameAgainstSchema(schema, targetName, sourceIDs); err != nil {
 		return err
 	}
 	var fieldIDValue int
@@ -428,7 +485,7 @@ func (p *PartitionSpec) addSpecFieldInternal(schema *Schema, targetName string, 
 		fieldIDValue = *fieldID
 	}
 	unboundField := PartitionField{
-		SourceIDs: []int{field.ID},
+		SourceIDs: sourceIDs,
 		FieldID:   fieldIDValue,
 		Name:      targetName,
 		Transform: transform,
@@ -442,14 +499,18 @@ func (p *PartitionSpec) addSpecFieldInternal(schema *Schema, targetName string, 
 // column. Without this, a spec bound to a schema its source IDs do not refer to
 // resolves each field to whichever column happens to hold that ID and reports
 // no error, so every partition field silently shifts.
-func validatePartitionNameAgainstSchema(schema *Schema, targetName string, sourceID int) error {
+func validatePartitionNameAgainstSchema(schema *Schema, targetName string, sourceIDs []int) error {
 	collision, ok := schema.FindFieldByName(targetName)
-	if !ok || collision.ID == sourceID {
+	if !ok || slices.Contains(sourceIDs, collision.ID) {
 		return nil
 	}
+	if len(sourceIDs) == 1 {
+		return fmt.Errorf("partition name %s matches schema column with field ID %d, but the field is sourced from %d",
+			targetName, collision.ID, sourceIDs[0])
+	}
 
-	return fmt.Errorf("partition name %s matches schema column with field ID %d, but the field is sourced from %d",
-		targetName, collision.ID, sourceID)
+	return fmt.Errorf("partition name %s matches schema column with field ID %d, but the field is sourced from %v",
+		targetName, collision.ID, sourceIDs)
 }
 
 func validateTransform(transform Transform) error {

@@ -18,6 +18,7 @@
 package iceberg
 
 import (
+	"errors"
 	"reflect"
 	"strconv"
 	"strings"
@@ -115,6 +116,108 @@ func TestIndexByNameDeepSiblingRestoration(t *testing.T) {
 	}
 	if got := byID[34]; got != "sibling" {
 		t.Errorf("sibling name = %q, want sibling", got)
+	}
+}
+
+func TestLazyNameToIDLowerRejectsOnlyAmbiguousNames(t *testing.T) {
+	schema := NewSchema(0,
+		NestedField{ID: 1, Name: "ID", Type: PrimitiveTypes.Int64},
+		NestedField{ID: 2, Name: "id", Type: PrimitiveTypes.Int64},
+		NestedField{ID: 3, Name: "unique", Type: PrimitiveTypes.Int64},
+	)
+
+	index, err := schema.lazyNameToIDLower()
+	if err != nil {
+		t.Fatalf("lazyNameToIDLower() error = %v, want success", err)
+	}
+	if len(index) != 2 {
+		t.Fatalf("lazyNameToIDLower() has %d names, want 2", len(index))
+	}
+
+	for _, name := range []string{"id", "ID", "Id"} {
+		_, found, err := schema.findFieldByNameCaseInsensitive(name)
+		if found || !errors.Is(err, ErrInvalidSchema) ||
+			!strings.Contains(err.Error(), `"ID" and "id"`) {
+			t.Errorf("findFieldByNameCaseInsensitive(%q) = %v, %v; want named collision", name, found, err)
+		}
+		if _, ok := schema.FindFieldByNameCaseInsensitive(name); ok {
+			t.Errorf("FindFieldByNameCaseInsensitive(%q) resolved an ambiguous name", name)
+		}
+		if _, err := Reference(name).Bind(schema, false); !errors.Is(err, ErrInvalidSchema) ||
+			!strings.Contains(err.Error(), `"ID" and "id"`) {
+			t.Errorf("Reference(%q).Bind() = %v, want named collision", name, err)
+		}
+		if _, err := schema.Select(false, name); !errors.Is(err, ErrInvalidSchema) ||
+			!strings.Contains(err.Error(), `"ID" and "id"`) {
+			t.Errorf("Select(false, %q) = %v, want named collision", name, err)
+		}
+		if _, err := schema.Select(false, "UnIqUe", name); !errors.Is(err, ErrInvalidSchema) ||
+			!strings.Contains(err.Error(), `"ID" and "id"`) {
+			t.Errorf("Select(false, unique, %q) = %v, want named collision", name, err)
+		}
+	}
+
+	if got, ok := schema.FindFieldByNameCaseInsensitive("UnIqUe"); !ok || got.ID != 3 {
+		t.Errorf("FindFieldByNameCaseInsensitive(unique) = %v, %v; want field 3", got, ok)
+	}
+	if _, err := Reference("UNIQUE").Bind(schema, false); err != nil {
+		t.Errorf("Reference(unique).Bind() error = %v, want success", err)
+	}
+	selected, err := schema.Select(false, "UnIqUe")
+	if err != nil {
+		t.Fatalf("Select(false, unique) error = %v, want success", err)
+	}
+	if got, ok := selected.FindFieldByName("unique"); !ok || got.ID != 3 {
+		t.Errorf("Select(false, unique) selected %v, %v; want field 3", got, ok)
+	}
+
+	if _, err := Reference("ID").Bind(schema, true); err != nil {
+		t.Errorf("case-sensitive Reference.Bind() error = %v, want success", err)
+	}
+}
+
+func TestCaseInsensitiveFieldLookupRejectsNestedCollisions(t *testing.T) {
+	schema := NewSchema(0, NestedField{
+		ID: 1, Name: "person", Required: true,
+		Type: NewStructType(
+			NestedField{ID: 2, Name: "Age", Type: PrimitiveTypes.Int32, Required: true},
+			NestedField{ID: 3, Name: "age", Type: PrimitiveTypes.String, Required: true},
+			NestedField{ID: 4, Name: "City", Type: PrimitiveTypes.String},
+		),
+	})
+
+	for range 8 {
+		t.Run("concurrent lookups", func(t *testing.T) {
+			t.Parallel()
+			_, found, err := schema.findFieldByNameCaseInsensitive("PERSON.AGE")
+			if found || !errors.Is(err, ErrInvalidSchema) ||
+				!strings.Contains(err.Error(), `"person.Age" and "person.age"`) {
+				t.Errorf("findFieldByNameCaseInsensitive(PERSON.AGE) = %v, %v; want named collision", found, err)
+			}
+			if _, found := schema.FindTypeByNameCaseInsensitive("PERSON.AGE"); found {
+				t.Error("FindTypeByNameCaseInsensitive resolved an ambiguous child")
+			}
+			if _, err := schema.Select(false, "person.age"); !errors.Is(err, ErrInvalidSchema) {
+				t.Errorf("Select(false, person.age) = %v; want invalid schema", err)
+			}
+			if _, err := Reference("PERSON.AGE").Bind(schema, false); !errors.Is(err, ErrInvalidSchema) {
+				t.Errorf("Reference(PERSON.AGE).Bind() = %v; want invalid schema", err)
+			}
+
+			if parent, found := schema.FindFieldByNameCaseInsensitive("PERSON"); !found || parent.ID != 1 {
+				t.Errorf("FindFieldByNameCaseInsensitive(PERSON) = %v, %v; want field 1", parent, found)
+			}
+			if city, found := schema.FindFieldByNameCaseInsensitive("PERSON.CITY"); !found || city.ID != 4 {
+				t.Errorf("FindFieldByNameCaseInsensitive(PERSON.CITY) = %v, %v; want field 4", city, found)
+			}
+			selected, err := schema.Select(false, "PERSON.CITY")
+			if err != nil {
+				t.Fatalf("Select(false, PERSON.CITY) = %v; want success", err)
+			}
+			if _, found := selected.FindFieldByID(4); !found {
+				t.Error("Select(false, PERSON.CITY) did not select field 4")
+			}
+		})
 	}
 }
 

@@ -438,9 +438,10 @@ func buildBenchDeleteSetInt(numDeletes int) *equalityDeleteSet {
 	}
 
 	return &equalityDeleteSet{
-		keys:     keys,
-		fieldIDs: []int{1, 2},
-		colNames: []string{"id", "category"},
+		keys:       keys,
+		fieldIDs:   []int{1, 2},
+		colNames:   []string{"id", "category"},
+		fieldTypes: []iceberg.Type{iceberg.PrimitiveTypes.Int64, iceberg.PrimitiveTypes.Int64},
 	}
 }
 
@@ -480,9 +481,10 @@ func buildBenchDeleteSetString(numDeletes int) *equalityDeleteSet {
 	}
 
 	return &equalityDeleteSet{
-		keys:     keys,
-		fieldIDs: []int{1, 2},
-		colNames: []string{"id", "name"},
+		keys:       keys,
+		fieldIDs:   []int{1, 2},
+		colNames:   []string{"id", "name"},
+		fieldTypes: []iceberg.Type{iceberg.PrimitiveTypes.Int64, iceberg.PrimitiveTypes.String},
 	}
 }
 
@@ -500,9 +502,10 @@ func buildBenchDeleteSetIntNoMatch(numDeletes int) *equalityDeleteSet {
 	}
 
 	return &equalityDeleteSet{
-		keys:     keys,
-		fieldIDs: []int{1, 2},
-		colNames: []string{"id", "category"},
+		keys:       keys,
+		fieldIDs:   []int{1, 2},
+		colNames:   []string{"id", "category"},
+		fieldTypes: []iceberg.Type{iceberg.PrimitiveTypes.Int64, iceberg.PrimitiveTypes.Int64},
 	}
 }
 
@@ -522,9 +525,10 @@ func buildBenchDeleteSetStringNoMatch(numDeletes int) *equalityDeleteSet {
 	}
 
 	return &equalityDeleteSet{
-		keys:     keys,
-		fieldIDs: []int{1, 2},
-		colNames: []string{"id", "name"},
+		keys:       keys,
+		fieldIDs:   []int{1, 2},
+		colNames:   []string{"id", "name"},
+		fieldTypes: []iceberg.Type{iceberg.PrimitiveTypes.Int64, iceberg.PrimitiveTypes.String},
 	}
 }
 
@@ -540,9 +544,10 @@ func buildBenchDeleteSetSingleInt64(numDeletes int) *equalityDeleteSet {
 	}
 
 	return &equalityDeleteSet{
-		keys:     keys,
-		fieldIDs: []int{1},
-		colNames: []string{"id"},
+		keys:       keys,
+		fieldIDs:   []int{1},
+		colNames:   []string{"id"},
+		fieldTypes: []iceberg.Type{iceberg.PrimitiveTypes.Int64},
 	}
 }
 
@@ -558,9 +563,10 @@ func buildBenchDeleteSetSingleInt64NoMatch(numDeletes int) *equalityDeleteSet {
 	}
 
 	return &equalityDeleteSet{
-		keys:     keys,
-		fieldIDs: []int{1},
-		colNames: []string{"id"},
+		keys:       keys,
+		fieldIDs:   []int{1},
+		colNames:   []string{"id"},
+		fieldTypes: []iceberg.Type{iceberg.PrimitiveTypes.Int64},
 	}
 }
 
@@ -741,7 +747,7 @@ func benchmarkNestedEqualityDeleteSchema(width, depth int) (*iceberg.Schema, int
 			fields[i] = field
 		}
 
-		return &iceberg.StructType{FieldList: fields}
+		return iceberg.NewStructType(fields...)
 	}
 
 	fields := make([]iceberg.NestedField, width)

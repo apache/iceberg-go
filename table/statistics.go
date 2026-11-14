@@ -18,8 +18,11 @@
 package table
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 
+	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/puffin"
 )
 
@@ -47,6 +50,27 @@ func (s StatisticsFile) MarshalJSON() ([]byte, error) {
 	return json.Marshal(statisticsFile(s))
 }
 
+// UnmarshalJSON rejects missing required fields rather than treating them as
+// zero values, as required for table statistics metadata.
+func (s *StatisticsFile) UnmarshalJSON(data []byte) error {
+	type plain StatisticsFile
+	var decoded plain
+	if err := unmarshalRequiredStatisticsFields(data, &decoded, "blob-metadata",
+		"snapshot-id", "statistics-path", "file-size-in-bytes",
+		"file-footer-size-in-bytes", "blob-metadata"); err != nil {
+		return err
+	}
+
+	// v0.7.0 wrote nil blob metadata slices as null. Treat those as empty.
+	if decoded.BlobMetadata == nil {
+		decoded.BlobMetadata = []BlobMetadata{}
+	}
+
+	*s = StatisticsFile(decoded)
+
+	return nil
+}
+
 // BlobMetadata is the metadata of a statistics or indices blob.
 // Its type uses the same Puffin blob identifiers as the file reader and writer.
 type BlobMetadata struct {
@@ -67,6 +91,25 @@ func (b BlobMetadata) MarshalJSON() ([]byte, error) {
 	return json.Marshal(blobMetadata(b))
 }
 
+// UnmarshalJSON checks the required fields of each statistics blob.
+func (b *BlobMetadata) UnmarshalJSON(data []byte) error {
+	type plain BlobMetadata
+	var decoded plain
+	if err := unmarshalRequiredStatisticsFields(data, &decoded, "fields",
+		"type", "snapshot-id", "sequence-number", "fields"); err != nil {
+		return err
+	}
+
+	// v0.7.0 wrote nil field ID slices as null. Treat those as empty.
+	if decoded.Fields == nil {
+		decoded.Fields = []int32{}
+	}
+
+	*b = BlobMetadata(decoded)
+
+	return nil
+}
+
 // PartitionStatisticsFile represents a partition statistics file that can be used to read table data more efficiently.
 //
 // Statistics are informational. A reader can choose to ignore statistics information. Statistics
@@ -75,4 +118,41 @@ type PartitionStatisticsFile struct {
 	SnapshotID      int64  `json:"snapshot-id"`
 	StatisticsPath  string `json:"statistics-path"`
 	FileSizeInBytes int64  `json:"file-size-in-bytes"`
+}
+
+// UnmarshalJSON checks the required fields of partition statistics metadata.
+func (p *PartitionStatisticsFile) UnmarshalJSON(data []byte) error {
+	type plain PartitionStatisticsFile
+	var decoded plain
+	if err := unmarshalRequiredStatisticsFields(data, &decoded, "",
+		"snapshot-id", "statistics-path", "file-size-in-bytes"); err != nil {
+		return err
+	}
+
+	*p = PartitionStatisticsFile(decoded)
+
+	return nil
+}
+
+// unmarshalRequiredStatisticsFields checks presence and nullability at the
+// JSON boundary. Unmarshalling directly into value fields would silently
+// replace missing or null numbers and strings with zero values. Legacy v0.7.0
+// encoded nil required slices as null, so allow only the named slice field.
+func unmarshalRequiredStatisticsFields(data []byte, target any, legacyNullableField string, required ...string) error {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	if fields == nil {
+		return fmt.Errorf("%w: statistics metadata must be an object", iceberg.ErrInvalidArgument)
+	}
+
+	for _, field := range required {
+		value, ok := fields[field]
+		if !ok || (field != legacyNullableField && bytes.Equal(bytes.TrimSpace(value), []byte("null"))) {
+			return fmt.Errorf("%w: required statistics field %q is missing or null", iceberg.ErrInvalidArgument, field)
+		}
+	}
+
+	return json.Unmarshal(data, target)
 }

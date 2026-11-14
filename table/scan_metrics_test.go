@@ -151,12 +151,10 @@ func TestProjectedFieldsNested(t *testing.T) {
 	// + Schema.findColumnName).
 	schema := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
-		iceberg.NestedField{ID: 2, Name: "location", Required: false, Type: &iceberg.StructType{
-			FieldList: []iceberg.NestedField{
-				{ID: 3, Name: "lat", Type: iceberg.PrimitiveTypes.Float64, Required: false},
-				{ID: 4, Name: "lon", Type: iceberg.PrimitiveTypes.Float64, Required: false},
-			},
-		}},
+		iceberg.NestedField{ID: 2, Name: "location", Required: false, Type: iceberg.NewStructType(
+			iceberg.NestedField{ID: 3, Name: "lat", Type: iceberg.PrimitiveTypes.Float64, Required: false},
+			iceberg.NestedField{ID: 4, Name: "lon", Type: iceberg.PrimitiveTypes.Float64, Required: false},
+		)},
 	)
 	meta, err := NewMetadata(schema, iceberg.UnpartitionedSpec, UnsortedSortOrder,
 		"mem://bucket/tbl", iceberg.Properties{})

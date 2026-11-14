@@ -30,6 +30,7 @@ package puffin
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 )
 
@@ -77,6 +78,112 @@ type BlobMetadata struct {
 type Footer struct {
 	Blobs      []BlobMetadata    `json:"blobs"`
 	Properties map[string]string `json:"properties,omitempty"`
+}
+
+// decodePuffinProperties rejects non-string property values. Go's JSON decoder
+// otherwise converts null map values into empty strings, unlike Iceberg Java.
+func decodePuffinProperties(data json.RawMessage) (map[string]string, error) {
+	if len(data) == 0 {
+		return nil, nil
+	}
+
+	var raw map[string]*string
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, fmt.Errorf("invalid properties: %w", err)
+	}
+	if raw == nil {
+		return nil, errors.New("properties must be a JSON object")
+	}
+
+	properties := make(map[string]string, len(raw))
+	for key, value := range raw {
+		if value == nil {
+			return nil, fmt.Errorf("property %q must be a string", key)
+		}
+		properties[key] = *value
+	}
+
+	return properties, nil
+}
+
+// UnmarshalJSON rejects missing or null required Puffin blob metadata fields.
+// Without this check, encoding/json silently substitutes zero values.
+func (b *BlobMetadata) UnmarshalJSON(data []byte) error {
+	var wire struct {
+		Type             *BlobType       `json:"type"`
+		Fields           *[]int32        `json:"fields"`
+		SnapshotID       *int64          `json:"snapshot-id"`
+		SequenceNumber   *int64          `json:"sequence-number"`
+		Offset           *int64          `json:"offset"`
+		Length           *int64          `json:"length"`
+		CompressionCodec *string         `json:"compression-codec"`
+		Properties       json.RawMessage `json:"properties"`
+	}
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	switch {
+	case wire.Type == nil:
+		return errors.New("blob metadata missing required field type")
+	case wire.Fields == nil:
+		return errors.New("blob metadata missing required field fields")
+	case wire.SnapshotID == nil:
+		return errors.New("blob metadata missing required field snapshot-id")
+	case wire.SequenceNumber == nil:
+		return errors.New("blob metadata missing required field sequence-number")
+	case wire.Offset == nil:
+		return errors.New("blob metadata missing required field offset")
+	case wire.Length == nil:
+		return errors.New("blob metadata missing required field length")
+	}
+
+	properties, err := decodePuffinProperties(wire.Properties)
+	if err != nil {
+		return fmt.Errorf("blob metadata: %w", err)
+	}
+
+	*b = BlobMetadata{
+		Type:             *wire.Type,
+		Fields:           *wire.Fields,
+		SnapshotID:       *wire.SnapshotID,
+		SequenceNumber:   *wire.SequenceNumber,
+		Offset:           *wire.Offset,
+		Length:           *wire.Length,
+		CompressionCodec: wire.CompressionCodec,
+		Properties:       properties,
+	}
+
+	return nil
+}
+
+// UnmarshalJSON requires the blobs list, even when it is empty.
+func (f *Footer) UnmarshalJSON(data []byte) error {
+	var wire struct {
+		Blobs      *[]json.RawMessage `json:"blobs"`
+		Properties json.RawMessage    `json:"properties"`
+	}
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	if wire.Blobs == nil {
+		return errors.New("footer missing required field blobs")
+	}
+
+	blobs := make([]BlobMetadata, len(*wire.Blobs))
+	for i, raw := range *wire.Blobs {
+		if err := json.Unmarshal(raw, &blobs[i]); err != nil {
+			return fmt.Errorf("blob %d: %w", i, err)
+		}
+	}
+
+	properties, err := decodePuffinProperties(wire.Properties)
+	if err != nil {
+		return fmt.Errorf("footer: %w", err)
+	}
+
+	*f = Footer{Blobs: blobs, Properties: properties}
+
+	return nil
 }
 
 // BlobType identifies the format of a Puffin blob. Unknown non-empty names

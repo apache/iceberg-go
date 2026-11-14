@@ -264,7 +264,7 @@ func (convertToIceberg) Schema(_ *arrow.Schema, result iceberg.NestedField) iceb
 
 func (convertToIceberg) Struct(_ *arrow.StructType, results []iceberg.NestedField) iceberg.NestedField {
 	return iceberg.NestedField{
-		Type: &iceberg.StructType{FieldList: results},
+		Type: iceberg.NewStructType(results...),
 	}
 }
 
@@ -287,11 +287,7 @@ func (c convertToIceberg) List(dt arrow.ListLikeType, elemResult iceberg.NestedF
 	elemID := c.fieldID(elemField)
 
 	return iceberg.NestedField{
-		Type: &iceberg.ListType{
-			ElementID:       elemID,
-			Element:         elemResult.Type,
-			ElementRequired: !elemField.Nullable,
-		},
+		Type: iceberg.NewListType(elemID, elemResult.Type, !elemField.Nullable),
 	}
 }
 
@@ -300,13 +296,7 @@ func (c convertToIceberg) Map(m *arrow.MapType, keyResult, valueResult iceberg.N
 	keyID, valID := c.fieldID(keyField), c.fieldID(valField)
 
 	return iceberg.NestedField{
-		Type: &iceberg.MapType{
-			KeyID:         keyID,
-			KeyType:       keyResult.Type,
-			ValueID:       valID,
-			ValueType:     valueResult.Type,
-			ValueRequired: !valField.Nullable,
-		},
+		Type: iceberg.NewMapType(keyID, keyResult.Type, valID, valueResult.Type, !valField.Nullable),
 	}
 }
 
@@ -481,7 +471,7 @@ func ArrowTypeToIceberg(dt arrow.DataType, downcastNsTimestamp bool) (iceberg.Ty
 		return nil, err
 	}
 
-	return out.Type.(*iceberg.StructType).FieldList[0].Type, nil
+	return out.Type.(*iceberg.StructType).Field(0).Type, nil
 }
 
 func ArrowSchemaToIceberg(sc *arrow.Schema, downcastNsTimestamp bool, nameMapping iceberg.NameMapping) (*iceberg.Schema, error) {
@@ -526,7 +516,7 @@ func ArrowSchemaToIcebergWithOptions(sc *arrow.Schema, opts ArrowToIcebergOption
 			return nil, err
 		}
 
-		return iceberg.NewSchema(0, out.Type.(*iceberg.StructType).FieldList...), nil
+		return iceberg.NewSchema(0, out.Type.(*iceberg.StructType).Fields()...), nil
 	case opts.NameMapping != nil:
 		schemaWithoutIDs, err := arrowToSchemaWithoutIDs(sc, opts.DowncastNsTimestamp)
 		if err != nil {
@@ -558,7 +548,7 @@ func arrowToSchemaWithoutIDs(sc *arrow.Schema, downcastNsTimestamp bool) (*icebe
 		return nil, err
 	}
 
-	schemaWithoutIDs := iceberg.NewSchema(0, withoutIDs.Type.(*iceberg.StructType).FieldList...)
+	schemaWithoutIDs := iceberg.NewSchema(0, withoutIDs.Type.(*iceberg.StructType).Fields()...)
 
 	return schemaWithoutIDs, nil
 }
@@ -1273,9 +1263,9 @@ func (a *arrowProjectionVisitor) Struct(st iceberg.StructType, structArr arrow.A
 		return nil
 	}
 
-	fieldArrs := make([]arrow.Array, len(st.FieldList))
-	fields := make([]arrow.Field, len(st.FieldList))
-	for i, field := range st.FieldList {
+	fieldArrs := make([]arrow.Array, st.NumFields())
+	fields := make([]arrow.Field, st.NumFields())
+	for i, field := range st.Fields() {
 		arr := fieldResults[i]
 		if arr != nil {
 			if ownsChildResult(arr) {
@@ -1415,7 +1405,7 @@ func (a *arrowProjectionVisitor) Map(m iceberg.MapType, mapArray, keyResult, val
 	keyField := a.constructField(m.KeyField(), keys.DataType())
 	valField := a.constructField(m.ValueField(), vals.DataType())
 
-	mapType := arrow.MapOfWithMetadata(keyField.Type, keyField.Metadata, valField.Type, valField.Metadata)
+	mapType := arrow.MapOfFields(keyField, valField)
 	childData := array.NewData(mapType.Elem(), arr.Data().Children()[0].Len(), []*memory.Buffer{nil},
 		[]arrow.ArrayData{keys.Data(), vals.Data()}, 0, 0)
 	defer childData.Release()
@@ -1760,7 +1750,7 @@ func statsPlanFieldCount(field iceberg.NestedField) int {
 	switch typ := field.Type.(type) {
 	case *iceberg.StructType:
 		count := 0
-		for _, nestedField := range typ.FieldList {
+		for _, nestedField := range typ.Fields() {
 			count += statsPlanFieldCount(nestedField)
 		}
 
@@ -1777,7 +1767,7 @@ func statsPlanFieldCount(field iceberg.NestedField) int {
 func collectStatsPlanField(visitor *arrowStatsCollector, result map[int]tblutils.StatisticsCollector, field iceberg.NestedField, isNested bool) {
 	switch typ := field.Type.(type) {
 	case *iceberg.StructType:
-		for _, nestedField := range typ.FieldList {
+		for _, nestedField := range typ.Fields() {
 			collectStatsPlanField(visitor, result, nestedField, true)
 		}
 	case *iceberg.ListType:
@@ -2109,6 +2099,14 @@ func fileToDataFile(ctx context.Context, fileIO iceio.IO, filePath string, curre
 	if err := checkNoUnknownTransform(&currentSpec); err != nil {
 		panic(err)
 	}
+	for _, field := range currentSpec.Fields() {
+		if len(field.SourceIDs) > 1 {
+			panic(fmt.Errorf("%w: cannot write partition transform %s with multiple source fields", iceberg.ErrInvalidTransform, field.Transform))
+		}
+		if err := checkPartitionSource(field, currentSchema); err != nil {
+			panic(err)
+		}
+	}
 	if err := validateFilePartitionValues(currentSchema, currentSpec, supplied); err != nil {
 		panic(err)
 	}
@@ -2201,21 +2199,6 @@ func recordNBytes(rec arrow.RecordBatch) (total int64) {
 	return total
 }
 
-func binPackRecords(itr iter.Seq2[arrow.RecordBatch, error], recordLookback int, targetFileSize int64) iter.Seq[[]arrow.RecordBatch] {
-	return internal.PackingIterator(func(yield func(arrow.RecordBatch) bool) {
-		for rec, err := range itr {
-			if err != nil {
-				panic(err)
-			}
-
-			rec.Retain()
-			if !yield(rec) {
-				return
-			}
-		}
-	}, targetFileSize, recordLookback, recordNBytes, false)
-}
-
 type recordWritingArgs struct {
 	sc              *arrow.Schema
 	itr             iter.Seq2[arrow.RecordBatch, error]
@@ -2235,6 +2218,30 @@ type recordWritingArgs struct {
 	// into the newly written DV so a data file that already had a DV ends up
 	// with a single merged vector (the caller removes the superseded one).
 	existingDVs map[string]*dv.RoaringPositionBitmap
+}
+
+func checkPartitionSourceType(field iceberg.PartitionField, sourceType iceberg.Type) error {
+	if err := iceberg.ValidatePartitionTransformSourceType(field.Transform, sourceType); err != nil {
+		return fmt.Errorf("%w: %v", iceberg.ErrInvalidTransform, err)
+	}
+
+	return nil
+}
+
+func checkPartitionSource(field iceberg.PartitionField, schema *iceberg.Schema) error {
+	sourceID := field.FirstSourceID()
+	sourceType, ok := schema.FindTypeByID(sourceID)
+	if !ok {
+		switch field.Transform.(type) {
+		case iceberg.VoidTransform, *iceberg.VoidTransform:
+			// A void partition field may refer to a column dropped from the schema.
+			return nil
+		default:
+			return fmt.Errorf("%w: partition source field %d not found in schema", iceberg.ErrInvalidSchema, sourceID)
+		}
+	}
+
+	return checkPartitionSourceType(field, sourceType)
 }
 
 // checkNoUnknownTransform rejects writes against a spec containing an unknown
@@ -2451,36 +2458,15 @@ func positionDeleteRecordsToDataFiles(ctx context.Context, rootLocation string, 
 		args.writeUUID = &u
 	}
 
-	targetFileSize := int64(meta.props.GetInt(WriteTargetFileSizeBytesKey,
-		WriteTargetFileSizeBytesDefault))
+	targetFileSize := int64(meta.props.GetInt(WriteDeleteTargetFileSizeBytesKey,
+		WriteDeleteTargetFileSizeBytesDefault))
 
 	if latestMetadata.PartitionSpec().IsUnpartitioned() {
 		cw := newConcurrentDataFileWriter(func(rootLocation string, fs iceio.WriteFileIO, meta *MetadataBuilder, props iceberg.Properties, opts ...dataFileWriterOption) (dataFileWriter, error) {
 			return newPositionDeleteWriter(rootLocation, fs, meta, props, opts...)
 		}, withSchemaSanitization(false))
-		nextCount, stopCount := iter.Pull(args.counter)
-		tasks := func(yield func(WriteTask) bool) {
-			defer stopCount()
 
-			fileCount := 0
-			for batch := range binPackRecords(args.itr, defaultBinPackLookback, targetFileSize) {
-				cnt, _ := nextCount()
-				fileCount++
-				t := WriteTask{
-					Uuid:        *args.writeUUID,
-					ID:          cnt,
-					PartitionID: iceberg.UnpartitionedSpec.ID(),
-					FileCount:   fileCount,
-					Schema:      iceberg.PositionalDeleteSchema,
-					Batches:     batch,
-				}
-				if !yield(t) {
-					return
-				}
-			}
-		}
-
-		return cw.writeFiles(ctx, rootLocation, args.fs, meta, meta.props, nil, tasks)
+		return cw.writeDeleteRecords(ctx, rootLocation, meta, iceberg.PositionalDeleteSchema, args, targetFileSize)
 	}
 	factory, err := newWriterFactory(rootLocation, args, meta, iceberg.PositionalDeleteSchema, targetFileSize,
 		withContentType(iceberg.EntryContentPosDeletes),
@@ -2490,9 +2476,8 @@ func positionDeleteRecordsToDataFiles(ctx context.Context, rootLocation string, 
 	}
 
 	partitionWriter := newPositionDeletePartitionedFanoutWriter(latestMetadata, partitionContextByFilePath, args.itr, factory)
-	workers := config.EnvConfig.MaxWorkers
 
-	return partitionWriter.Write(ctx, workers)
+	return partitionWriter.Write(ctx)
 }
 
 // positionDeleteRecordsToDataFilesDV produces deletion-vector Puffin output

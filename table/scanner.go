@@ -138,11 +138,11 @@ type borrowedPartitionRecord struct {
 }
 
 func (p borrowedPartitionRecord) Size() int {
-	return len(p.partitionType.FieldList)
+	return p.partitionType.NumFields()
 }
 
 func (p borrowedPartitionRecord) Get(pos int) any {
-	return p.partition[p.partitionType.FieldList[pos].ID]
+	return p.partition[p.partitionType.Field(pos).ID]
 }
 
 func (borrowedPartitionRecord) Set(int, any) {
@@ -356,9 +356,9 @@ func flattenClassifiedManifestEntries(results []classifiedManifestEntries) *mani
 }
 
 func newPartitionRecord(partitionData map[int]any, partitionType *iceberg.StructType) partitionRecord {
-	out := make(partitionRecord, len(partitionType.FieldList))
-	for i, f := range partitionType.FieldList {
-		value := partitionData[f.ID]
+	out := make(partitionRecord, partitionType.NumFields())
+	for i := range partitionType.NumFields() {
+		value := partitionData[partitionType.Field(i).ID]
 		if bytes, ok := value.([]byte); ok {
 			out[i] = slices.Clone(bytes)
 		} else {
@@ -803,6 +803,25 @@ func (scan *Scan) effectiveSchema() (*iceberg.Schema, error) {
 		ErrInvalidMetadata, snap.SnapshotID, *snap.SchemaID)
 }
 
+// validateRowFilter binds the filter against the schema this scan will use.
+// Local planning normally binds it while building evaluators, but empty scans
+// can return before those evaluators are created. Remote planning calls this
+// before delegating the filter to its planner.
+func (scan *Scan) validateRowFilter(schema *iceberg.Schema) error {
+	if scan.rowFilter == nil || schema == nil {
+		return nil
+	}
+
+	rewritten, err := iceberg.RewriteNotExpr(scan.rowFilter)
+	if err != nil {
+		return err
+	}
+
+	_, err = iceberg.BindExpr(schema, rewritten, scan.caseSensitive)
+
+	return err
+}
+
 type metadataSchemaByID interface {
 	schemaByID(int) *iceberg.Schema
 }
@@ -920,7 +939,7 @@ func buildPartitionEvaluator(specID int, metadata Metadata, schema *iceberg.Sche
 	}
 
 	partType := spec.PartitionType(schema)
-	partSchema := iceberg.NewSchema(0, partType.FieldList...)
+	partSchema := iceberg.NewSchema(0, partType.Fields()...)
 
 	fn, err := iceberg.ExpressionEvaluator(partSchema, partitionFilter, caseSensitive)
 	if err != nil {
@@ -1002,17 +1021,21 @@ func partitionsMatch(a, b map[int]any) bool {
 }
 
 // buildDVIndex indexes deletion vectors by the data file path they reference.
-// The spec requires at most one DV per data file; a second entry for the same
-// path is rejected with an error.
+// A missing reference must fail planning instead of silently exposing deleted
+// rows. The spec also requires at most one DV per data file.
 func buildDVIndex(dvEntries []iceberg.ManifestEntry) (map[string]iceberg.ManifestEntry, error) {
 	dvIndex := make(map[string]iceberg.ManifestEntry, len(dvEntries))
 	for _, del := range dvEntries {
-		if ref := iceberginternal.BorrowedDataFileReferencedDataFile(del.DataFile()); ref != nil {
-			if _, exists := dvIndex[*ref]; exists {
-				return nil, fmt.Errorf("can't index multiple deletion vectors for %s", *ref)
-			}
-			dvIndex[*ref] = del
+		file := del.DataFile()
+		ref := iceberginternal.BorrowedDataFileReferencedDataFile(file)
+		if ref == nil || *ref == "" {
+			return nil, fmt.Errorf("%w: deletion vector %q is missing referenced_data_file",
+				ErrInvalidMetadata, file.FilePath())
 		}
+		if _, exists := dvIndex[*ref]; exists {
+			return nil, fmt.Errorf("%w: can't index multiple deletion vectors for %s", ErrInvalidMetadata, *ref)
+		}
+		dvIndex[*ref] = del
 	}
 
 	return dvIndex, nil
@@ -1755,8 +1778,11 @@ func (scan *Scan) planFilesLocal(
 	}()
 
 	snap, err := scan.ResolveSnapshot()
-	if err != nil || snap == nil {
+	if err != nil {
 		return nil, err
+	}
+	if snap == nil {
+		return nil, scan.validateRowFilter(schema)
 	}
 	// Keep the projection cache alive across both local planning phases. The
 	// manifest and data-file evaluators need the same per-spec projections.
@@ -1765,8 +1791,11 @@ func (scan *Scan) planFilesLocal(
 	// Step 1: Retrieve filtered manifests based on snapshot and partition specs.
 	manifestList, err := scan.fetchPartitionSpecFilteredManifestsWithSchema(
 		ctx, snap, schema, acc, partitionFilters)
-	if err != nil || len(manifestList) == 0 {
+	if err != nil {
 		return nil, err
+	}
+	if len(manifestList) == 0 {
+		return nil, scan.validateRowFilter(schema)
 	}
 	if scan.canLimitLocalPlanning(acc) {
 		// The manifest counters above describe partition pruning. Keep them
@@ -1913,6 +1942,9 @@ func (scan *Scan) planFilesRemote(ctx context.Context) ([]FileScanTask, error) {
 		var err error
 		schema, err = scan.effectiveSchema()
 		if err != nil {
+			return nil, err
+		}
+		if err := scan.validateRowFilter(schema); err != nil {
 			return nil, err
 		}
 	}
@@ -2220,12 +2252,53 @@ func (scan *Scan) ReadTasks(ctx context.Context, tasks []FileScanTask) (*arrow.S
 // single data file in tasks: rows that survive that task's own deletes are
 // kept only when they match addedDeletes. Normal scans pass nil.
 func (scan *Scan) readFileTasks(ctx context.Context, tasks []FileScanTask, addedDeletes *FileScanTask) (*arrow.Schema, iter.Seq2[arrow.RecordBatch, error], error) {
+	var added []FileScanTask
+	if addedDeletes != nil {
+		added = []FileScanTask{*addedDeletes}
+	}
+
+	return scan.readFileTasksWithAddedDeletes(ctx, tasks, added, nil)
+}
+
+// readFileTasksWithAddedDeletes reads tasks while retaining rows matched by the
+// corresponding added-delete task for each data file. When positionSinks is
+// set, it records the original file positions and consumes the matched rows
+// internally instead of returning them to the caller.
+func (scan *Scan) readFileTasksWithAddedDeletes(
+	ctx context.Context,
+	tasks []FileScanTask,
+	addedDeletes []FileScanTask,
+	positionSinks map[string]func([]int64),
+) (*arrow.Schema, iter.Seq2[arrow.RecordBatch, error], error) {
 	as, readTasks, releasePlanIO, err := scan.arrowScanForTasks(ctx, tasks)
 	if err != nil {
 		return nil, nil, err
 	}
-	if addedDeletes != nil {
-		as.added = &addedDeleteState{deletes: addedDeletes}
+	if len(addedDeletes) > 0 {
+		byPath := make(map[string]int, len(addedDeletes))
+		for i, task := range addedDeletes {
+			if task.File == nil || task.File.FilePath() == "" {
+				if releasePlanIO != nil {
+					releasePlanIO()
+				}
+
+				return nil, nil, fmt.Errorf("%w: added delete task %d has no data file", ErrInvalidOperation, i)
+			}
+			path := task.File.FilePath()
+			if _, ok := byPath[path]; ok {
+				if releasePlanIO != nil {
+					releasePlanIO()
+				}
+
+				return nil, nil, fmt.Errorf("%w: duplicate added delete task for data file %s", ErrInvalidOperation, path)
+			}
+			byPath[path] = i
+		}
+		as.added = &addedDeleteState{
+			deletes:          addedDeletes,
+			deleteTaskByPath: byPath,
+			positionSinks:    positionSinks,
+		}
 	}
 
 	readRecords := scan.readRecords

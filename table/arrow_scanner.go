@@ -1701,10 +1701,10 @@ type arrowScan struct {
 	added *addedDeleteState
 }
 
-// preparedFileRead contains the physical schema projection shared by all
-// tasks reading the same data file during one scan. The actual FileReader is
-// intentionally not shared: split tasks may run concurrently and each reader
-// owns its column readers and input handle.
+// preparedFileRead contains the physical schema projection shared by tasks
+// reading the same data file with the same equality-delete field IDs. The
+// actual FileReader is intentionally not shared: split tasks may run
+// concurrently and each reader owns its column readers and input handle.
 type preparedFileRead struct {
 	schema     *iceberg.Schema
 	colIndices []int
@@ -1716,24 +1716,55 @@ type preparedFileReadEntry struct {
 	err  error
 }
 
-type preparedFileReadPlanCache struct {
-	mu      sync.Mutex
-	entries map[string]*preparedFileReadEntry
+type preparedFileReadPlanKey struct {
+	path             string
+	equalityFieldIDs string
 }
 
-func (c *preparedFileReadPlanCache) entry(path string) *preparedFileReadEntry {
+type preparedFileReadPlanCache struct {
+	mu      sync.Mutex
+	entries map[preparedFileReadPlanKey]*preparedFileReadEntry
+}
+
+// equalityDeleteProjectionFieldsKey returns a stable key for the union of
+// equality fields that can expand a file's physical projection.
+func equalityDeleteProjectionFieldsKey(deleteSets []*equalityDeleteSet) string {
+	var fieldIDs []int
+	for _, deleteSet := range deleteSets {
+		if deleteSet != nil {
+			fieldIDs = append(fieldIDs, deleteSet.fieldIDs...)
+		}
+	}
+	if len(fieldIDs) == 0 {
+		return ""
+	}
+
+	slices.Sort(fieldIDs)
+	fieldIDs = slices.Compact(fieldIDs)
+
+	var key strings.Builder
+	for _, fieldID := range fieldIDs {
+		key.WriteString(strconv.Itoa(fieldID))
+		key.WriteByte(',')
+	}
+
+	return key.String()
+}
+
+func (c *preparedFileReadPlanCache) entry(path, equalityFieldIDs string) *preparedFileReadEntry {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	if c.entries == nil {
-		c.entries = make(map[string]*preparedFileReadEntry)
+		c.entries = make(map[preparedFileReadPlanKey]*preparedFileReadEntry)
 	}
-	if entry, ok := c.entries[path]; ok {
+	key := preparedFileReadPlanKey{path: path, equalityFieldIDs: equalityFieldIDs}
+	if entry, ok := c.entries[key]; ok {
 		return entry
 	}
 
 	entry := &preparedFileReadEntry{}
-	c.entries[path] = entry
+	c.entries[key] = entry
 
 	return entry
 }
@@ -1761,7 +1792,7 @@ func collectLeafIDs(typ iceberg.Type, fieldID int, idset set[int]) {
 		collectLeafIDs(t.Element, t.ElementID, idset)
 	case *iceberg.StructType:
 		// For structs, collect leaf IDs from all fields
-		for _, field := range t.FieldList {
+		for _, field := range t.Fields() {
 			collectLeafIDs(field.Type, field.ID, idset)
 		}
 	default:
@@ -1816,12 +1847,16 @@ func (as *arrowScan) scanInvariants(tableProperties iceberg.Properties) (*arrowS
 	if err != nil {
 		return nil, err
 	}
+	nameMapping := as.metadata.NameMapping()
+	if err := validateNameMappingProperty(tableProperties, nameMapping); err != nil {
+		return nil, err
+	}
 
 	return &arrowScanInvariants{
 		tableSchema:     as.metadata.CurrentSchema(),
 		tableProperties: tableProperties,
 		projectedIDs:    projectedIDs,
-		nameMapping:     as.metadata.NameMapping(),
+		nameMapping:     nameMapping,
 	}, nil
 }
 
@@ -1925,7 +1960,12 @@ func (s *recordSink) handOff() taskCredits {
 	return s.credits
 }
 
-func (as *arrowScan) prepareToRead(ctx context.Context, file iceberg.DataFile, invariants *arrowScanInvariants) (iceSchema *iceberg.Schema, colIndices []int, rdr tblutils.FileReader, err error) {
+func (as *arrowScan) prepareToRead(
+	ctx context.Context,
+	file iceberg.DataFile,
+	invariants *arrowScanInvariants,
+	deleteSets []*equalityDeleteSet,
+) (iceSchema *iceberg.Schema, colIndices []int, rdr tblutils.FileReader, err error) {
 	src, err := tblutils.GetFile(ctx, as.fs, file, false)
 	if err != nil {
 		return nil, nil, nil, err
@@ -1942,19 +1982,57 @@ func (as *arrowScan) prepareToRead(ctx context.Context, file iceberg.DataFile, i
 		}
 	}(rdr)
 
-	if !as.cacheFileReadPlan {
-		var fileSchema *arrow.Schema
-		fileSchema, colIndices, err = rdr.PrunedSchema(
-			invariants.projectedIDs, invariants.nameMapping)
+	readPrunedSchemaForIDs := func(projectedIDs map[int]struct{}) (*iceberg.Schema, []int, error) {
+		fileSchema, colIndices, err := rdr.PrunedSchema(projectedIDs, invariants.nameMapping)
 		if err != nil {
-			return nil, nil, nil, err
+			return nil, nil, err
 		}
 
-		iceSchema, err = ArrowSchemaToIcebergWithOptions(fileSchema, ArrowToIcebergOptions{
+		// A projection containing only missing fields has no physical leaves.
+		// Read the file schema to retain row counts and nested validity; final
+		// logical projection removes these carrier columns again.
+		if colIndices != nil && len(colIndices) == 0 {
+			fileSchema, err = rdr.Schema()
+			if err != nil {
+				return nil, nil, err
+			}
+			colIndices = nil
+		}
+
+		iceSchema, err := ArrowSchemaToIcebergWithOptions(fileSchema, ArrowToIcebergOptions{
 			NameMapping:     invariants.nameMapping,
 			TableSchema:     invariants.tableSchema,
 			TableProperties: invariants.tableProperties,
 		})
+		if err != nil {
+			return nil, nil, err
+		}
+
+		return iceSchema, colIndices, nil
+	}
+
+	readPrunedSchema := func() (*iceberg.Schema, []int, error) {
+		iceSchema, colIndices, err := readPrunedSchemaForIDs(invariants.projectedIDs)
+		if err != nil {
+			return nil, nil, err
+		}
+		if len(deleteSets) == 0 {
+			return iceSchema, colIndices, nil
+		}
+
+		expandedIDs, err := as.projectEqualityDeleteFields(rdr, iceSchema, invariants, deleteSets)
+		if err != nil {
+			return nil, nil, err
+		}
+		if maps.Equal(invariants.projectedIDs, expandedIDs) {
+			return iceSchema, colIndices, nil
+		}
+
+		return readPrunedSchemaForIDs(expandedIDs)
+	}
+
+	if !as.cacheFileReadPlan {
+		iceSchema, colIndices, err = readPrunedSchema()
 		if err != nil {
 			return nil, nil, nil, err
 		}
@@ -1964,22 +2042,11 @@ func (as *arrowScan) prepareToRead(ctx context.Context, file iceberg.DataFile, i
 		return iceSchema, colIndices, rdr, nil
 	}
 
-	entry := as.fileReadPlanCache.entry(file.FilePath())
+	entry := as.fileReadPlanCache.entry(file.FilePath(), equalityDeleteProjectionFieldsKey(deleteSets))
 	entry.once.Do(func() {
-		var fileSchema *arrow.Schema
-		var colIndices []int
-		fileSchema, colIndices, entry.err = rdr.PrunedSchema(
-			invariants.projectedIDs, invariants.nameMapping)
-		if entry.err != nil {
-			return
-		}
-
 		var iceSchema *iceberg.Schema
-		iceSchema, entry.err = ArrowSchemaToIcebergWithOptions(fileSchema, ArrowToIcebergOptions{
-			NameMapping:     invariants.nameMapping,
-			TableSchema:     invariants.tableSchema,
-			TableProperties: invariants.tableProperties,
-		})
+		var colIndices []int
+		iceSchema, colIndices, entry.err = readPrunedSchema()
 		if entry.err == nil {
 			entry.plan = &preparedFileRead{
 				schema:     iceSchema,
@@ -1994,6 +2061,114 @@ func (as *arrowScan) prepareToRead(ctx context.Context, file iceberg.DataFile, i
 	keepReader = true
 
 	return entry.plan.schema, entry.plan.colIndices, rdr, nil
+}
+
+func (as *arrowScan) projectEqualityDeleteFields(
+	rdr tblutils.FileReader,
+	fileSchema *iceberg.Schema,
+	invariants *arrowScanInvariants,
+	deleteSets []*equalityDeleteSet,
+) (map[int]struct{}, error) {
+	missingFields, err := missingEqualityProjectionFields(
+		fileSchema, invariants.tableSchema, as.metadata.Schemas(), deleteSets)
+	if err != nil {
+		return nil, err
+	}
+
+	projectedIDs := maps.Clone(invariants.projectedIDs)
+	var physicalSchema *iceberg.Schema
+
+	for _, projectedField := range missingFields {
+		projectedIDs[projectedField.ID] = struct{}{}
+		if _, isStruct := projectedField.Type.(*iceberg.StructType); !isStruct {
+			continue
+		}
+
+		if physicalSchema == nil {
+			fileArrowSchema, err := rdr.Schema()
+			if err != nil {
+				return nil, err
+			}
+			physicalSchema, err = ArrowSchemaToIcebergWithOptions(fileArrowSchema, ArrowToIcebergOptions{
+				NameMapping:     invariants.nameMapping,
+				TableSchema:     invariants.tableSchema,
+				TableProperties: invariants.tableProperties,
+			})
+			if err != nil {
+				return nil, err
+			}
+		}
+
+		// Keep the existing physical children of an optional parent
+		// struct so its null state remains visible when the equality
+		// field itself is new.
+		if physicalField, found := physicalSchema.FindFieldByID(projectedField.ID); found {
+			collectLeafIDs(physicalField.Type, physicalField.ID, projectedIDs)
+		}
+	}
+
+	return projectedIDs, nil
+}
+
+// positionDeleteFallbackProjection preserves physical row counts when none of
+// the predicate's fields exist in a Parquet file. Prefer retained table fields
+// so schema evolution cannot cause a dropped payload column to be read again.
+func positionDeleteFallbackProjection(rdr tblutils.FileReader, invariants *arrowScanInvariants) (*iceberg.Schema, []int, error) {
+	retainedIDs := set[int]{}
+	for _, field := range invariants.tableSchema.Fields() {
+		collectLeafIDs(field.Type, field.ID, retainedIDs)
+	}
+	physical, indices, err := rdr.PrunedSchema(retainedIDs, invariants.nameMapping)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(indices) == 0 {
+		physical, err = rdr.Schema()
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	opts := ArrowToIcebergOptions{
+		NameMapping: invariants.nameMapping, TableSchema: invariants.tableSchema,
+		TableProperties: invariants.tableProperties,
+	}
+	physicalSchema, err := ArrowSchemaToIcebergWithOptions(physical, opts)
+	if err != nil {
+		return nil, nil, err
+	}
+	if physicalSchema.NumFields() == 0 {
+		return nil, nil, fmt.Errorf("%w: cannot read row positions from a parquet file without physical fields", iceberg.ErrInvalidSchema)
+	}
+	field, found := positionDeleteFallbackNumericField(physicalSchema.Fields())
+	if !found {
+		field = physicalSchema.Field(0)
+	}
+	fallbackIDs := set[int]{}
+	collectLeafIDs(field.Type, field.ID, fallbackIDs)
+	physical, indices, err = rdr.PrunedSchema(fallbackIDs, invariants.nameMapping)
+	if err != nil {
+		return nil, nil, err
+	}
+	schema, err := ArrowSchemaToIcebergWithOptions(physical, opts)
+
+	return schema, indices, err
+}
+
+// Prefer a small primitive field, including one inside a struct. A single
+// leaf preserves row counts without reading its unselected siblings.
+func positionDeleteFallbackNumericField(fields []iceberg.NestedField) (iceberg.NestedField, bool) {
+	for _, field := range fields {
+		switch typ := field.Type.(type) {
+		case iceberg.BooleanType, iceberg.Int32Type, iceberg.Int64Type, iceberg.Float32Type, iceberg.Float64Type:
+			return field, true
+		case *iceberg.StructType:
+			if nested, found := positionDeleteFallbackNumericField(typ.Fields()); found {
+				return nested, true
+			}
+		}
+	}
+
+	return iceberg.NestedField{}, false
 }
 
 func (as *arrowScan) getRecordFilter(ctx context.Context, fileSchema *iceberg.Schema, rowFilter iceberg.BooleanExpression) (recProcessFn, bool, error) {
@@ -2476,6 +2651,14 @@ func (as *arrowScan) processRecordsWithPlans(
 		pruningFilter = iceberg.AlwaysTrue{}
 	}
 
+	// Avro's OCF reader currently reads the whole file. A remote planner may
+	// produce partial file ranges; reading each as a full OCF would duplicate rows.
+	if task.Value.File.FileFormat() == iceberg.AvroFile &&
+		(task.Value.Start != 0 ||
+			(task.Value.Length != 0 && task.Value.Length != task.Value.File.FileSizeBytes())) {
+		return fmt.Errorf("%w: partial Avro scan task ranges are not supported", iceberg.ErrNotImplemented)
+	}
+
 	// Row-group stats/dictionary/bloom pruning skips whole groups, so emitted batches no
 	// longer cover contiguous file positions. Steps that key on the original
 	// position (row-lineage _row_id, positional/DV deletes, generated position
@@ -2755,7 +2938,15 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task tblutils.Enumerat
 		return err
 	}
 
-	iceSchema, colIndices, rdr, err = as.prepareToRead(ctx, task.Value.File, invariants)
+	addedPos, addedBitmap, addedEq, err := as.loadAddedDeletes(ctx, task.Value)
+	if err != nil {
+		return err
+	}
+	projectionEqSets := make([]*equalityDeleteSet, 0, len(eqDeleteSets)+len(addedEq))
+	projectionEqSets = append(projectionEqSets, eqDeleteSets...)
+	projectionEqSets = append(projectionEqSets, addedEq...)
+
+	iceSchema, colIndices, rdr, err = as.prepareToRead(ctx, task.Value.File, invariants, projectionEqSets)
 	if err != nil {
 		return err
 	}
@@ -2795,15 +2986,15 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task tblutils.Enumerat
 	// row-dropping position step in the pipeline so cursors never run over a
 	// sequence an earlier step already shortened.
 	applyPosDeletes := positionalDeleteBitmap != nil && !positionalDeleteBitmap.IsEmpty() && !hasDV
-	addedPos, addedBitmap, addedEq, err := as.loadAddedDeletes(ctx, task.Value)
-	if err != nil {
-		return err
-	}
 	addedHasDV := addedBitmap != nil && !addedBitmap.IsEmpty()
 	// An added deletion vector supersedes added position deletes, matching the
 	// rule used for the deletes already on the task.
 	addedHasPos := addedPos != nil && !addedPos.IsEmpty() && !addedHasDV
-	stampPos := addedHasPos || addedHasDV
+	var positionSink func([]int64)
+	if as.added != nil && task.Value.File != nil {
+		positionSink = as.added.positionSinks[task.Value.File.FilePath()]
+	}
+	stampPos := addedHasPos || addedHasDV || positionSink != nil
 	var posSource *rowPositionSource
 	if synthesizeRowID || applyPosDeletes || hasDV || stampPos {
 		posSource = &rowPositionSource{}
@@ -2826,6 +3017,28 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task tblutils.Enumerat
 		})
 	}
 
+	if len(projectionEqSets) > 0 {
+		equalitySchema, schemaErr := equalityDeleteReadSchema(
+			readSchema, invariants.tableSchema, as.metadata.Schemas(), projectionEqSets)
+		if schemaErr != nil {
+			return schemaErr
+		}
+		if equalitySchema != readSchema {
+			inputSchema := readSchema
+			outputSchema := equalitySchema
+			pipeline = append(pipeline, func(r arrow.RecordBatch) (arrow.RecordBatch, error) {
+				defer r.Release()
+
+				return ToRequestedSchema(ctx, outputSchema, inputSchema, r, SchemaOptions{
+					IncludeFieldIDs: true,
+					UseLargeTypes:   as.useLargeTypes,
+					TableProperties: invariants.tableProperties,
+				})
+			})
+			readSchema = equalitySchema
+		}
+	}
+
 	if stampPos {
 		pipeline = append(pipeline, stampChangelogFilePos(ctx, posSource.cursor()))
 	}
@@ -2840,7 +3053,7 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task tblutils.Enumerat
 	}
 
 	if len(eqDeleteSets) > 0 {
-		eqFn, eqErr := processEqualityDeletesColumnarForFile(ctx, eqDeleteSets, iceSchema, task.Value.File.FilePath())
+		eqFn, eqErr := processEqualityDeletesColumnarForFile(ctx, eqDeleteSets, readSchema, task.Value.File.FilePath())
 		if eqErr != nil {
 			return eqErr
 		}
@@ -2849,7 +3062,7 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task tblutils.Enumerat
 	}
 
 	if as.added != nil {
-		pipeline = append(pipeline, keepAddedDeleteRows(ctx, addedPos, addedHasPos, addedBitmap, task.Value.File.Count(), addedEq, iceSchema, task.Value.File.FilePath(), stampPos))
+		pipeline = append(pipeline, keepAddedDeleteRows(ctx, addedPos, addedHasPos, addedBitmap, task.Value.File.Count(), addedEq, readSchema, task.Value.File.FilePath(), stampPos, positionSink))
 		if stampPos {
 			pipeline = append(pipeline, dropChangelogFilePos)
 		}
@@ -2925,11 +3138,18 @@ func (as *arrowScan) producePosDeletesFromTask(ctx context.Context, task tblutil
 		filterPlans *compiledFileFilterPlans
 	)
 
-	iceSchema, colIndices, rdr, err = as.prepareToRead(ctx, task.Value.File, invariants)
+	iceSchema, colIndices, rdr, err = as.prepareToRead(ctx, task.Value.File, invariants, nil)
 	if err != nil {
 		return err
 	}
 	defer iceinternal.CheckedClose(rdr, &err)
+	if task.Value.File.FileFormat() == iceberg.ParquetFile && len(colIndices) == 0 {
+		iceSchema, colIndices, err = positionDeleteFallbackProjection(rdr, invariants)
+		if err != nil {
+			return err
+		}
+	}
+
 	filterPlans, err = as.cachedFileFilterPlans(
 		iceSchema, task.Value.File.FileFormat() == iceberg.ParquetFile)
 	if err != nil {
@@ -3284,7 +3504,7 @@ type taskReads struct {
 }
 
 // prepareTaskReads resolves the projected Arrow schema and the state to
-// read tasks with. It returns nil reads when the row limit is zero.
+// read tasks with. It returns nil reads when the row limit is zero or there are no tasks.
 func (as *arrowScan) prepareTaskReads(ctx context.Context, tasks []FileScanTask) (*arrow.Schema, *taskReads, error) {
 	var err error
 	as.useLargeTypes, err = strconv.ParseBool(as.options.Get(ScanOptionArrowUseLargeTypes, "false"))
@@ -3304,6 +3524,18 @@ func (as *arrowScan) prepareTaskReads(ctx context.Context, tasks []FileScanTask)
 		}
 		tableProperties[ParquetBatchSizeKey] = batchSize
 	}
+	for _, key := range []string{ParquetMaxCompressedPageSizeBytesKey, ParquetMaxUncompressedPageSizeBytesKey} {
+		if value, ok := as.options[key]; ok {
+			tableProperties = maps.Clone(tableProperties)
+			if tableProperties == nil {
+				tableProperties = iceberg.Properties{}
+			}
+			tableProperties[key] = value
+		}
+	}
+	if err := tblutils.ValidateParquetReadProperties(tableProperties); err != nil {
+		return nil, nil, err
+	}
 	ctx = tblutils.WithTableProperties(ctx, tableProperties)
 
 	resultSchema, err := SchemaToArrowSchemaWithOptions(as.projectedSchema, ArrowSchemaOptions{
@@ -3314,7 +3546,7 @@ func (as *arrowScan) prepareTaskReads(ctx context.Context, tasks []FileScanTask)
 		return nil, nil, err
 	}
 
-	if as.rowLimit == 0 {
+	if as.rowLimit == 0 || len(tasks) == 0 {
 		return resultSchema, nil, nil
 	}
 

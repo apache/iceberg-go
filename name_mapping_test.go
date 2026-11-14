@@ -117,6 +117,135 @@ func TestApplyNameMappingUsesAlias(t *testing.T) {
 	assert.Equal(t, 1, result.Field(0).ID)
 }
 
+// Name mappings may omit field-id for columns that exist only in imported files.
+// Those columns should remain without Iceberg IDs, even when they are nested.
+func TestApplyNameMappingWithIDLessFields(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: -1, Name: "mapped", Type: iceberg.PrimitiveTypes.Int64},
+		iceberg.NestedField{
+			ID: -1, Name: "import_only",
+			Type: iceberg.NewStructType(
+				iceberg.NestedField{ID: -1, Name: "extra", Type: iceberg.PrimitiveTypes.String},
+			),
+		},
+	)
+	mapping := iceberg.NameMapping{
+		{FieldID: new(1), Names: []string{"mapped"}},
+		{Names: []string{"import_only"}, Fields: []iceberg.MappedField{
+			{Names: []string{"extra"}},
+		}},
+	}
+
+	result, err := iceberg.ApplyNameMapping(schema, mapping)
+	require.NoError(t, err)
+	require.Equal(t, 1, result.Field(0).ID)
+	require.Equal(t, -1, result.Field(1).ID)
+
+	nested, ok := result.Field(1).Type.(*iceberg.StructType)
+	require.True(t, ok)
+	require.Equal(t, -1, nested.Field(0).ID)
+}
+
+func TestApplyNameMappingRejectsDuplicateAliases(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 100, Name: "shared", Type: iceberg.PrimitiveTypes.String},
+	)
+	mapping := iceberg.NameMapping{
+		{FieldID: new(1), Names: []string{"original", "shared"}},
+		{FieldID: new(2), Names: []string{"shared"}},
+	}
+
+	result, err := iceberg.ApplyNameMapping(schema, mapping)
+	require.Nil(t, result)
+	require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+	assert.ErrorContains(t, err, `duplicate name mapping "shared"`)
+	assert.ErrorContains(t, err, "field IDs 1 and 2")
+}
+
+func TestApplyNameMappingRejectsDuplicateNestedAliases(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{
+			ID: 100, Name: "parent",
+			Type: iceberg.NewStructType(
+				iceberg.NestedField{ID: 101, Name: "shared", Type: iceberg.PrimitiveTypes.String},
+			),
+		},
+	)
+	mapping := iceberg.NameMapping{
+		{FieldID: new(1), Names: []string{"parent"}, Fields: []iceberg.MappedField{
+			{FieldID: new(2), Names: []string{"original", "shared"}},
+			{FieldID: new(3), Names: []string{"shared"}},
+		}},
+	}
+
+	result, err := iceberg.ApplyNameMapping(schema, mapping)
+	require.Nil(t, result)
+	require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+	assert.ErrorContains(t, err, `duplicate name mapping "shared"`)
+	assert.ErrorContains(t, err, "field IDs 2 and 3")
+}
+
+func TestApplyNameMappingAllowsRepeatedNamesWithinField(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 100, Name: "shared", Type: iceberg.PrimitiveTypes.String},
+	)
+	mapping := iceberg.NameMapping{
+		{FieldID: new(1), Names: []string{"shared", "shared"}},
+	}
+
+	result, err := iceberg.ApplyNameMapping(schema, mapping)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, 1, result.Field(0).ID)
+}
+
+func TestApplyNameMappingRejectsDuplicateFieldIDs(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 100, Name: "first", Type: iceberg.PrimitiveTypes.String},
+		iceberg.NestedField{ID: 101, Name: "second", Type: iceberg.PrimitiveTypes.String},
+	)
+	mapping := iceberg.NameMapping{
+		{FieldID: new(1), Names: []string{"first"}},
+		{FieldID: new(1), Names: []string{"second"}},
+	}
+
+	result, err := iceberg.ApplyNameMapping(schema, mapping)
+	require.Nil(t, result)
+	require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+	assert.ErrorContains(t, err, "multiple fields for id 1")
+}
+
+func TestApplyNameMappingAllowsSameNestedNameInDifferentStructs(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{
+			ID: 100, Name: "left",
+			Type: iceberg.NewStructType(
+				iceberg.NestedField{ID: 101, Name: "value", Type: iceberg.PrimitiveTypes.String},
+			),
+		},
+		iceberg.NestedField{
+			ID: 200, Name: "right",
+			Type: iceberg.NewStructType(
+				iceberg.NestedField{ID: 201, Name: "value", Type: iceberg.PrimitiveTypes.String},
+			),
+		},
+	)
+	mapping := iceberg.NameMapping{
+		{FieldID: new(1), Names: []string{"left"}, Fields: []iceberg.MappedField{
+			{FieldID: new(2), Names: []string{"value"}},
+		}},
+		{FieldID: new(3), Names: []string{"right"}, Fields: []iceberg.MappedField{
+			{FieldID: new(4), Names: []string{"value"}},
+		}},
+	}
+
+	result, err := iceberg.ApplyNameMapping(schema, mapping)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, 2, result.Field(0).Type.(*iceberg.StructType).Field(0).ID)
+	assert.Equal(t, 4, result.Field(1).Type.(*iceberg.StructType).Field(0).ID)
+}
+
 func TestMappedFieldFindFieldByName(t *testing.T) {
 	root := iceberg.MappedField{Fields: []iceberg.MappedField{
 		{

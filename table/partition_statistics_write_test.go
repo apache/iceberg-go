@@ -42,10 +42,10 @@ import (
 )
 
 func statsTestPartitionType() *iceberg.StructType {
-	return &iceberg.StructType{FieldList: []iceberg.NestedField{
-		{ID: 1000, Name: "day", Type: iceberg.PrimitiveTypes.Int32},
-		{ID: 1001, Name: "region", Type: iceberg.PrimitiveTypes.String},
-	}}
+	return iceberg.NewStructType(
+		iceberg.NestedField{ID: 1000, Name: "day", Type: iceberg.PrimitiveTypes.Int32},
+		iceberg.NestedField{ID: 1001, Name: "region", Type: iceberg.PrimitiveTypes.String},
+	)
 }
 
 func TestPartitionStatisticsSchemaV1(t *testing.T) {
@@ -63,7 +63,7 @@ func TestPartitionStatisticsSchemaV1(t *testing.T) {
 		require.True(t, fields[index].Required)
 	}
 	require.False(t, fields[5].Required)
-	require.Equal(t, 1000, fields[0].Type.(*iceberg.StructType).FieldList[0].ID)
+	require.Equal(t, 1000, fields[0].Type.(*iceberg.StructType).Field(0).ID)
 }
 
 func TestPartitionStatisticValuesNullFirstNumericAndBinary(t *testing.T) {
@@ -132,9 +132,9 @@ func TestSortPartitionStatisticsByTupleThenSpecID(t *testing.T) {
 
 func TestSortPartitionStatisticsFloatAndUUID(t *testing.T) {
 	t.Run("float", func(t *testing.T) {
-		pt := &iceberg.StructType{FieldList: []iceberg.NestedField{
-			{ID: 1000, Name: "value", Type: iceberg.PrimitiveTypes.Float64},
-		}}
+		pt := iceberg.NewStructType(
+			iceberg.NestedField{ID: 1000, Name: "value", Type: iceberg.PrimitiveTypes.Float64},
+		)
 		rows := []*inspectPartitionAggregate{
 			{partition: map[int]any{1000: math.NaN()}, specID: 6},
 			{partition: map[int]any{1000: float64(0)}, specID: 3},
@@ -153,9 +153,9 @@ func TestSortPartitionStatisticsFloatAndUUID(t *testing.T) {
 		require.True(t, math.IsNaN(rows[4].partition[1000].(float64)))
 	})
 	t.Run("uuid", func(t *testing.T) {
-		pt := &iceberg.StructType{FieldList: []iceberg.NestedField{
-			{ID: 1000, Name: "value", Type: iceberg.PrimitiveTypes.UUID},
-		}}
+		pt := iceberg.NewStructType(
+			iceberg.NestedField{ID: 1000, Name: "value", Type: iceberg.PrimitiveTypes.UUID},
+		)
 		rows := []*inspectPartitionAggregate{
 			{partition: map[int]any{1000: uuid.MustParse("7fffffff-ffff-ffff-0000-000000000000")}, specID: 4},
 			{partition: map[int]any{1000: uuid.MustParse("00000000-0000-0000-7fff-ffffffffffff")}, specID: 3},
@@ -183,7 +183,7 @@ func TestPartitionStatisticsParquetWrite(t *testing.T) {
 			dataRecordCount: 3, dataFileCount: 1, dataFileSize: 512,
 		},
 	}
-	size, err := writePartitionStatisticsParquet(ctx, fs, path, statsTestPartitionType(), rows)
+	size, err := writePartitionStatisticsParquet(ctx, fs, path, statsTestPartitionType(), rows, 1)
 	require.NoError(t, err)
 	require.Positive(t, size)
 
@@ -215,7 +215,7 @@ func TestPartitionStatisticsParquetWrite(t *testing.T) {
 	cancelled, cancel := context.WithCancel(ctx)
 	cancel()
 	failedPath := "mem://bucket/table/metadata/cancelled.parquet"
-	_, err = writePartitionStatisticsParquet(cancelled, fs, failedPath, statsTestPartitionType(), rows)
+	_, err = writePartitionStatisticsParquet(cancelled, fs, failedPath, statsTestPartitionType(), rows, 1)
 	require.ErrorIs(t, err, context.Canceled)
 	_, err = fs.Open(ctx, failedPath)
 	require.Error(t, err)
@@ -248,7 +248,7 @@ func TestCollectPartitionStatisticsFromLiveManifests(t *testing.T) {
 	pt, err := inspectPartitionType(tbl.Metadata())
 	require.NoError(t, err)
 
-	rows, err := collectPartitionStatistics(ctx, fs, *tbl.CurrentSnapshot(), pt, tbl.Metadata().PartitionSpecs())
+	rows, err := collectPartitionStatistics(ctx, fs, *tbl.CurrentSnapshot(), pt, tbl.Metadata().PartitionSpecs(), 1, nil)
 	require.NoError(t, err)
 	require.Len(t, rows, 2)
 	require.NoError(t, sortPartitionStatistics(rows, pt))
@@ -268,9 +268,9 @@ func TestCollectPartitionStatisticsDecimalFromManifest(t *testing.T) {
 	schema := iceberg.NewSchema(0, iceberg.NestedField{
 		ID: 1, Name: "amount", Type: decimalType, Required: true,
 	})
-	partitionType := &iceberg.StructType{FieldList: []iceberg.NestedField{
-		{ID: 1000, Name: "amount", Type: decimalType},
-	}}
+	partitionType := iceberg.NewStructType(
+		iceberg.NestedField{ID: 1000, Name: "amount", Type: decimalType},
+	)
 	amount := iceberg.Decimal{Val: decimal128.FromI64(1234), Scale: 2}
 	const snapshotID = int64(7)
 	files := []iceberg.DataFile{
@@ -290,7 +290,7 @@ func TestCollectPartitionStatisticsDecimalFromManifest(t *testing.T) {
 	require.NoError(t, fs.WriteFile(t.Context(), manifestPath, encoded.Bytes()))
 
 	snapshot := Snapshot{SnapshotID: snapshotID, ManifestLocations: []string{manifestPath}}
-	rows, err := collectPartitionStatistics(t.Context(), fs, snapshot, partitionType, []iceberg.PartitionSpec{spec})
+	rows, err := collectPartitionStatistics(t.Context(), fs, snapshot, partitionType, []iceberg.PartitionSpec{spec}, 1, nil)
 	require.NoError(t, err)
 	require.Len(t, rows, 1)
 	require.Equal(t, amount, rows[0].partition[1000])
@@ -299,7 +299,7 @@ func TestCollectPartitionStatisticsDecimalFromManifest(t *testing.T) {
 	require.NoError(t, sortPartitionStatistics(rows, partitionType))
 
 	const statsPath = "mem://stats/decimal-stats.parquet"
-	_, err = writePartitionStatisticsParquet(t.Context(), fs, statsPath, partitionType, rows)
+	_, err = writePartitionStatisticsParquet(t.Context(), fs, statsPath, partitionType, rows, 1)
 	require.NoError(t, err)
 	stored, err := fs.Open(t.Context(), statsPath)
 	require.NoError(t, err)
@@ -384,7 +384,7 @@ func TestTransactionRemovePartitionStatisticsNoOp(t *testing.T) {
 	require.Len(t, tx.meta.updates, updateCount)
 }
 
-func TestComputePartitionStatisticsRejectsNonV1AndMissingSnapshot(t *testing.T) {
+func TestComputePartitionStatisticsRejectsUnpartitionedTable(t *testing.T) {
 	tbl := inspectTestTable(Identifier{"db", "stats"}, map[string]SnapshotRef{
 		MainBranch: {SnapshotID: 103, Type: BranchRef},
 	})
@@ -467,7 +467,7 @@ func TestCollectPartitionStatisticsRejectsDuplicateLiveFiles(t *testing.T) {
 	pt, err := inspectPartitionType(tbl.Metadata())
 	require.NoError(t, err)
 
-	_, err = collectPartitionStatistics(t.Context(), fs, *tbl.CurrentSnapshot(), pt, tbl.Metadata().PartitionSpecs())
+	_, err = collectPartitionStatistics(t.Context(), fs, *tbl.CurrentSnapshot(), pt, tbl.Metadata().PartitionSpecs(), 1, nil)
 	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
 	require.ErrorContains(t, err, "duplicate live data file")
 }
@@ -488,8 +488,8 @@ func TestPartitionStatisticsEmbeddedManifests(t *testing.T) {
 	write("mem://stats/spec7.avro", spec7, "b", int32(3), 20)
 	write("mem://stats/null.avro", spec7, "null", nil, 1)
 	snapshot := Snapshot{SnapshotID: 1, ManifestLocations: []string{"mem://stats/spec0.avro", "mem://stats/spec7.avro", "mem://stats/null.avro"}}
-	pt := &iceberg.StructType{FieldList: []iceberg.NestedField{{ID: 1000, Name: "id", Type: iceberg.Int32Type{}}}}
-	rows, err := collectPartitionStatistics(t.Context(), fs, snapshot, pt, []iceberg.PartitionSpec{spec0, spec7})
+	pt := iceberg.NewStructType(iceberg.NestedField{ID: 1000, Name: "id", Type: iceberg.Int32Type{}})
+	rows, err := collectPartitionStatistics(t.Context(), fs, snapshot, pt, []iceberg.PartitionSpec{spec0, spec7}, 1, nil)
 	require.NoError(t, err)
 	require.Len(t, rows, 3)
 	require.NoError(t, sortPartitionStatistics(rows, pt))
@@ -500,7 +500,7 @@ func TestPartitionStatisticsEmbeddedManifests(t *testing.T) {
 	require.Equal(t, int32(7), rows[2].specID)
 	require.Equal(t, int64(20), rows[2].dataRecordCount)
 	statsPath := "mem://stats/partition-stats.parquet"
-	_, err = writePartitionStatisticsParquet(t.Context(), fs, statsPath, pt, rows)
+	_, err = writePartitionStatisticsParquet(t.Context(), fs, statsPath, pt, rows, 1)
 	require.NoError(t, err)
 	statsFile, err := fs.Open(t.Context(), statsPath)
 	require.NoError(t, err)
@@ -517,10 +517,10 @@ func TestPartitionStatisticsEmbeddedManifests(t *testing.T) {
 	defer result.Release()
 	require.EqualValues(t, 3, result.NumRows())
 	require.Equal(t, []int32{7, 0, 7}, result.Column(1).Data().Chunk(0).(*array.Int32).Int32Values())
-	_, err = collectPartitionStatistics(t.Context(), fs, snapshot, pt, []iceberg.PartitionSpec{spec0})
+	_, err = collectPartitionStatistics(t.Context(), fs, snapshot, pt, []iceberg.PartitionSpec{spec0}, 1, nil)
 	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
 	wrong := iceberg.NewPartitionSpecID(7, iceberg.PartitionField{SourceIDs: []int{1}, FieldID: 1000, Name: "id", Transform: iceberg.BucketTransform{NumBuckets: 4}})
-	_, err = collectPartitionStatistics(t.Context(), fs, snapshot, pt, []iceberg.PartitionSpec{spec0, wrong})
+	_, err = collectPartitionStatistics(t.Context(), fs, snapshot, pt, []iceberg.PartitionSpec{spec0, wrong}, 1, nil)
 	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
 }
 
@@ -551,9 +551,9 @@ func TestPartitionStatisticsEmbeddedManifestWithoutSpecID(t *testing.T) {
 	}
 	const missingID = "mem://stats/missing.avro"
 	writeEmpty(missingID)
-	pt := &iceberg.StructType{FieldList: []iceberg.NestedField{{ID: 1000, Name: "id", Type: iceberg.Int32Type{}}}}
+	pt := iceberg.NewStructType(iceberg.NestedField{ID: 1000, Name: "id", Type: iceberg.Int32Type{}})
 	snapshot := Snapshot{SnapshotID: 1, ManifestLocations: []string{missingID}}
-	rows, err := collectPartitionStatistics(t.Context(), fs, snapshot, pt, []iceberg.PartitionSpec{spec})
+	rows, err := collectPartitionStatistics(t.Context(), fs, snapshot, pt, []iceberg.PartitionSpec{spec}, 1, nil)
 	require.NoError(t, err)
 	require.Empty(t, rows)
 
@@ -562,13 +562,13 @@ func TestPartitionStatisticsEmbeddedManifestWithoutSpecID(t *testing.T) {
 		fields = append(fields, field)
 	}
 	duplicateSpec := iceberg.NewPartitionSpecID(spec.ID()+7, fields...)
-	_, err = collectPartitionStatistics(t.Context(), fs, snapshot, pt, []iceberg.PartitionSpec{spec, duplicateSpec})
+	_, err = collectPartitionStatistics(t.Context(), fs, snapshot, pt, []iceberg.PartitionSpec{spec, duplicateSpec}, 1, nil)
 	require.ErrorIs(t, err, iceberg.ErrNotImplemented)
 
 	wrongFields := slices.Clone(fields)
 	wrongFields[0].Transform = iceberg.BucketTransform{NumBuckets: 4}
 	wrongSpec := iceberg.NewPartitionSpecID(spec.ID(), wrongFields...)
-	_, err = collectPartitionStatistics(t.Context(), fs, snapshot, pt, []iceberg.PartitionSpec{wrongSpec})
+	_, err = collectPartitionStatistics(t.Context(), fs, snapshot, pt, []iceberg.PartitionSpec{wrongSpec}, 1, nil)
 	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
 
 	// Historical v1 partition fields may also omit their field IDs.
@@ -582,7 +582,7 @@ func TestPartitionStatisticsEmbeddedManifestWithoutSpecID(t *testing.T) {
 	const missingBoth = "mem://stats/missing-both.avro"
 	writeEmpty(missingBoth)
 	snapshot.ManifestLocations = []string{missingBoth}
-	rows, err = collectPartitionStatistics(t.Context(), fs, snapshot, pt, []iceberg.PartitionSpec{spec})
+	rows, err = collectPartitionStatistics(t.Context(), fs, snapshot, pt, []iceberg.PartitionSpec{spec}, 1, nil)
 	require.NoError(t, err)
 	require.Empty(t, rows)
 
@@ -592,7 +592,7 @@ func TestPartitionStatisticsEmbeddedManifestWithoutSpecID(t *testing.T) {
 	const missingFieldIDs = "mem://stats/missing-field-ids.avro"
 	writeEmpty(missingFieldIDs)
 	snapshot.ManifestLocations = []string{missingFieldIDs}
-	rows, err = collectPartitionStatistics(t.Context(), fs, snapshot, pt, []iceberg.PartitionSpec{spec})
+	rows, err = collectPartitionStatistics(t.Context(), fs, snapshot, pt, []iceberg.PartitionSpec{spec}, 1, nil)
 	require.NoError(t, err)
 	require.Empty(t, rows)
 }

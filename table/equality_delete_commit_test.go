@@ -218,6 +218,81 @@ func TestCommitEqualityDeletesConcurrentAppendConflict(t *testing.T) {
 		"the stale-assertion attempt must reach the catalog before the validator rejects the refreshed context")
 }
 
+func TestRowDeltaConcurrentAppendWithNestedPartition(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		peerDeviceID   int64
+		expectConflict bool
+	}{
+		{name: "matching nested partition", peerDeviceID: 7, expectConflict: true},
+		{name: "different nested partition", peerDeviceID: 8},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			schema := iceberg.NewSchema(0,
+				iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+				iceberg.NestedField{ID: 2, Name: "device", Required: true, Type: iceberg.NewStructType(
+					iceberg.NestedField{ID: 3, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+				)},
+			)
+			spec := iceberg.NewPartitionSpec(
+				iceberg.PartitionField{SourceIDs: []int{1}, FieldID: 1000, Name: "root_id", Transform: iceberg.IdentityTransform{}},
+				iceberg.PartitionField{SourceIDs: []int{3}, FieldID: 1001, Name: "device_id", Transform: iceberg.IdentityTransform{}},
+			)
+			tbl, cat := newDynamicOverwriteTableWithSchema(t, schema, spec, "2")
+			rootID, ok := tbl.Schema().FindFieldByName("id")
+			require.True(t, ok)
+			deviceID, ok := tbl.Schema().FindFieldByName("device.id")
+			require.True(t, ok)
+			spec = tbl.Spec()
+			require.Equal(t, rootID.ID, spec.Field(0).FirstSourceID())
+			require.Equal(t, deviceID.ID, spec.Field(1).FirstSourceID())
+
+			buildFile := func(name string, content iceberg.ManifestEntryContent, nestedID int64) iceberg.DataFile {
+				t.Helper()
+				builder, err := iceberg.NewDataFileBuilder(spec, content, tbl.Location()+"/data/"+name,
+					iceberg.ParquetFile,
+					map[int]any{spec.Field(0).FieldID: int64(9), spec.Field(1).FieldID: nestedID},
+					nil, nil, 1, 128)
+				require.NoError(t, err)
+				if content == iceberg.EntryContentEqDeletes {
+					builder.EqualityFieldIDs([]int{rootID.ID})
+				}
+
+				return builder.Build()
+			}
+
+			seed := tbl.NewTransaction()
+			require.NoError(t, seed.AddDataFiles(t.Context(), []iceberg.DataFile{
+				buildFile("seed.parquet", iceberg.EntryContentData, 7),
+			}, nil))
+			var err error
+			tbl, err = seed.Commit(t.Context())
+			require.NoError(t, err)
+
+			leader := tbl.NewTransaction()
+			require.NoError(t, leader.NewRowDelta(nil).
+				AddDeletes(buildFile("delete.parquet", iceberg.EntryContentEqDeletes, 7)).Commit(t.Context()))
+
+			peer := tbl.NewTransaction()
+			require.NoError(t, peer.AddDataFiles(t.Context(), []iceberg.DataFile{
+				buildFile("peer.parquet", iceberg.EntryContentData, tc.peerDeviceID),
+			}, nil))
+			_, err = peer.Commit(t.Context())
+			require.NoError(t, err)
+
+			attemptsBefore := cat.attempts.Load()
+			_, err = leader.Commit(t.Context())
+			if tc.expectConflict {
+				require.ErrorIs(t, err, table.ErrConflictingDataFiles)
+			} else {
+				require.NoError(t, err)
+			}
+			assert.GreaterOrEqual(t, cat.attempts.Load()-attemptsBefore, int32(1),
+				"the stale commit must reach the catalog before validation")
+		})
+	}
+}
+
 // TestCommitEqualityDeletesSnapshotIsolationAllowsConcurrentAppend is the
 // companion to the conflict test: switching write.delete.isolation-level
 // to snapshot must let the same concurrent-append scenario commit, proving

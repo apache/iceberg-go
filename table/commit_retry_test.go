@@ -1125,13 +1125,29 @@ func countAssertTableUUID(reqs []Requirement) int {
 	return n
 }
 
-func TestTransactionCommit_RetriableAfterCleanConflict(t *testing.T) {
-	// Default retry config (numRetries == 0): each Commit is a single
-	// CommitTable attempt. The first fails with a clean conflict, the second succeeds.
+func TestTransactionCommit_RetriesConflictsByDefault(t *testing.T) {
 	cat := &sequentialCatalog{
 		errs: []error{ErrCommitFailed},
 	}
 	tbl := newRetryTestTable(t, cat, nil)
+	cat.metadata = tbl.Metadata()
+
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.SetProperties(map[string]string{"key": "value"}))
+
+	committed, err := tx.Commit(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, "value", committed.Properties()["key"])
+	assert.Equal(t, int32(2), cat.attempts.Load(), "the conflict must be retried within one Commit")
+}
+
+func TestTransactionCommit_RetriableAfterCleanConflict(t *testing.T) {
+	// With retries disabled, each Commit is a single CommitTable attempt.
+	// The first fails with a clean conflict, the second succeeds.
+	cat := &sequentialCatalog{
+		errs: []error{ErrCommitFailed},
+	}
+	tbl := newRetryTestTable(t, cat, iceberg.Properties{CommitNumRetriesKey: "0"})
 	cat.metadata = tbl.Metadata()
 
 	tx := tbl.NewTransaction()
@@ -1164,7 +1180,7 @@ func TestTransactionCommit_RetriableAfterCleanConflict(t *testing.T) {
 
 func TestTransactionCommit_ResumedConflictStaysResumable(t *testing.T) {
 	cat := &sequentialCatalog{errs: []error{ErrCommitFailed, ErrCommitFailed}}
-	tbl := newRetryTestTable(t, cat, nil)
+	tbl := newRetryTestTable(t, cat, iceberg.Properties{CommitNumRetriesKey: "0"})
 	cat.metadata = tbl.Metadata()
 
 	tx := tbl.NewTransaction()
@@ -1186,7 +1202,7 @@ func TestTransactionCommit_ResumeRebuildsAfterPeerSnapshotOnAnotherBranch(t *tes
 	spec := iceberg.NewPartitionSpec()
 	wfs := newMemIO(1<<20, nil)
 	meta, err := NewMetadata(simpleSchema(), &spec, UnsortedSortOrder, "mem://default/table-location",
-		iceberg.Properties{PropertyFormatVersion: "2"})
+		iceberg.Properties{PropertyFormatVersion: "2", CommitNumRetriesKey: "0"})
 	require.NoError(t, err)
 	cat := &sequentialCatalog{metadata: meta}
 	tbl := newOCCTable(t, meta, wfs, cat)
@@ -1426,7 +1442,8 @@ func TestTransactionCommit_CommittableAfterTransientFailureFollowingRebuild(t *t
 func TestTransactionCommit_BusyTableWithRetriesDisabledResumesUntilItLands(t *testing.T) {
 	spec := iceberg.NewPartitionSpec()
 	wfs := newMemIO(1<<20, nil)
-	meta, err := NewMetadata(simpleSchema(), &spec, UnsortedSortOrder, "mem://default/table-location", nil)
+	meta, err := NewMetadata(simpleSchema(), &spec, UnsortedSortOrder, "mem://default/table-location",
+		iceberg.Properties{CommitNumRetriesKey: "0"})
 	require.NoError(t, err)
 	// Each failed submission grafts a peer commit, so every resume must
 	// rebuild onto a head that moves again before the next submission.
@@ -1493,7 +1510,7 @@ func TestTransactionCommit_AbandonedAfterFailureLeavesOnlyStagedFiles(t *testing
 
 func TestTransactionTableCommitRefusedAfterFailedCommit(t *testing.T) {
 	cat := &sequentialCatalog{errs: []error{ErrCommitFailed}}
-	tbl := newRetryTestTable(t, cat, nil)
+	tbl := newRetryTestTable(t, cat, iceberg.Properties{CommitNumRetriesKey: "0"})
 	cat.metadata = tbl.Metadata()
 
 	tx := tbl.NewTransaction()

@@ -30,7 +30,7 @@ import (
 
 // positionDeletePartitionedFanoutWriter distributes Arrow position delete records across multiple partitions based on
 // a partition specification, writing data to separate delete files for each partition using
-// a fanout pattern with configurable parallelism.
+// a fanout pattern.
 type positionDeletePartitionedFanoutWriter struct {
 	partitionContextByFilePath map[string]partitionContext
 	metadata                   Metadata
@@ -49,12 +49,11 @@ func newPositionDeletePartitionedFanoutWriter(metadata Metadata, partitionContex
 	}
 }
 
-// Write writes the Arrow records to the specified location using a fanout pattern with
-// the specified number of workers. The returned iterator yields the data files written
-// by the fanout process.
-func (p *positionDeletePartitionedFanoutWriter) Write(ctx context.Context, workers int) iter.Seq2[iceberg.DataFile, error] {
-	inputRecordsCh := make(chan arrow.RecordBatch, workers)
-	outputDataFilesCh := make(chan iceberg.DataFile, workers)
+// Write writes the Arrow records to the specified location using a fanout pattern.
+// The returned iterator yields the data files written by the fanout process.
+func (p *positionDeletePartitionedFanoutWriter) Write(ctx context.Context) iter.Seq2[iceberg.DataFile, error] {
+	inputRecordsCh := make(chan arrow.RecordBatch, 1)
+	outputDataFilesCh := make(chan iceberg.DataFile, 1)
 
 	fanoutBaseCtx, fanoutCancel := context.WithCancel(ctx)
 	fanoutWorkers, fanoutCtx := errgroup.WithContext(fanoutBaseCtx)
@@ -65,11 +64,10 @@ func (p *positionDeletePartitionedFanoutWriter) Write(ctx context.Context, worke
 	}
 	startRecordFeeder(fanoutCtx, p.itr, fanoutWorkers, inputRecordsCh)
 
-	for range workers {
-		fanoutWorkers.Go(func() error {
-			return p.fanout(fanoutCtx, writerCtx, inputRecordsCh, outputDataFilesCh)
-		})
-	}
+	// Dispatch in input order so each partition writer receives sorted deletes.
+	fanoutWorkers.Go(func() error {
+		return p.fanout(fanoutCtx, writerCtx, inputRecordsCh, outputDataFilesCh)
+	})
 
 	return p.yieldDataFiles(fanoutWorkers, inputRecordsCh, outputDataFilesCh, cancel)
 }

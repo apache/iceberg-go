@@ -107,6 +107,7 @@ type Representation struct {
 	// The dialect of the sql SELECT statement (e.g., "trino" or "spark")
 	Dialect string `json:"dialect"`
 }
+
 type Representations []Representation
 
 // NewRepresentation creates a SQL view representation from named fields.
@@ -132,6 +133,20 @@ type Version struct {
 	DefaultNamespace table.Identifier `json:"default-namespace"`
 	// An (optional) default catalog name for querying the view
 	DefaultCatalog string `json:"default-catalog,omitempty"`
+}
+
+// MarshalJSON writes a nil DefaultNamespace as an empty list because the spec requires the field.
+func (v Version) MarshalJSON() ([]byte, error) {
+	type alias Version
+
+	if v.Summary == nil {
+		v.Summary = VersionSummary{}
+	}
+	if v.DefaultNamespace == nil {
+		v.DefaultNamespace = table.Identifier{}
+	}
+
+	return json.Marshal(alias(v))
 }
 
 type VersionOpt func(*Version)
@@ -611,10 +626,112 @@ func (m *metadata) UnmarshalJSON(b []byte) error {
 	if err := next.validate(); err != nil {
 		return err
 	}
+	if err := validateRequiredJSONFields(b); err != nil {
+		return err
+	}
 
 	*m = next
 	// init() rebinds the lazy-index closures to m after the value copy.
 	m.init()
+
+	return nil
+}
+
+func requireJSONFields(raw map[string]json.RawMessage, object string, fields ...string) error {
+	for _, field := range fields {
+		value, ok := raw[field]
+		if !ok || strings.TrimSpace(string(value)) == "null" {
+			return fmt.Errorf("%w: %s %s is required", ErrInvalidViewMetadata, object, field)
+		}
+	}
+
+	return nil
+}
+
+func validateRequiredJSONFields(data []byte) error {
+	var metadataFields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &metadataFields); err != nil {
+		return err
+	}
+	if err := requireJSONFields(metadataFields, "view metadata", "current-version-id", "version-log"); err != nil {
+		return err
+	}
+
+	var versions []json.RawMessage
+	if err := json.Unmarshal(metadataFields["versions"], &versions); err != nil {
+		return err
+	}
+	for i, versionData := range versions {
+		var versionFields map[string]json.RawMessage
+		if err := json.Unmarshal(versionData, &versionFields); err != nil {
+			return err
+		}
+		versionName := fmt.Sprintf("view version %d", i)
+		if err := requireJSONFields(
+			versionFields,
+			versionName,
+			"version-id",
+			"schema-id",
+			"timestamp-ms",
+			"representations",
+		); err != nil {
+			return err
+		}
+		// Older iceberg-go versions wrote null for nil summary and namespace.
+		// Accept those values for compatibility, but still require both keys.
+		for _, field := range []string{"summary", "default-namespace"} {
+			if _, ok := versionFields[field]; !ok {
+				return fmt.Errorf("%w: %s %s is required", ErrInvalidViewMetadata, versionName, field)
+			}
+		}
+
+		var representations []json.RawMessage
+		if err := json.Unmarshal(versionFields["representations"], &representations); err != nil {
+			return err
+		}
+		for j, representationData := range representations {
+			var representationFields map[string]json.RawMessage
+			if err := json.Unmarshal(representationData, &representationFields); err != nil {
+				return err
+			}
+			representationName := fmt.Sprintf("view representation %d for version %d", j, i)
+			if err := requireJSONFields(representationFields, representationName, "type"); err != nil {
+				return err
+			}
+
+			var representationType string
+			if err := json.Unmarshal(representationFields["type"], &representationType); err != nil {
+				return err
+			}
+			if strings.TrimSpace(representationType) == "" {
+				return fmt.Errorf("%w: %s type is required", ErrInvalidViewMetadata, representationName)
+			}
+			if representationType == "sql" {
+				if err := requireJSONFields(representationFields, representationName, "sql", "dialect"); err != nil {
+					return err
+				}
+			}
+		}
+	}
+
+	var versionLog []json.RawMessage
+	if err := json.Unmarshal(metadataFields["version-log"], &versionLog); err != nil {
+		return err
+	}
+	for i, entryData := range versionLog {
+		var entryFields map[string]json.RawMessage
+		if err := json.Unmarshal(entryData, &entryFields); err != nil {
+			return err
+		}
+		if err := requireJSONFields(
+			entryFields,
+			fmt.Sprintf("view version log entry %d", i),
+			"timestamp-ms",
+			"version-id",
+		); err != nil {
+			return err
+		}
+	}
 
 	return nil
 }

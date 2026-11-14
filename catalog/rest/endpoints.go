@@ -18,16 +18,19 @@
 package rest
 
 import (
-	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
+
+	"github.com/apache/iceberg-go"
 )
 
 // ErrEndpointNotSupported means the server did not advertise an endpoint the
-// operation needs.
-var ErrEndpointNotSupported = errors.New("endpoint not supported by server")
+// operation needs. It wraps iceberg.ErrNotImplemented, which a server that
+// answers 501 for the same operation already produces, so callers can treat
+// both alike.
+var ErrEndpointNotSupported = fmt.Errorf("%w: endpoint not supported by server", iceberg.ErrNotImplemented)
 
 const pathPrefix = "/v1/{prefix}"
 
@@ -103,6 +106,7 @@ var (
 	endpointDeleteTable      = endpoint{http.MethodDelete, "/v1/{prefix}/namespaces/{namespace}/tables/{table}"}
 	endpointRenameTable      = endpoint{http.MethodPost, "/v1/{prefix}/tables/rename"}
 	endpointRegisterTable    = endpoint{http.MethodPost, "/v1/{prefix}/namespaces/{namespace}/register"}
+	endpointRemoteSign       = endpoint{http.MethodPost, "/v1/{prefix}/namespaces/{namespace}/tables/{table}/sign"}
 	endpointReportMetrics    = endpoint{http.MethodPost, "/v1/{prefix}/namespaces/{namespace}/tables/{table}/metrics"}
 	endpointTableCredentials = endpoint{http.MethodGet, "/v1/{prefix}/namespaces/{namespace}/tables/{table}/credentials"}
 	endpointPlanTableScan    = endpoint{http.MethodPost, "/v1/{prefix}/namespaces/{namespace}/tables/{table}/plan"}
@@ -151,7 +155,7 @@ var allEndpoints = []endpoint{
 	endpointCommitTransaction,
 	endpointListTables, endpointLoadTable, endpointTableExists, endpointCreateTable,
 	endpointUpdateTable, endpointDeleteTable, endpointRenameTable, endpointRegisterTable,
-	endpointReportMetrics, endpointTableCredentials,
+	endpointRemoteSign, endpointReportMetrics, endpointTableCredentials,
 	endpointPlanTableScan, endpointFetchPlanResult, endpointCancelPlanning, endpointFetchScanTasks,
 	endpointListViews, endpointLoadView, endpointViewExists, endpointCreateView,
 	endpointUpdateView, endpointDeleteView, endpointRenameView, endpointRegisterView,

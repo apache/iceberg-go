@@ -75,70 +75,39 @@ var (
 			ID: 3, Name: "baz", Type: iceberg.PrimitiveTypes.Bool, Required: false,
 		},
 		iceberg.NestedField{
-			ID: 4, Name: "qux", Required: true, Type: &iceberg.ListType{
-				ElementID: 5, Element: iceberg.PrimitiveTypes.String, ElementRequired: true,
-			},
+			ID: 4, Name: "qux", Required: true, Type: iceberg.NewListType(5, iceberg.PrimitiveTypes.String, true),
 		},
 		iceberg.NestedField{
 			ID: 6, Name: "quux",
-			Type: &iceberg.MapType{
-				KeyID:   7,
-				KeyType: iceberg.PrimitiveTypes.String,
-				ValueID: 8,
-				ValueType: &iceberg.MapType{
-					KeyID:         9,
-					KeyType:       iceberg.PrimitiveTypes.String,
-					ValueID:       10,
-					ValueType:     iceberg.PrimitiveTypes.Int32,
-					ValueRequired: true,
-				},
-				ValueRequired: true,
-			},
+			Type:     iceberg.NewMapType(7, iceberg.PrimitiveTypes.String, 8, iceberg.NewMapType(9, iceberg.PrimitiveTypes.String, 10, iceberg.PrimitiveTypes.Int32, true), true),
 			Required: true,
 		},
 		iceberg.NestedField{
-			ID: 11, Name: "location", Type: &iceberg.ListType{
-				ElementID: 12, Element: &iceberg.StructType{
-					FieldList: []iceberg.NestedField{
-						{ID: 13, Name: "latitude", Type: iceberg.PrimitiveTypes.Float32, Required: false},
-						{ID: 14, Name: "longitude", Type: iceberg.PrimitiveTypes.Float32, Required: false},
-					},
-				},
-				ElementRequired: true,
-			},
+			ID: 11, Name: "location", Type: iceberg.NewListType(12, iceberg.NewStructType(
+				iceberg.NestedField{ID: 13, Name: "latitude", Type: iceberg.PrimitiveTypes.Float32, Required: false},
+				iceberg.NestedField{ID: 14, Name: "longitude", Type: iceberg.PrimitiveTypes.Float32, Required: false},
+			), true),
 			Required: true,
 		},
 		iceberg.NestedField{
 			ID:   15,
 			Name: "person",
-			Type: &iceberg.StructType{
-				FieldList: []iceberg.NestedField{
-					{ID: 16, Name: "name", Type: iceberg.PrimitiveTypes.String, Required: false},
-					{ID: 17, Name: "age", Type: iceberg.PrimitiveTypes.Int32, Required: true},
-				},
-			},
+			Type: iceberg.NewStructType(
+				iceberg.NestedField{ID: 16, Name: "name", Type: iceberg.PrimitiveTypes.String, Required: false},
+				iceberg.NestedField{ID: 17, Name: "age", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+			),
 			Required: false,
 		},
 		iceberg.NestedField{
-			ID:   18,
-			Name: "thing",
-			Type: &iceberg.MapType{
-				KeyID:         19,
-				KeyType:       iceberg.PrimitiveTypes.String,
-				ValueID:       20,
-				ValueType:     iceberg.PrimitiveTypes.Int32,
-				ValueRequired: true,
-			},
+			ID:       18,
+			Name:     "thing",
+			Type:     iceberg.NewMapType(19, iceberg.PrimitiveTypes.String, 20, iceberg.PrimitiveTypes.Int32, true),
 			Required: false,
 		},
 		iceberg.NestedField{
-			ID:   21,
-			Name: "tags",
-			Type: &iceberg.ListType{
-				ElementID:       22,
-				Element:         iceberg.PrimitiveTypes.String,
-				ElementRequired: false,
-			},
+			ID:       21,
+			Name:     "tags",
+			Type:     iceberg.NewListType(22, iceberg.PrimitiveTypes.String, false),
 			Required: false,
 		},
 	)
@@ -240,21 +209,21 @@ func TestSchemaAsStructClonesNestedTypes(t *testing.T) {
 		iceberg.NestedField{
 			ID:   1,
 			Name: "person",
-			Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
-				{ID: 2, Name: "name", Type: iceberg.PrimitiveTypes.String},
-			}},
+			Type: iceberg.NewStructType(
+				iceberg.NestedField{ID: 2, Name: "name", Type: iceberg.PrimitiveTypes.String},
+			),
 			Required: true,
 		},
 	)
 
 	structType := schema.AsStruct()
-	personType, ok := structType.FieldList[0].Type.(*iceberg.StructType)
+	personType, ok := structType.Field(0).Type.(*iceberg.StructType)
 	require.True(t, ok)
 	personType.FieldList[0].Name = "full_name"
 
 	clonedPersonType, ok := schema.Field(0).Type.(*iceberg.StructType)
 	require.True(t, ok)
-	assert.Equal(t, "name", clonedPersonType.FieldList[0].Name)
+	assert.Equal(t, "name", clonedPersonType.Field(0).Name)
 }
 
 func TestSchemaAsStructClonesNestedListTypes(t *testing.T) {
@@ -262,19 +231,15 @@ func TestSchemaAsStructClonesNestedListTypes(t *testing.T) {
 		iceberg.NestedField{
 			ID:   1,
 			Name: "people",
-			Type: &iceberg.ListType{
-				ElementID:       2,
-				ElementRequired: true,
-				Element: &iceberg.StructType{FieldList: []iceberg.NestedField{
-					{ID: 3, Name: "name", Type: iceberg.PrimitiveTypes.String},
-				}},
-			},
+			Type: iceberg.NewListType(2, iceberg.NewStructType(
+				iceberg.NestedField{ID: 3, Name: "name", Type: iceberg.PrimitiveTypes.String},
+			), true),
 			Required: true,
 		},
 	)
 
 	structType := schema.AsStruct()
-	listType, ok := structType.FieldList[0].Type.(*iceberg.ListType)
+	listType, ok := structType.Field(0).Type.(*iceberg.ListType)
 	require.True(t, ok)
 
 	elementType, ok := listType.Element.(*iceberg.StructType)
@@ -286,7 +251,7 @@ func TestSchemaAsStructClonesNestedListTypes(t *testing.T) {
 
 	clonedElementType, ok := clonedListType.Element.(*iceberg.StructType)
 	require.True(t, ok)
-	assert.Equal(t, "name", clonedElementType.FieldList[0].Name)
+	assert.Equal(t, "name", clonedElementType.Field(0).Name)
 }
 
 func TestSchemaAsStructClonesNestedMapTypes(t *testing.T) {
@@ -294,21 +259,15 @@ func TestSchemaAsStructClonesNestedMapTypes(t *testing.T) {
 		iceberg.NestedField{
 			ID:   1,
 			Name: "people_by_id",
-			Type: &iceberg.MapType{
-				KeyID:         2,
-				KeyType:       iceberg.PrimitiveTypes.String,
-				ValueID:       3,
-				ValueRequired: true,
-				ValueType: &iceberg.StructType{FieldList: []iceberg.NestedField{
-					{ID: 4, Name: "name", Type: iceberg.PrimitiveTypes.String},
-				}},
-			},
+			Type: iceberg.NewMapType(2, iceberg.PrimitiveTypes.String, 3, iceberg.NewStructType(
+				iceberg.NestedField{ID: 4, Name: "name", Type: iceberg.PrimitiveTypes.String},
+			), true),
 			Required: true,
 		},
 	)
 
 	structType := schema.AsStruct()
-	mapType, ok := structType.FieldList[0].Type.(*iceberg.MapType)
+	mapType, ok := structType.Field(0).Type.(*iceberg.MapType)
 	require.True(t, ok)
 
 	valueType, ok := mapType.ValueType.(*iceberg.StructType)
@@ -320,7 +279,7 @@ func TestSchemaAsStructClonesNestedMapTypes(t *testing.T) {
 
 	clonedValueType, ok := clonedMapType.ValueType.(*iceberg.StructType)
 	require.True(t, ok)
-	assert.Equal(t, "name", clonedValueType.FieldList[0].Name)
+	assert.Equal(t, "name", clonedValueType.Field(0).Name)
 }
 
 func TestSchemaFieldGettersReturnDefensiveCopies(t *testing.T) {
@@ -328,9 +287,9 @@ func TestSchemaFieldGettersReturnDefensiveCopies(t *testing.T) {
 		iceberg.NestedField{
 			ID:   1,
 			Name: "person",
-			Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
-				{ID: 2, Name: "name", Type: iceberg.PrimitiveTypes.String},
-			}},
+			Type: iceberg.NewStructType(
+				iceberg.NestedField{ID: 2, Name: "name", Type: iceberg.PrimitiveTypes.String},
+			),
 		},
 		iceberg.NestedField{
 			ID:             3,
@@ -415,7 +374,7 @@ func TestSchemaFieldRefLookupDoesNotAllocate(t *testing.T) {
 		}
 	}
 	schema := iceberg.NewSchema(0, iceberg.NestedField{
-		ID: 1, Name: "parent", Type: &iceberg.StructType{FieldList: children},
+		ID: 1, Name: "parent", Type: iceberg.NewStructType(children...),
 	})
 	_, ok := schema.FindFieldByIDRef(1, internal.SchemaRef{})
 	require.True(t, ok)
@@ -440,7 +399,7 @@ func TestSchemaFieldRefLookupDoesNotAllocate(t *testing.T) {
 	shared, ok := schema.FindFieldByIDRef(1, internal.SchemaRef{})
 	require.True(t, ok)
 	sharedParent := shared.Type.(*iceberg.StructType)
-	assert.Equal(t, "shared_child", sharedParent.FieldList[0].Name)
+	assert.Equal(t, "shared_child", sharedParent.Field(0).Name)
 }
 
 func TestSchemaIndexByIDVisitor(t *testing.T) {
@@ -448,41 +407,27 @@ func TestSchemaIndexByIDVisitor(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, map[int]iceberg.NestedField{
-		1: tableSchemaNested.Field(0),
-		2: tableSchemaNested.Field(1),
-		3: tableSchemaNested.Field(2),
-		4: tableSchemaNested.Field(3),
-		5: {ID: 5, Name: "element", Type: iceberg.PrimitiveTypes.String, Required: true},
-		6: tableSchemaNested.Field(4),
-		7: {ID: 7, Name: "key", Type: iceberg.PrimitiveTypes.String, Required: true},
-		8: {ID: 8, Name: "value", Type: &iceberg.MapType{
-			KeyID:         9,
-			KeyType:       iceberg.PrimitiveTypes.String,
-			ValueID:       10,
-			ValueType:     iceberg.PrimitiveTypes.Int32,
-			ValueRequired: true,
-		}, Required: true},
+		1:  tableSchemaNested.Field(0),
+		2:  tableSchemaNested.Field(1),
+		3:  tableSchemaNested.Field(2),
+		4:  tableSchemaNested.Field(3),
+		5:  {ID: 5, Name: "element", Type: iceberg.PrimitiveTypes.String, Required: true},
+		6:  tableSchemaNested.Field(4),
+		7:  {ID: 7, Name: "key", Type: iceberg.PrimitiveTypes.String, Required: true},
+		8:  {ID: 8, Name: "value", Type: iceberg.NewMapType(9, iceberg.PrimitiveTypes.String, 10, iceberg.PrimitiveTypes.Int32, true), Required: true},
 		9:  {ID: 9, Name: "key", Type: iceberg.PrimitiveTypes.String, Required: true},
 		10: {ID: 10, Name: "value", Type: iceberg.PrimitiveTypes.Int32, Required: true},
 		11: tableSchemaNested.Field(5),
-		12: {ID: 12, Name: "element", Type: &iceberg.StructType{
-			FieldList: []iceberg.NestedField{
-				{ID: 13, Name: "latitude", Type: iceberg.PrimitiveTypes.Float32, Required: false},
-				{ID: 14, Name: "longitude", Type: iceberg.PrimitiveTypes.Float32, Required: false},
-			},
-		}, Required: true},
+		12: {ID: 12, Name: "element", Type: iceberg.NewStructType(
+			iceberg.NestedField{ID: 13, Name: "latitude", Type: iceberg.PrimitiveTypes.Float32, Required: false},
+			iceberg.NestedField{ID: 14, Name: "longitude", Type: iceberg.PrimitiveTypes.Float32, Required: false},
+		), Required: true},
 		13: {ID: 13, Name: "latitude", Type: iceberg.PrimitiveTypes.Float32, Required: false},
 		14: {ID: 14, Name: "longitude", Type: iceberg.PrimitiveTypes.Float32, Required: false},
 		15: tableSchemaNested.Field(6),
 		16: {ID: 16, Name: "name", Type: iceberg.PrimitiveTypes.String, Required: false},
 		17: {ID: 17, Name: "age", Type: iceberg.PrimitiveTypes.Int32, Required: true},
-		18: {ID: 18, Name: "thing", Type: &iceberg.MapType{
-			KeyID:         19,
-			KeyType:       iceberg.PrimitiveTypes.String,
-			ValueID:       20,
-			ValueType:     iceberg.PrimitiveTypes.Int32,
-			ValueRequired: true,
-		}, Required: false},
+		18: {ID: 18, Name: "thing", Type: iceberg.NewMapType(19, iceberg.PrimitiveTypes.String, 20, iceberg.PrimitiveTypes.Int32, true), Required: false},
 		19: {ID: 19, Name: "key", Type: iceberg.PrimitiveTypes.String, Required: true},
 		20: {ID: 20, Name: "value", Type: iceberg.PrimitiveTypes.Int32, Required: true},
 		21: tableSchemaNested.Field(8),
@@ -1173,12 +1118,15 @@ func TestUnmarshalSchemaAllowsZeroCollectionFieldIDs(t *testing.T) {
 }
 
 func TestUnmarshalSchemaRoundTripsCollectionFieldIDs(t *testing.T) {
-	data, err := json.Marshal(tableSchemaNested)
+	// Preserve the collection ID fixture, but use a valid identifier when
+	// testing the metadata round trip.
+	validSchema := iceberg.NewSchemaWithIdentifiers(tableSchemaNested.ID, []int{2}, tableSchemaNested.Fields()...)
+	data, err := json.Marshal(validSchema)
 	require.NoError(t, err)
 
 	var schema iceberg.Schema
 	require.NoError(t, json.Unmarshal(data, &schema))
-	assert.True(t, tableSchemaNested.Equals(&schema))
+	assert.True(t, validSchema.Equals(&schema))
 }
 
 func TestPruneColumnsString(t *testing.T) {
@@ -1202,9 +1150,7 @@ func TestPruneColumnsList(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.True(t, sc.Equals(iceberg.NewSchema(1,
-		iceberg.NestedField{ID: 4, Name: "qux", Required: true, Type: &iceberg.ListType{
-			ElementID: 5, Element: iceberg.PrimitiveTypes.String, ElementRequired: true,
-		}})))
+		iceberg.NestedField{ID: 4, Name: "qux", Required: true, Type: iceberg.NewListType(5, iceberg.PrimitiveTypes.String, true)})))
 }
 
 func TestPruneColumnsListItself(t *testing.T) {
@@ -1219,9 +1165,7 @@ func TestPruneColumnsListFull(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.True(t, sc.Equals(iceberg.NewSchema(1,
-		iceberg.NestedField{ID: 4, Name: "qux", Required: true, Type: &iceberg.ListType{
-			ElementID: 5, Element: iceberg.PrimitiveTypes.String, ElementRequired: true,
-		}})))
+		iceberg.NestedField{ID: 4, Name: "qux", Required: true, Type: iceberg.NewListType(5, iceberg.PrimitiveTypes.String, true)})))
 }
 
 func TestPruneColumnsMap(t *testing.T) {
@@ -1233,19 +1177,7 @@ func TestPruneColumnsMap(t *testing.T) {
 			ID:       6,
 			Name:     "quux",
 			Required: true,
-			Type: &iceberg.MapType{
-				KeyID:   7,
-				KeyType: iceberg.PrimitiveTypes.String,
-				ValueID: 8,
-				ValueType: &iceberg.MapType{
-					KeyID:         9,
-					KeyType:       iceberg.PrimitiveTypes.String,
-					ValueID:       10,
-					ValueType:     iceberg.PrimitiveTypes.Int32,
-					ValueRequired: true,
-				},
-				ValueRequired: true,
-			},
+			Type:     iceberg.NewMapType(7, iceberg.PrimitiveTypes.String, 8, iceberg.NewMapType(9, iceberg.PrimitiveTypes.String, 10, iceberg.PrimitiveTypes.Int32, true), true),
 		})))
 }
 
@@ -1264,19 +1196,7 @@ func TestPruneColumnsMapFull(t *testing.T) {
 			ID:       6,
 			Name:     "quux",
 			Required: true,
-			Type: &iceberg.MapType{
-				KeyID:   7,
-				KeyType: iceberg.PrimitiveTypes.String,
-				ValueID: 8,
-				ValueType: &iceberg.MapType{
-					KeyID:         9,
-					KeyType:       iceberg.PrimitiveTypes.String,
-					ValueID:       10,
-					ValueType:     iceberg.PrimitiveTypes.Int32,
-					ValueRequired: true,
-				},
-				ValueRequired: true,
-			},
+			Type:     iceberg.NewMapType(7, iceberg.PrimitiveTypes.String, 8, iceberg.NewMapType(9, iceberg.PrimitiveTypes.String, 10, iceberg.PrimitiveTypes.Int32, true), true),
 		})))
 }
 
@@ -1289,19 +1209,7 @@ func TestPruneColumnsMapKey(t *testing.T) {
 			ID:       6,
 			Name:     "quux",
 			Required: true,
-			Type: &iceberg.MapType{
-				KeyID:   7,
-				KeyType: iceberg.PrimitiveTypes.String,
-				ValueID: 8,
-				ValueType: &iceberg.MapType{
-					KeyID:         9,
-					KeyType:       iceberg.PrimitiveTypes.String,
-					ValueID:       10,
-					ValueType:     iceberg.PrimitiveTypes.Int32,
-					ValueRequired: true,
-				},
-				ValueRequired: true,
-			},
+			Type:     iceberg.NewMapType(7, iceberg.PrimitiveTypes.String, 8, iceberg.NewMapType(9, iceberg.PrimitiveTypes.String, 10, iceberg.PrimitiveTypes.Int32, true), true),
 		})))
 }
 
@@ -1314,11 +1222,9 @@ func TestPruneColumnsStruct(t *testing.T) {
 			ID:       15,
 			Name:     "person",
 			Required: false,
-			Type: &iceberg.StructType{
-				FieldList: []iceberg.NestedField{{
-					ID: 16, Name: "name", Type: iceberg.PrimitiveTypes.String, Required: false,
-				}},
-			},
+			Type: iceberg.NewStructType(iceberg.NestedField{
+				ID: 16, Name: "name", Type: iceberg.PrimitiveTypes.String, Required: false,
+			}),
 		})))
 }
 
@@ -1331,17 +1237,15 @@ func TestPruneColumnsStructFull(t *testing.T) {
 			ID:       15,
 			Name:     "person",
 			Required: false,
-			Type: &iceberg.StructType{
-				FieldList: []iceberg.NestedField{{
-					ID: 16, Name: "name", Type: iceberg.PrimitiveTypes.String, Required: false,
-				}},
-			},
+			Type: iceberg.NewStructType(iceberg.NestedField{
+				ID: 16, Name: "name", Type: iceberg.PrimitiveTypes.String, Required: false,
+			}),
 		})))
 }
 
 func TestPruneColumnsEmptyStruct(t *testing.T) {
 	schemaEmptyStruct := iceberg.NewSchema(0, iceberg.NestedField{
-		ID: 15, Name: "person", Type: &iceberg.StructType{}, Required: false,
+		ID: 15, Name: "person", Type: iceberg.NewStructType(), Required: false,
 	})
 
 	sc, err := iceberg.PruneColumns(schemaEmptyStruct, map[int]iceberg.Void{15: {}}, false)
@@ -1349,13 +1253,13 @@ func TestPruneColumnsEmptyStruct(t *testing.T) {
 
 	assert.True(t, sc.Equals(iceberg.NewSchema(0,
 		iceberg.NestedField{
-			ID: 15, Name: "person", Type: &iceberg.StructType{}, Required: false,
+			ID: 15, Name: "person", Type: iceberg.NewStructType(), Required: false,
 		})))
 }
 
 func TestPruneColumnsEmptyStructFull(t *testing.T) {
 	schemaEmptyStruct := iceberg.NewSchema(0, iceberg.NestedField{
-		ID: 15, Name: "person", Type: &iceberg.StructType{}, Required: false,
+		ID: 15, Name: "person", Type: iceberg.NewStructType(), Required: false,
 	})
 
 	sc, err := iceberg.PruneColumns(schemaEmptyStruct, map[int]iceberg.Void{15: {}}, true)
@@ -1363,7 +1267,7 @@ func TestPruneColumnsEmptyStructFull(t *testing.T) {
 
 	assert.True(t, sc.Equals(iceberg.NewSchema(0,
 		iceberg.NestedField{
-			ID: 15, Name: "person", Type: &iceberg.StructType{}, Required: false,
+			ID: 15, Name: "person", Type: iceberg.NewStructType(), Required: false,
 		})))
 }
 
@@ -1373,18 +1277,10 @@ func TestPruneColumnsStructInMap(t *testing.T) {
 			ID:       6,
 			Name:     "id_to_person",
 			Required: true,
-			Type: &iceberg.MapType{
-				KeyID:   7,
-				KeyType: iceberg.PrimitiveTypes.Int32,
-				ValueID: 8,
-				ValueType: &iceberg.StructType{
-					FieldList: []iceberg.NestedField{
-						{ID: 10, Name: "name", Type: iceberg.PrimitiveTypes.String},
-						{ID: 11, Name: "age", Type: iceberg.PrimitiveTypes.Int32, Required: true},
-					},
-				},
-				ValueRequired: true,
-			},
+			Type: iceberg.NewMapType(7, iceberg.PrimitiveTypes.Int32, 8, iceberg.NewStructType(
+				iceberg.NestedField{ID: 10, Name: "name", Type: iceberg.PrimitiveTypes.String},
+				iceberg.NestedField{ID: 11, Name: "age", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+			), true),
 		})
 
 	sc, err := iceberg.PruneColumns(nestedSchema, map[int]iceberg.Void{11: {}}, false)
@@ -1395,17 +1291,9 @@ func TestPruneColumnsStructInMap(t *testing.T) {
 			ID:       6,
 			Name:     "id_to_person",
 			Required: true,
-			Type: &iceberg.MapType{
-				KeyID:   7,
-				KeyType: iceberg.PrimitiveTypes.Int32,
-				ValueID: 8,
-				ValueType: &iceberg.StructType{
-					FieldList: []iceberg.NestedField{
-						{ID: 11, Name: "age", Type: iceberg.PrimitiveTypes.Int32, Required: true},
-					},
-				},
-				ValueRequired: true,
-			},
+			Type: iceberg.NewMapType(7, iceberg.PrimitiveTypes.Int32, 8, iceberg.NewStructType(
+				iceberg.NestedField{ID: 11, Name: "age", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+			), true),
 		})
 
 	assert.Truef(t, sc.Equals(expected), "expected: %s\ngot: %s", expected, sc)
@@ -1417,18 +1305,10 @@ func TestPruneColumnsStructInMapFull(t *testing.T) {
 			ID:       6,
 			Name:     "id_to_person",
 			Required: true,
-			Type: &iceberg.MapType{
-				KeyID:   7,
-				KeyType: iceberg.PrimitiveTypes.Int32,
-				ValueID: 8,
-				ValueType: &iceberg.StructType{
-					FieldList: []iceberg.NestedField{
-						{ID: 10, Name: "name", Type: iceberg.PrimitiveTypes.String},
-						{ID: 11, Name: "age", Type: iceberg.PrimitiveTypes.Int32, Required: true},
-					},
-				},
-				ValueRequired: true,
-			},
+			Type: iceberg.NewMapType(7, iceberg.PrimitiveTypes.Int32, 8, iceberg.NewStructType(
+				iceberg.NestedField{ID: 10, Name: "name", Type: iceberg.PrimitiveTypes.String},
+				iceberg.NestedField{ID: 11, Name: "age", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+			), true),
 		})
 
 	sc, err := iceberg.PruneColumns(nestedSchema, map[int]iceberg.Void{11: {}}, true)
@@ -1439,17 +1319,9 @@ func TestPruneColumnsStructInMapFull(t *testing.T) {
 			ID:       6,
 			Name:     "id_to_person",
 			Required: true,
-			Type: &iceberg.MapType{
-				KeyID:   7,
-				KeyType: iceberg.PrimitiveTypes.Int32,
-				ValueID: 8,
-				ValueType: &iceberg.StructType{
-					FieldList: []iceberg.NestedField{
-						{ID: 11, Name: "age", Type: iceberg.PrimitiveTypes.Int32, Required: true},
-					},
-				},
-				ValueRequired: true,
-			},
+			Type: iceberg.NewMapType(7, iceberg.PrimitiveTypes.Int32, 8, iceberg.NewStructType(
+				iceberg.NestedField{ID: 11, Name: "age", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+			), true),
 		})
 
 	assert.Truef(t, sc.Equals(expected), "expected: %s\ngot: %s", expected, sc)
@@ -1521,24 +1393,22 @@ func TestAssignFreshSchemaIDsPreservesDefaults(t *testing.T) {
 			ID:       3,
 			Name:     "nested",
 			Required: true,
-			Type: &iceberg.StructType{
-				FieldList: []iceberg.NestedField{
-					{
-						ID:             4,
-						Name:           "nested_with_defaults",
-						Type:           iceberg.PrimitiveTypes.Int64,
-						Required:       true,
-						InitialDefault: int64(7),
-						WriteDefault:   int64(7),
-					},
-					{
-						ID:       5,
-						Name:     "nested_without_defaults",
-						Type:     iceberg.PrimitiveTypes.String,
-						Required: false,
-					},
+			Type: iceberg.NewStructType(
+				iceberg.NestedField{
+					ID:             4,
+					Name:           "nested_with_defaults",
+					Type:           iceberg.PrimitiveTypes.Int64,
+					Required:       true,
+					InitialDefault: int64(7),
+					WriteDefault:   int64(7),
 				},
-			},
+				iceberg.NestedField{
+					ID:       5,
+					Name:     "nested_without_defaults",
+					Type:     iceberg.PrimitiveTypes.String,
+					Required: false,
+				},
+			),
 		},
 	)
 
@@ -1560,14 +1430,14 @@ func TestAssignFreshSchemaIDsPreservesDefaults(t *testing.T) {
 	assert.Equal(t, "nested", nested.Name)
 	nestedStruct, ok := nested.Type.(*iceberg.StructType)
 	require.True(t, ok, "nested field must remain a StructType")
-	require.Len(t, nestedStruct.FieldList, 2)
+	require.Len(t, nestedStruct.Fields(), 2)
 
-	nestedWithDefaults := nestedStruct.FieldList[0]
+	nestedWithDefaults := nestedStruct.Field(0)
 	assert.Equal(t, "nested_with_defaults", nestedWithDefaults.Name)
 	assert.Equal(t, int64(7), nestedWithDefaults.InitialDefault, "nested InitialDefault must survive AssignFreshSchemaIDs")
 	assert.Equal(t, int64(7), nestedWithDefaults.WriteDefault, "nested WriteDefault must survive AssignFreshSchemaIDs")
 
-	nestedWithoutDefaults := nestedStruct.FieldList[1]
+	nestedWithoutDefaults := nestedStruct.Field(1)
 	assert.Equal(t, "nested_without_defaults", nestedWithoutDefaults.Name)
 	assert.Nil(t, nestedWithoutDefaults.InitialDefault)
 	assert.Nil(t, nestedWithoutDefaults.WriteDefault)
@@ -1578,19 +1448,12 @@ func TestAssignFreshSchemaIDsWithBase(t *testing.T) {
 	// removed from the new schema, so last-column-id stays at 9.
 	base := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
-		iceberg.NestedField{ID: 2, Name: "location", Type: &iceberg.StructType{
-			FieldList: []iceberg.NestedField{
-				{ID: 4, Name: "lat", Type: iceberg.PrimitiveTypes.Float64},
-			},
-		}},
+		iceberg.NestedField{ID: 2, Name: "location", Type: iceberg.NewStructType(
+			iceberg.NestedField{ID: 4, Name: "lat", Type: iceberg.PrimitiveTypes.Float64},
+		)},
 		iceberg.NestedField{ID: 3, Name: "dropped", Type: iceberg.PrimitiveTypes.String},
-		iceberg.NestedField{ID: 5, Name: "tags", Type: &iceberg.ListType{
-			ElementID: 6, Element: iceberg.PrimitiveTypes.String,
-		}},
-		iceberg.NestedField{ID: 7, Name: "props", Type: &iceberg.MapType{
-			KeyID: 8, KeyType: iceberg.PrimitiveTypes.String,
-			ValueID: 9, ValueType: iceberg.PrimitiveTypes.String,
-		}},
+		iceberg.NestedField{ID: 5, Name: "tags", Type: iceberg.NewListType(6, iceberg.PrimitiveTypes.String, false)},
+		iceberg.NestedField{ID: 7, Name: "props", Type: iceberg.NewMapType(8, iceberg.PrimitiveTypes.String, 9, iceberg.PrimitiveTypes.String, false)},
 	)
 
 	// The new schema reorders columns, adds "name" and "location.long", and
@@ -1598,19 +1461,12 @@ func TestAssignFreshSchemaIDsWithBase(t *testing.T) {
 	sc := iceberg.NewSchemaWithIdentifiers(0, []int{101},
 		iceberg.NestedField{ID: 100, Name: "name", Type: iceberg.PrimitiveTypes.String},
 		iceberg.NestedField{ID: 101, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
-		iceberg.NestedField{ID: 102, Name: "props", Type: &iceberg.MapType{
-			KeyID: 103, KeyType: iceberg.PrimitiveTypes.String,
-			ValueID: 104, ValueType: iceberg.PrimitiveTypes.String,
-		}},
-		iceberg.NestedField{ID: 105, Name: "tags", Type: &iceberg.ListType{
-			ElementID: 106, Element: iceberg.PrimitiveTypes.String,
-		}},
-		iceberg.NestedField{ID: 107, Name: "location", Type: &iceberg.StructType{
-			FieldList: []iceberg.NestedField{
-				{ID: 108, Name: "lat", Type: iceberg.PrimitiveTypes.Float64},
-				{ID: 109, Name: "long", Type: iceberg.PrimitiveTypes.Float64},
-			},
-		}},
+		iceberg.NestedField{ID: 102, Name: "props", Type: iceberg.NewMapType(103, iceberg.PrimitiveTypes.String, 104, iceberg.PrimitiveTypes.String, false)},
+		iceberg.NestedField{ID: 105, Name: "tags", Type: iceberg.NewListType(106, iceberg.PrimitiveTypes.String, false)},
+		iceberg.NestedField{ID: 107, Name: "location", Type: iceberg.NewStructType(
+			iceberg.NestedField{ID: 108, Name: "lat", Type: iceberg.PrimitiveTypes.Float64},
+			iceberg.NestedField{ID: 109, Name: "long", Type: iceberg.PrimitiveTypes.Float64},
+		)},
 	)
 
 	lastColumnID := 9
@@ -1624,19 +1480,12 @@ func TestAssignFreshSchemaIDsWithBase(t *testing.T) {
 	expected := iceberg.NewSchemaWithIdentifiers(0, []int{1},
 		iceberg.NestedField{ID: 10, Name: "name", Type: iceberg.PrimitiveTypes.String},
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
-		iceberg.NestedField{ID: 7, Name: "props", Type: &iceberg.MapType{
-			KeyID: 8, KeyType: iceberg.PrimitiveTypes.String,
-			ValueID: 9, ValueType: iceberg.PrimitiveTypes.String,
-		}},
-		iceberg.NestedField{ID: 5, Name: "tags", Type: &iceberg.ListType{
-			ElementID: 6, Element: iceberg.PrimitiveTypes.String,
-		}},
-		iceberg.NestedField{ID: 2, Name: "location", Type: &iceberg.StructType{
-			FieldList: []iceberg.NestedField{
-				{ID: 4, Name: "lat", Type: iceberg.PrimitiveTypes.Float64},
-				{ID: 11, Name: "long", Type: iceberg.PrimitiveTypes.Float64},
-			},
-		}},
+		iceberg.NestedField{ID: 7, Name: "props", Type: iceberg.NewMapType(8, iceberg.PrimitiveTypes.String, 9, iceberg.PrimitiveTypes.String, false)},
+		iceberg.NestedField{ID: 5, Name: "tags", Type: iceberg.NewListType(6, iceberg.PrimitiveTypes.String, false)},
+		iceberg.NestedField{ID: 2, Name: "location", Type: iceberg.NewStructType(
+			iceberg.NestedField{ID: 4, Name: "lat", Type: iceberg.PrimitiveTypes.Float64},
+			iceberg.NestedField{ID: 11, Name: "long", Type: iceberg.PrimitiveTypes.Float64},
+		)},
 	)
 	assert.True(t, expected.Equals(out), "expected %s, got %s", expected, out)
 	assert.Equal(t, []int{1}, out.IdentifierFieldIDs)
@@ -1660,19 +1509,15 @@ func TestAssignFreshSchemaIDsSiblingsFirst(t *testing.T) {
 	// location is visited before name, but name should still get the lower
 	// fresh ID because sibling IDs are assigned before recursing.
 	base := iceberg.NewSchema(0,
-		iceberg.NestedField{ID: 1, Name: "location", Type: &iceberg.StructType{
-			FieldList: []iceberg.NestedField{
-				{ID: 2, Name: "lat", Type: iceberg.PrimitiveTypes.Float64},
-			},
-		}},
+		iceberg.NestedField{ID: 1, Name: "location", Type: iceberg.NewStructType(
+			iceberg.NestedField{ID: 2, Name: "lat", Type: iceberg.PrimitiveTypes.Float64},
+		)},
 	)
 	sc := iceberg.NewSchema(0,
-		iceberg.NestedField{ID: 100, Name: "location", Type: &iceberg.StructType{
-			FieldList: []iceberg.NestedField{
-				{ID: 101, Name: "lat", Type: iceberg.PrimitiveTypes.Float64},
-				{ID: 102, Name: "long", Type: iceberg.PrimitiveTypes.Float64},
-			},
-		}},
+		iceberg.NestedField{ID: 100, Name: "location", Type: iceberg.NewStructType(
+			iceberg.NestedField{ID: 101, Name: "lat", Type: iceberg.PrimitiveTypes.Float64},
+			iceberg.NestedField{ID: 102, Name: "long", Type: iceberg.PrimitiveTypes.Float64},
+		)},
 		iceberg.NestedField{ID: 103, Name: "name", Type: iceberg.PrimitiveTypes.String},
 	)
 
@@ -1689,34 +1534,25 @@ func TestAssignFreshSchemaIDsSiblingsFirst(t *testing.T) {
 
 func TestAssignFreshSchemaIDsWithBaseListOfStruct(t *testing.T) {
 	base := iceberg.NewSchema(0,
-		iceberg.NestedField{ID: 1, Name: "events", Type: &iceberg.ListType{
-			ElementID: 2,
-			Element: &iceberg.StructType{FieldList: []iceberg.NestedField{
-				{ID: 3, Name: "ts", Type: iceberg.PrimitiveTypes.TimestampTz},
-			}},
-		}},
+		iceberg.NestedField{ID: 1, Name: "events", Type: iceberg.NewListType(2, iceberg.NewStructType(
+			iceberg.NestedField{ID: 3, Name: "ts", Type: iceberg.PrimitiveTypes.TimestampTz},
+		), false)},
 	)
 	sc := iceberg.NewSchema(0,
-		iceberg.NestedField{ID: 100, Name: "events", Type: &iceberg.ListType{
-			ElementID: 101,
-			Element: &iceberg.StructType{FieldList: []iceberg.NestedField{
-				{ID: 102, Name: "ts", Type: iceberg.PrimitiveTypes.TimestampTz},
-				{ID: 103, Name: "label", Type: iceberg.PrimitiveTypes.String},
-			}},
-		}},
+		iceberg.NestedField{ID: 100, Name: "events", Type: iceberg.NewListType(101, iceberg.NewStructType(
+			iceberg.NestedField{ID: 102, Name: "ts", Type: iceberg.PrimitiveTypes.TimestampTz},
+			iceberg.NestedField{ID: 103, Name: "label", Type: iceberg.PrimitiveTypes.String},
+		), false)},
 	)
 
 	out, err := iceberg.AssignFreshSchemaIDsWithBase(sc, base, nil)
 	require.NoError(t, err)
 
 	expected := iceberg.NewSchema(0,
-		iceberg.NestedField{ID: 1, Name: "events", Type: &iceberg.ListType{
-			ElementID: 2,
-			Element: &iceberg.StructType{FieldList: []iceberg.NestedField{
-				{ID: 3, Name: "ts", Type: iceberg.PrimitiveTypes.TimestampTz},
-				{ID: 4, Name: "label", Type: iceberg.PrimitiveTypes.String},
-			}},
-		}},
+		iceberg.NestedField{ID: 1, Name: "events", Type: iceberg.NewListType(2, iceberg.NewStructType(
+			iceberg.NestedField{ID: 3, Name: "ts", Type: iceberg.PrimitiveTypes.TimestampTz},
+			iceberg.NestedField{ID: 4, Name: "label", Type: iceberg.PrimitiveTypes.String},
+		), false)},
 	)
 	assert.True(t, expected.Equals(out), "expected %s, got %s", expected, out)
 }
@@ -1796,13 +1632,16 @@ func TestAssignFreshSchemaIDsWithNilBase(t *testing.T) {
 }
 
 func TestSchemaRoundTrip(t *testing.T) {
-	data, err := json.Marshal(tableSchemaNested)
+	// The shared fixture has an optional identifier field. Use a valid
+	// identifier for this metadata round trip, as required by the spec.
+	schema := iceberg.NewSchemaWithIdentifiers(tableSchemaNested.ID, []int{2}, tableSchemaNested.Fields()...)
+	data, err := json.Marshal(schema)
 	require.NoError(t, err)
 
 	assert.JSONEq(t, `{
 		"type": "struct",
 		"schema-id": 1,
-		"identifier-field-ids": [1],
+		"identifier-field-ids": [2],
 		"fields": [
 			{
 				"type": "string",
@@ -1932,7 +1771,7 @@ func TestSchemaRoundTrip(t *testing.T) {
 	var sc iceberg.Schema
 	require.NoError(t, json.Unmarshal(data, &sc))
 
-	assert.Truef(t, tableSchemaNested.Equals(&sc), "expected: %s\ngot: %s", tableSchemaNested, &sc)
+	assert.Truef(t, schema.Equals(&sc), "expected: %s\ngot: %s", schema, &sc)
 }
 
 type highestFieldIDUnsupportedType struct{}
@@ -1947,7 +1786,7 @@ func TestHighestFieldID(t *testing.T) {
 	}
 	deeplyNested := field(100, iceberg.PrimitiveTypes.Int64)
 	for id := 8; id >= 1; id-- {
-		deeplyNested = field(id, &iceberg.StructType{FieldList: []iceberg.NestedField{deeplyNested}})
+		deeplyNested = field(id, iceberg.NewStructType(deeplyNested))
 	}
 
 	tests := []struct {
@@ -1959,48 +1798,27 @@ func TestHighestFieldID(t *testing.T) {
 		{"empty schema", iceberg.NewSchema(0), 0},
 		{"nil schema", (*iceberg.Schema)(nil), 0},
 		{"flat field", iceberg.NewSchema(0, field(50, iceberg.PrimitiveTypes.String)), 50},
-		{"map key", iceberg.NewSchema(0, field(1, &iceberg.MapType{
-			KeyID: 50, KeyType: iceberg.PrimitiveTypes.String, ValueID: 2, ValueType: iceberg.PrimitiveTypes.Int32,
-		})), 50},
-		{"map key nested field", iceberg.NewSchema(0, field(1, &iceberg.MapType{
-			KeyID: 2, KeyType: &iceberg.StructType{FieldList: []iceberg.NestedField{
-				field(50, iceberg.PrimitiveTypes.String),
-			}}, ValueID: 3, ValueType: iceberg.PrimitiveTypes.Int32,
-		})), 50},
-		{"map value", iceberg.NewSchema(0, field(1, &iceberg.MapType{
-			KeyID: 2, KeyType: iceberg.PrimitiveTypes.String, ValueID: 50, ValueType: iceberg.PrimitiveTypes.Int32,
-		})), 50},
-		{"map value nested field", iceberg.NewSchema(0, field(1, &iceberg.MapType{
-			KeyID: 2, KeyType: iceberg.PrimitiveTypes.String, ValueID: 3,
-			ValueType: &iceberg.StructType{FieldList: []iceberg.NestedField{
-				field(50, iceberg.PrimitiveTypes.String),
-			}},
-		})), 50},
-		{"nested map value", iceberg.NewSchema(0, field(1, &iceberg.MapType{
-			KeyID: 2, KeyType: iceberg.PrimitiveTypes.String, ValueID: 3,
-			ValueType: &iceberg.ListType{ElementID: 4, Element: &iceberg.StructType{
-				FieldList: []iceberg.NestedField{field(50, iceberg.PrimitiveTypes.String)},
-			}},
-		})), 50},
-		{"list element", iceberg.NewSchema(0, field(1, &iceberg.ListType{
-			ElementID: 50, Element: iceberg.PrimitiveTypes.Int32,
-		})), 50},
-		{"collection field exceeds nested IDs", iceberg.NewSchema(0, field(50, &iceberg.MapType{
-			KeyID: 2, KeyType: iceberg.PrimitiveTypes.String, ValueID: 3,
-			ValueType: &iceberg.ListType{ElementID: 4, Element: iceberg.PrimitiveTypes.Int32},
-		})), 50},
+		{"map key", iceberg.NewSchema(0, field(1, iceberg.NewMapType(50, iceberg.PrimitiveTypes.String, 2, iceberg.PrimitiveTypes.Int32, false))), 50},
+		{"map key nested field", iceberg.NewSchema(0, field(1, iceberg.NewMapType(2, iceberg.NewStructType(
+			field(50, iceberg.PrimitiveTypes.String),
+		), 3, iceberg.PrimitiveTypes.Int32, false))), 50},
+		{"map value", iceberg.NewSchema(0, field(1, iceberg.NewMapType(2, iceberg.PrimitiveTypes.String, 50, iceberg.PrimitiveTypes.Int32, false))), 50},
+		{"map value nested field", iceberg.NewSchema(0, field(1, iceberg.NewMapType(2, iceberg.PrimitiveTypes.String, 3, iceberg.NewStructType(
+			field(50, iceberg.PrimitiveTypes.String),
+		), false))), 50},
+		{"nested map value", iceberg.NewSchema(0, field(1, iceberg.NewMapType(2, iceberg.PrimitiveTypes.String, 3, iceberg.NewListType(4, iceberg.NewStructType(field(50, iceberg.PrimitiveTypes.String)), false), false))), 50},
+		{"list element", iceberg.NewSchema(0, field(1, iceberg.NewListType(50, iceberg.PrimitiveTypes.Int32, false))), 50},
+		{"collection field exceeds nested IDs", iceberg.NewSchema(0, field(50, iceberg.NewMapType(2, iceberg.PrimitiveTypes.String, 3, iceberg.NewListType(4, iceberg.PrimitiveTypes.Int32, false), false))), 50},
 		{"deeply nested struct", iceberg.NewSchema(0, deeplyNested), 100},
 		{"empty struct before sibling", iceberg.NewSchema(0,
-			field(1, &iceberg.StructType{}), field(50, iceberg.PrimitiveTypes.String)), 50},
+			field(1, iceberg.NewStructType()), field(50, iceberg.PrimitiveTypes.String)), 50},
 		{"empty struct after sibling", iceberg.NewSchema(0,
-			field(50, iceberg.PrimitiveTypes.String), field(1, &iceberg.StructType{})), 50},
-		{"empty nested struct", iceberg.NewSchema(0, field(1, &iceberg.StructType{
-			FieldList: []iceberg.NestedField{
-				field(2, &iceberg.StructType{}), field(50, iceberg.PrimitiveTypes.Int32),
-			},
-		})), 50},
+			field(50, iceberg.PrimitiveTypes.String), field(1, iceberg.NewStructType())), 50},
+		{"empty nested struct", iceberg.NewSchema(0, field(1, iceberg.NewStructType(
+			field(2, iceberg.NewStructType()), field(50, iceberg.PrimitiveTypes.Int32),
+		))), 50},
 		{"empty struct inside list", iceberg.NewSchema(0,
-			field(1, &iceberg.ListType{ElementID: 2, Element: &iceberg.StructType{}}),
+			field(1, iceberg.NewListType(2, iceberg.NewStructType(), false)),
 			field(50, iceberg.PrimitiveTypes.String)), 50},
 		{"nil field type", iceberg.NewSchema(0,
 			field(1, nil), field(50, iceberg.PrimitiveTypes.String)), 50},
@@ -2039,7 +1857,7 @@ func TestAssignFreshSchemaIDsWithBaseEmptyStruct(t *testing.T) {
 	const highestBaseID = 50
 
 	base := iceberg.NewSchema(0,
-		iceberg.NestedField{ID: 1, Name: "empty", Type: &iceberg.StructType{}},
+		iceberg.NestedField{ID: 1, Name: "empty", Type: iceberg.NewStructType()},
 		iceberg.NestedField{ID: highestBaseID, Name: "existing", Type: iceberg.PrimitiveTypes.String},
 	)
 	source := iceberg.NewSchema(0,
@@ -2057,11 +1875,7 @@ func TestHighestFieldIDListType(t *testing.T) {
 	tableSchema := iceberg.NewSchemaWithIdentifiers(1,
 		[]int{1},
 		iceberg.NestedField{
-			ID: 1, Name: "list_field", Type: &iceberg.ListType{
-				ElementID:       2,
-				Element:         iceberg.PrimitiveTypes.String,
-				ElementRequired: true,
-			},
+			ID: 1, Name: "list_field", Type: iceberg.NewListType(2, iceberg.PrimitiveTypes.String, true),
 			Required: true,
 		},
 	)
@@ -2102,12 +1916,10 @@ func TestNewSchemaPanicsOnDuplicateFieldIDs(t *testing.T) {
 				iceberg.NestedField{
 					ID:   5,
 					Name: "struct",
-					Type: &iceberg.StructType{
-						FieldList: []iceberg.NestedField{
-							{ID: 6, Name: "inner_op", Type: typ},
-							{ID: 6, Name: "inner_req", Type: typ, Required: true},
-						},
-					},
+					Type: iceberg.NewStructType(
+						iceberg.NestedField{ID: 6, Name: "inner_op", Type: typ},
+						iceberg.NestedField{ID: 6, Name: "inner_req", Type: typ, Required: true},
+					),
 					Required: true,
 				},
 			)
@@ -2124,7 +1936,7 @@ func TestNewSchemaPanicsOnDuplicateFieldIDs(t *testing.T) {
 				iceberg.NestedField{
 					ID:   3,
 					Name: "items",
-					Type: &iceberg.ListType{ElementID: 2, Element: iceberg.PrimitiveTypes.Int32, ElementRequired: false},
+					Type: iceberg.NewListType(2, iceberg.PrimitiveTypes.Int32, false),
 				},
 			)
 		},
@@ -2139,7 +1951,7 @@ func TestNewSchemaPanicsOnDuplicateFieldIDs(t *testing.T) {
 				iceberg.NestedField{
 					ID:   2,
 					Name: "m",
-					Type: &iceberg.MapType{KeyID: 1, ValueID: 3, KeyType: iceberg.PrimitiveTypes.String, ValueType: iceberg.PrimitiveTypes.Int32},
+					Type: iceberg.NewMapType(1, iceberg.PrimitiveTypes.String, 3, iceberg.PrimitiveTypes.Int32, false),
 				},
 			)
 		},
@@ -2149,22 +1961,15 @@ func TestNewSchemaPanicsOnDuplicateFieldIDs(t *testing.T) {
 	assert.PanicsWithError(t,
 		"invalid schema: multiple fields for id 1: id and deep",
 		func() {
-			innerStruct := &iceberg.StructType{
-				FieldList: []iceberg.NestedField{
-					{ID: 1, Name: "deep", Type: iceberg.PrimitiveTypes.String},
-				},
-			}
+			innerStruct := iceberg.NewStructType(
+				iceberg.NestedField{ID: 1, Name: "deep", Type: iceberg.PrimitiveTypes.String},
+			)
 			iceberg.NewSchema(0,
 				iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
 				iceberg.NestedField{
 					ID:   2,
 					Name: "m",
-					Type: &iceberg.MapType{
-						KeyID:     3,
-						ValueID:   4,
-						KeyType:   iceberg.PrimitiveTypes.String,
-						ValueType: &iceberg.ListType{ElementID: 5, Element: innerStruct, ElementRequired: false},
-					},
+					Type: iceberg.NewMapType(3, iceberg.PrimitiveTypes.String, 4, iceberg.NewListType(5, innerStruct, false), false),
 				},
 			)
 		},
@@ -2265,31 +2070,31 @@ func TestSanitizeColumnNamesScopesCollisionChecksToStruct(t *testing.T) {
 
 	schema := iceberg.NewSchema(1,
 		iceberg.NestedField{
-			ID: 1, Name: "customer", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
-				{ID: 2, Name: "😀", Type: iceberg.PrimitiveTypes.String},
-			}},
+			ID: 1, Name: "customer", Type: iceberg.NewStructType(
+				iceberg.NestedField{ID: 2, Name: "😀", Type: iceberg.PrimitiveTypes.String},
+			),
 		},
 		iceberg.NestedField{
-			ID: 3, Name: "address", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
-				{ID: 4, Name: "_xD83D_xDE00", Type: iceberg.PrimitiveTypes.String},
-			}},
+			ID: 3, Name: "address", Type: iceberg.NewStructType(
+				iceberg.NestedField{ID: 4, Name: "_xD83D_xDE00", Type: iceberg.PrimitiveTypes.String},
+			),
 		},
 	)
 
 	sanitized, err := iceberg.SanitizeColumnNames(schema)
 	require.NoError(t, err)
-	assert.Equal(t, "_xD83D_xDE00", sanitized.Field(0).Type.(*iceberg.StructType).FieldList[0].Name)
-	assert.Equal(t, "_xD83D_xDE00", sanitized.Field(1).Type.(*iceberg.StructType).FieldList[0].Name)
+	assert.Equal(t, "_xD83D_xDE00", sanitized.Field(0).Type.(*iceberg.StructType).Field(0).Name)
+	assert.Equal(t, "_xD83D_xDE00", sanitized.Field(1).Type.(*iceberg.StructType).Field(0).Name)
 }
 
 func TestSanitizeColumnNamesRejectsNestedCollision(t *testing.T) {
 	t.Parallel()
 
 	schema := iceberg.NewSchema(1, iceberg.NestedField{
-		ID: 1, Name: "record", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
-			{ID: 2, Name: "1field", Type: iceberg.PrimitiveTypes.String},
-			{ID: 3, Name: "_1field", Type: iceberg.PrimitiveTypes.String},
-		}},
+		ID: 1, Name: "record", Type: iceberg.NewStructType(
+			iceberg.NestedField{ID: 2, Name: "1field", Type: iceberg.PrimitiveTypes.String},
+			iceberg.NestedField{ID: 3, Name: "_1field", Type: iceberg.PrimitiveTypes.String},
+		),
 	})
 
 	_, err := iceberg.SanitizeColumnNames(schema)
@@ -2473,36 +2278,24 @@ func TestSchemaWithGeometryInNestedStructures(t *testing.T) {
 
 	schema := iceberg.NewSchema(1,
 		iceberg.NestedField{
-			ID:   1,
-			Name: "locations",
-			Type: &iceberg.ListType{
-				ElementID:       2,
-				Element:         geom,
-				ElementRequired: true,
-			},
+			ID:       1,
+			Name:     "locations",
+			Type:     iceberg.NewListType(2, geom, true),
 			Required: true,
 		},
 		iceberg.NestedField{
-			ID:   3,
-			Name: "region_data",
-			Type: &iceberg.MapType{
-				KeyID:         4,
-				KeyType:       iceberg.PrimitiveTypes.String,
-				ValueID:       5,
-				ValueType:     geog,
-				ValueRequired: false,
-			},
+			ID:       3,
+			Name:     "region_data",
+			Type:     iceberg.NewMapType(4, iceberg.PrimitiveTypes.String, 5, geog, false),
 			Required: false,
 		},
 		iceberg.NestedField{
 			ID:   6,
 			Name: "place",
-			Type: &iceberg.StructType{
-				FieldList: []iceberg.NestedField{
-					{ID: 7, Name: "name", Type: iceberg.PrimitiveTypes.String, Required: true},
-					{ID: 8, Name: "coords", Type: iceberg.GeometryType{}, Required: false},
-				},
-			},
+			Type: iceberg.NewStructType(
+				iceberg.NestedField{ID: 7, Name: "name", Type: iceberg.PrimitiveTypes.String, Required: true},
+				iceberg.NestedField{ID: 8, Name: "coords", Type: iceberg.GeometryType{}, Required: false},
+			),
 			Required: false,
 		},
 	)

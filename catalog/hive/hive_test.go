@@ -131,6 +131,12 @@ func (m *mockHiveClient) CheckLock(ctx context.Context, lockId int64) (*hive_met
 	return args.Get(0).(*hive_metastore.LockResponse), args.Error(1)
 }
 
+func (m *mockHiveClient) Heartbeat(ctx context.Context, lockId int64) error {
+	args := m.Called(ctx, lockId)
+
+	return args.Error(0)
+}
+
 func (m *mockHiveClient) Unlock(ctx context.Context, lockId int64) error {
 	args := m.Called(ctx, lockId)
 

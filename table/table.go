@@ -64,7 +64,9 @@ import (
 // a diverged base snapshot, files to rewrite that a concurrent commit removed,
 // disabled GC for snapshot expiry, or a staged update that cannot apply after
 // refresh without a conflict reported by the metadata builder.
-// An ErrCommitFailed retry loop stops on these failures.
+// An ErrCommitFailed retry loop stops on these failures. ErrDataFilesMissing,
+// returned on any attempt when a delete references data files that are
+// missing, does not match either.
 var ErrCommitFailed = errors.New("commit failed, refresh and try again")
 
 // ErrCommitRejected means the catalog rejected a commit without writing
@@ -94,7 +96,9 @@ var ErrCommitRejected = errors.New("commit rejected")
 // refresh. With snapshot expiry, they also include disabled GC and replanning
 // that changes whether a commit branch other than main is removed. Only the
 // commit branch's head assertion is rebased. A staged update that cannot
-// apply keeps the builder's error as its cause.
+// apply keeps the builder's error as its cause. Transaction.Commit also
+// returns it, on any attempt, when a delete references data files that are
+// missing (ErrDataFilesMissing).
 var ErrTransactionUnusable = errors.New("transaction cannot be committed again")
 
 // ErrWriteIORequired is returned by write paths when the table's file system
@@ -157,6 +161,7 @@ type Table struct {
 	scanPlanningDirective    string
 	hasScanPlanningDirective bool
 	savedConfig              iceberg.Properties
+	snapshotHistoryRefsOnly  bool
 	reporter                 metrics.Reporter
 	// reporterSet records whether a caller injected a reporter via
 	// WithMetricsReporter. It distinguishes an explicit reporter (including an
@@ -288,6 +293,7 @@ func (t *Table) Refresh(ctx context.Context) error {
 	t.hasScanPlanningDirective = fresh.hasScanPlanningDirective
 	t.labels = fresh.labels
 	t.savedConfig = maps.Clone(fresh.savedConfig)
+	t.snapshotHistoryRefsOnly = fresh.snapshotHistoryRefsOnly
 	// Only inherit the catalog-derived reporter when the caller hasn't set one
 	// of their own. Refresh runs inside commit retry loops, so unconditionally
 	// copying fresh.reporter would silently revert a WithMetricsReporter-injected
@@ -580,7 +586,8 @@ func yieldAllManifests(
 // conflictValidatorFunc runs a single producer's client-side conflict
 // check against a pre-built conflictContext. Validators return a wrapped
 // ErrCommit* sentinel on retryable conflict, ErrCommitDiverged on
-// terminal divergence, or nil on success.
+// terminal divergence, ErrDataFilesMissing when referenced data files
+// are missing, or nil on success.
 type conflictValidatorFunc func(cc *conflictContext) error
 
 // commitOpts controls optional behavior of doCommit beyond the core
@@ -603,8 +610,8 @@ type commitOpts struct {
 
 	// noReplay makes a CAS conflict terminal: doCommit returns the
 	// ErrCommitFailed error instead of entering refresh-and-replay.
-	// Set for commits carrying delete-file removals; see the flag site
-	// in snapshotProducer.commitManifests for the rationale.
+	// Set for commits carrying delete-file removals; see the flag site in
+	// snapshotProducer.commitManifests for the rationale.
 	noReplay bool
 
 	// pinnedRefs names refs whose assertions guard the commit and must
@@ -911,11 +918,15 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 			}
 			for _, v := range co.validators {
 				if vErr := v(cc); vErr != nil {
-					// Conflicts with a concurrent commit end the transaction.
-					// Other validator errors, such as read failures, stay
+					// Conflicts with a concurrent commit end the transaction, as
+					// do missing referenced data files, which no retry brings
+					// back. Other validator errors, such as read failures, stay
 					// resumable.
 					if errors.Is(vErr, ErrCommitFailed) {
 						return nil, fmt.Errorf("%w: validation conflict: %w", ErrTransactionUnusable, vErr)
+					}
+					if errors.Is(vErr, ErrDataFilesMissing) {
+						return nil, fmt.Errorf("%w: validation failed: %w", ErrTransactionUnusable, vErr)
 					}
 
 					return nil, vErr
@@ -1010,6 +1021,7 @@ func (t Table) withMetadata(meta Metadata, loc string) *Table {
 		WithScanPlanningDirective(t.scanPlanningDirective, t.hasScanPlanningDirective),
 		WithLabels(t.labels),
 		WithSavedConfig(t.savedConfig),
+		WithSnapshotHistoryLimitedToRefs(t.snapshotHistoryRefsOnly),
 	)
 	next.manifestContentCache = reuseManifestContentCache(t.manifestContentCache, next.manifestContentCache)
 
@@ -1033,9 +1045,9 @@ func (t Table) withMetadata(meta Metadata, loc string) *Table {
 // branch check that follows rejects the commit.
 //
 // Assertions on refs in pinned guard the commit (an explicit
-// Transaction.AssertRefSnapshotID or a rollback) and are never
-// rewritten: a ref that has changed must fail the commit, not be
-// replayed against the new head.
+// Transaction.AssertRefSnapshotID, a rollback, CherryPickSnapshot, or a
+// branch fast-forward/replacement) and are never rewritten: a ref that has
+// changed must fail the commit, not be replayed against the new head.
 func rewriteRefSnapshotRequirements(reqs []Requirement, branch string, fresh Metadata, pinned map[string]struct{}) []Requirement {
 	if branch == "" || fresh == nil {
 		return reqs
@@ -1445,6 +1457,8 @@ func WithMaxConcurrency(n int) ScanOption {
 	}
 }
 
+// WithOptions sets scan options. Parquet page limits in opts override table
+// properties for this scan without changing saved metadata.
 func WithOptions(opts iceberg.Properties) ScanOption {
 	if opts == nil {
 		return noopOption
@@ -1574,6 +1588,26 @@ func WithLabels(l *iceberg.Labels) Option {
 	}
 }
 
+// WithSnapshotHistoryLimitedToRefs records a partial REST snapshot load.
+// When true, an incomplete ancestry walk cannot prove that an older snapshot
+// or WAP ID was never published. This is load state, not a table property.
+func WithSnapshotHistoryLimitedToRefs(refsOnly bool) Option {
+	return func(t *Table) {
+		t.snapshotHistoryRefsOnly = refsOnly
+	}
+}
+
+// WithSnapshotHistoryLimitedToRefsFrom preserves src's REST snapshot load mode
+// when rebuilding a table without reloading metadata, such as after refreshing
+// storage credentials. A nil source leaves the mode unchanged.
+func WithSnapshotHistoryLimitedToRefsFrom(src *Table) Option {
+	if src == nil {
+		return noopTableOption
+	}
+
+	return WithSnapshotHistoryLimitedToRefs(src.snapshotHistoryRefsOnly)
+}
+
 // WithSavedConfig supplies a set of properties used to create a *Table
 // instance. This saved config is exposed through table.SavedConfig() and
 // can be used by callers to save properties along with a table instance, for
@@ -1656,7 +1690,7 @@ func NewFromLocation(
 		return nil, err
 	}
 	if rf, ok := fsys.(icebergio.ReadFileIO); ok {
-		data, err := rf.ReadFile(metalocation)
+		data, err := rf.ReadFile(ctx, metalocation)
 		if err != nil {
 			return nil, err
 		}

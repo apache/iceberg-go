@@ -104,9 +104,30 @@ const (
 	ParquetCompressionDefault                = internal.ParquetCompressionDefault
 	ParquetCompressionLevelKey               = internal.ParquetCompressionLevelKey
 	ParquetCompressionLevelDefault           = internal.ParquetCompressionLevelDefault
+	ParquetCompressionColumnCodecKeyPrefix   = internal.ParquetCompressionColumnCodecKeyPrefix
+	ParquetCompressionColumnLevelKeyPrefix   = internal.ParquetCompressionColumnLevelKeyPrefix
+	DeleteParquetRowGroupSizeBytesKey        = "write.delete.parquet.row-group-size-bytes"
+	DeleteParquetPageSizeBytesKey            = "write.delete.parquet.page-size-bytes"
+	DeleteParquetPageRowLimitKey             = "write.delete.parquet.page-row-limit"
+	DeleteParquetDictSizeBytesKey            = "write.delete.parquet.dict-size-bytes"
+	DeleteParquetPageVersionKey              = "write.delete.parquet.page-version"
+	DeleteParquetCompressionKey              = "write.delete.parquet.compression-codec"
+	DeleteParquetCompressionLevelKey         = "write.delete.parquet.compression-level"
 	ParquetBloomFilterMaxBytesKey            = internal.ParquetBloomFilterMaxBytesKey
 	ParquetBloomFilterMaxBytesDefault        = internal.ParquetBloomFilterMaxBytesDefault
+	ParquetBloomFilterAdaptiveEnabledKey     = internal.ParquetBloomFilterAdaptiveEnabledKey
+	ParquetBloomFilterAdaptiveEnabledDefault = internal.ParquetBloomFilterAdaptiveEnabledDefault
 	ParquetBloomFilterColumnEnabledKeyPrefix = internal.ParquetBloomFilterColumnEnabledKeyPrefix
+	ParquetBloomFilterColumnFPPKeyPrefix     = internal.ParquetBloomFilterColumnFPPKeyPrefix
+	ParquetBloomFilterColumnNDVKeyPrefix     = internal.ParquetBloomFilterColumnNDVKeyPrefix
+	ParquetColumnStatsEnabledKeyPrefix       = internal.ParquetColumnStatsEnabledKeyPrefix
+
+	// Parquet read page limits are Go-specific bounds on page body sizes.
+	// Table properties provide defaults; WithOptions overrides them per scan.
+	ParquetMaxCompressedPageSizeBytesKey       = internal.ParquetMaxCompressedPageSizeBytesKey
+	ParquetMaxCompressedPageSizeBytesDefault   = internal.ParquetMaxCompressedPageSizeBytesDefault
+	ParquetMaxUncompressedPageSizeBytesKey     = internal.ParquetMaxUncompressedPageSizeBytesKey
+	ParquetMaxUncompressedPageSizeBytesDefault = internal.ParquetMaxUncompressedPageSizeBytesDefault
 
 	ParquetBatchSizeKey     = internal.ParquetBatchSizeKey
 	ParquetBatchSizeDefault = internal.ParquetBatchSizeDefault
@@ -141,8 +162,10 @@ const (
 	WriteFormatDefaultKey     = "write.format.default"
 	WriteFormatDefaultDefault = "parquet"
 
-	WriteTargetFileSizeBytesKey     = "write.target-file-size-bytes"
-	WriteTargetFileSizeBytesDefault = 512 * 1024 * 1024 // 512 MB
+	WriteTargetFileSizeBytesKey           = "write.target-file-size-bytes"
+	WriteTargetFileSizeBytesDefault       = 512 * 1024 * 1024 // 512 MB
+	WriteDeleteTargetFileSizeBytesKey     = "write.delete.target-file-size-bytes"
+	WriteDeleteTargetFileSizeBytesDefault = 64 * 1024 * 1024 // 64 MB
 
 	ParquetShredVariantsKey         = internal.ParquetShredVariantsKey
 	ParquetShredVariantsDefault     = internal.ParquetShredVariantsDefault
@@ -168,13 +191,12 @@ const (
 	// CommitNumRetriesKey is the number of commit retry attempts before
 	// giving up on ErrCommitFailed from the catalog.
 	//
-	// The default is 0 (no retries). Each retry attempt reloads the
-	// current catalog state and replays the update against it (see
-	// doCommit's refresh-and-replay loop), so raising this can resolve
-	// both transient catalog flakiness (dropped connections, brief 409
-	// during leader election) and genuine OCC conflicts from concurrent
-	// writers. It stays opt-in by default because a retry rebuilds the
-	// snapshot's manifest list and adds latency.
+	// The default is 4, as in Java and PyIceberg; set it to 0 to fail on
+	// the first conflict. Each retry attempt reloads the current catalog
+	// state and replays the update against it (see doCommit's
+	// refresh-and-replay loop), so retries resolve both transient catalog
+	// flakiness (dropped connections, brief 409 during leader election)
+	// and genuine OCC conflicts from concurrent writers.
 	//
 	// Commits that carry delete-file removals (e.g. the
 	// deleteFilesToRemove argument of [Transaction.ReplaceFiles], or a
@@ -186,7 +208,7 @@ const (
 	// transaction; the failed transaction's staged removals cannot be
 	// rebased.
 	CommitNumRetriesKey     = "commit.retry.num-retries"
-	CommitNumRetriesDefault = 0
+	CommitNumRetriesDefault = 4
 
 	// CommitMinRetryWaitMsKey is the initial wait time in milliseconds
 	// for exponential backoff between commit retry attempts. Default: 100ms.

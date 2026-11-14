@@ -32,13 +32,11 @@ var testSchema = iceberg.NewSchema(1,
 	iceberg.NestedField{ID: 1, Name: "id", Required: true, Type: iceberg.PrimitiveTypes.Int64},
 	iceberg.NestedField{ID: 2, Name: "name", Required: true, Type: iceberg.PrimitiveTypes.String},
 	iceberg.NestedField{ID: 3, Name: "ts", Required: false, Type: iceberg.PrimitiveTypes.Timestamp},
-	iceberg.NestedField{ID: 4, Name: "address", Required: false, Type: &iceberg.StructType{
-		FieldList: []iceberg.NestedField{
-			{ID: 5, Name: "street", Type: iceberg.PrimitiveTypes.String, Required: true},
-			{ID: 6, Name: "city", Type: iceberg.PrimitiveTypes.String, Required: true},
-			{ID: 7, Name: "zip_code", Type: iceberg.PrimitiveTypes.Int64, Required: false},
-		},
-	}},
+	iceberg.NestedField{ID: 4, Name: "address", Required: false, Type: iceberg.NewStructType(
+		iceberg.NestedField{ID: 5, Name: "street", Type: iceberg.PrimitiveTypes.String, Required: true},
+		iceberg.NestedField{ID: 6, Name: "city", Type: iceberg.PrimitiveTypes.String, Required: true},
+		iceberg.NestedField{ID: 7, Name: "zip_code", Type: iceberg.PrimitiveTypes.Int64, Required: false},
+	)},
 )
 
 var partitionSpec = iceberg.NewPartitionSpec(
@@ -88,6 +86,35 @@ func TestNewUpdateSpecWithNilTransactionReturnsError(t *testing.T) {
 	err := table.NewUpdateSpec(nil, false).Commit()
 	require.ErrorIs(t, err, table.ErrInvalidMetadata)
 	assert.ErrorContains(t, err, "transaction is nil")
+}
+
+func TestUpdateSpecRejectsAmbiguousCaseInsensitiveSourceName(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "ID", Type: iceberg.PrimitiveTypes.Int64},
+		iceberg.NestedField{ID: 2, Name: "id", Type: iceberg.PrimitiveTypes.Int64},
+		iceberg.NestedField{ID: 3, Name: "unique", Type: iceberg.PrimitiveTypes.Int64},
+	)
+	meta, err := table.NewMetadata(schema, iceberg.UnpartitionedSpec, table.UnsortedSortOrder, "", nil)
+	require.NoError(t, err)
+	tbl := table.New([]string{"ambiguous-partition-name"}, meta, "", nil, nil)
+	txn := tbl.NewTransaction()
+
+	updates, _, err := txn.UpdateSpec(false).
+		AddIdentity("id").
+		BuildUpdates()
+	require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+	require.Empty(t, updates)
+
+	commit, err := txn.TableCommit()
+	require.NoError(t, err)
+	require.Empty(t, commit.Updates)
+
+	txn = tbl.NewTransaction()
+	updates, _, err = txn.UpdateSpec(false).
+		AddIdentity("UNIQUE").
+		BuildUpdates()
+	require.NoError(t, err)
+	require.NotEmpty(t, updates)
 }
 
 func TestUpdateSpecPreservesSourceLessVoidTombstone(t *testing.T) {

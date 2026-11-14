@@ -41,6 +41,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/apache/iceberg-go"
@@ -57,6 +58,17 @@ import (
 // for requests without a body.
 // from https://pkg.go.dev/github.com/aws/aws-sdk-go-v2/aws/signer/v4#Signer.SignHTTP
 const emptyStringHash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+const (
+	authorizationHeader = "Authorization"
+	// relocatedAuthorizationHeader carries the auth manager's Authorization
+	// header after signing, as in Java's RESTSigV4AuthSession
+	// (RELOCATED_HEADER_PREFIX + "Authorization"). It is in canonical form so
+	// it can be assigned to http.Header directly.
+	relocatedAuthorizationHeader = "Original-Authorization"
+	// sigV4AuthPrefix starts every SigV4 Authorization header.
+	sigV4AuthPrefix = "AWS4-HMAC-SHA256"
+)
 
 // defaultSigningService is the SigV4 service name used when none is supplied,
 // matching the Iceberg Java reference default (AwsProperties.REST_SIGNING_NAME_DEFAULT).
@@ -196,6 +208,18 @@ func (s *signer) SignRequest(r *http.Request) error {
 	creds, err := s.cfg.Credentials.Retrieve(r.Context())
 	if err != nil {
 		return err
+	}
+
+	// SigV4 owns the Authorization header. Like Java's RESTSigV4AuthSession,
+	// keep one the auth manager set (a bearer token, say) by moving it to
+	// Original-Authorization, which is then signed with the request. A header
+	// that already holds a SigV4 signature, as on a same-origin redirect, is
+	// replaced instead, so the original token isn't overwritten.
+	if auth := r.Header.Values(authorizationHeader); len(auth) > 0 {
+		r.Header.Del(authorizationHeader)
+		if !strings.HasPrefix(auth[0], sigV4AuthPrefix) {
+			r.Header[relocatedAuthorizationHeader] = auth
+		}
 	}
 
 	// Set the x-amz-content-sha256 header before signing; SigV4 signature

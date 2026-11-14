@@ -209,16 +209,14 @@ func TestReassignIds(t *testing.T) {
 	}, iceberg.NestedField{
 		ID:   13,
 		Name: "struct",
-		Type: &iceberg.StructType{
-			FieldList: []iceberg.NestedField{
-				{
-					Type:     iceberg.PrimitiveTypes.Int64,
-					ID:       14,
-					Name:     "nested",
-					Required: true,
-				},
+		Type: iceberg.NewStructType(
+			iceberg.NestedField{
+				Type:     iceberg.PrimitiveTypes.Int64,
+				ID:       14,
+				Name:     "nested",
+				Required: true,
 			},
-		},
+		),
 		Required: true,
 	},
 		iceberg.NestedField{
@@ -266,16 +264,14 @@ func TestReassignIds(t *testing.T) {
 	}, iceberg.NestedField{
 		ID:   3,
 		Name: "struct",
-		Type: &iceberg.StructType{
-			FieldList: []iceberg.NestedField{
-				{
-					Type:     iceberg.PrimitiveTypes.Int64,
-					ID:       5,
-					Name:     "nested",
-					Required: true,
-				},
+		Type: iceberg.NewStructType(
+			iceberg.NestedField{
+				Type:     iceberg.PrimitiveTypes.Int64,
+				ID:       5,
+				Name:     "nested",
+				Required: true,
 			},
-		},
+		),
 		Required: true,
 	},
 		iceberg.NestedField{
@@ -1986,6 +1982,63 @@ func TestAddSnapshotStaleValuesAreCommitConflicts(t *testing.T) {
 	})
 }
 
+func TestAddSnapshotV3RejectsFirstRowIDAheadOfNextRowID(t *testing.T) {
+	builder := freshMetadataBuilder(t, 3)
+	firstRowID, addedRows := int64(1), int64(1)
+	snapshot := freshBuilderSnapshot(1, nil, 0, time.Now().UnixMilli())
+	snapshot.FirstRowID, snapshot.AddedRows = &firstRowID, &addedRows
+
+	err := builder.AddSnapshot(&snapshot)
+	require.ErrorIs(t, err, ErrInvalidRowLineage)
+	require.ErrorContains(t, err, "first-row-id 1 is ahead of table next-row-id 0")
+	require.Zero(t, builder.NextRowID())
+
+	meta, err := builder.Build()
+	require.NoError(t, err)
+	require.Empty(t, meta.Snapshots())
+}
+
+func TestAddSnapshotV3RejectsForwardRowIDAfterAllocation(t *testing.T) {
+	builder := freshMetadataBuilder(t, 3)
+	now := time.Now().UnixMilli()
+	startRowID, addedRows := int64(0), int64(5)
+	committed := freshBuilderSnapshot(1, nil, 1, now)
+	committed.FirstRowID, committed.AddedRows = &startRowID, &addedRows
+	require.NoError(t, builder.AddSnapshot(&committed))
+	require.Equal(t, int64(5), builder.NextRowID())
+
+	parentID := int64(1)
+	forwardRowID, moreRows := int64(6), int64(1)
+	invalid := freshBuilderSnapshot(2, &parentID, 2, now+1)
+	invalid.FirstRowID, invalid.AddedRows = &forwardRowID, &moreRows
+	updateCount := len(builder.updates)
+	lastUpdated := builder.LastUpdatedMS()
+	lastSequence := builder.currentLastSequenceNumber()
+	err := builder.AddSnapshot(&invalid)
+	require.ErrorIs(t, err, ErrInvalidRowLineage)
+	require.NotErrorIs(t, err, ErrCommitFailed)
+	require.Equal(t, int64(5), builder.NextRowID())
+	require.Len(t, builder.updates, updateCount)
+	require.Equal(t, lastUpdated, builder.LastUpdatedMS())
+	require.Equal(t, lastSequence, builder.currentLastSequenceNumber())
+
+	meta, err := builder.Build()
+	require.NoError(t, err)
+	require.Len(t, meta.Snapshots(), 1)
+	require.Equal(t, int64(1), meta.Snapshots()[0].SnapshotID)
+
+	firstRowID := builder.NextRowID()
+	invalid.FirstRowID = &firstRowID
+	require.NoError(t, builder.AddSnapshot(&invalid))
+	require.Equal(t, int64(6), builder.NextRowID())
+	require.Len(t, builder.updates, updateCount+1)
+
+	meta, err = builder.Build()
+	require.NoError(t, err)
+	require.Len(t, meta.Snapshots(), 2)
+	require.Equal(t, int64(2), meta.Snapshots()[1].SnapshotID)
+}
+
 func TestAddSnapshotUpdateOnBuilderWithoutBase(t *testing.T) {
 	builder := freshMetadataBuilder(t, 2)
 	parentSnapshotID := int64(1)
@@ -2946,40 +2999,34 @@ func generateTypeSchema(typ iceberg.Type) *iceberg.Schema {
 			Type: typ, ID: 2, Name: "top",
 		},
 		iceberg.NestedField{
-			Type: &iceberg.ListType{
-				ElementID: 4, Element: typ, ElementRequired: true,
-			}, ID: 3, Name: "arr",
+			Type: iceberg.NewListType(4, typ, true), ID: 3, Name: "arr",
 		},
 		iceberg.NestedField{
-			Type: &iceberg.StructType{
-				FieldList: []iceberg.NestedField{
-					{
-						Type: typ,
-						ID:   6,
-						Name: "inner_op",
-					},
-					{
-						Type:     typ,
-						ID:       7,
-						Name:     "inner_req",
-						Required: true,
-					},
-					{
-						ID: 8,
-						Type: &iceberg.StructType{
-							FieldList: []iceberg.NestedField{
-								{
-									Type:     typ,
-									ID:       9,
-									Name:     "deep",
-									Required: false,
-								},
-							},
-						},
-						Name: "struct_arr",
-					},
+			Type: iceberg.NewStructType(
+				iceberg.NestedField{
+					Type: typ,
+					ID:   6,
+					Name: "inner_op",
 				},
-			},
+				iceberg.NestedField{
+					Type:     typ,
+					ID:       7,
+					Name:     "inner_req",
+					Required: true,
+				},
+				iceberg.NestedField{
+					ID: 8,
+					Type: iceberg.NewStructType(
+						iceberg.NestedField{
+							Type:     typ,
+							ID:       9,
+							Name:     "deep",
+							Required: false,
+						},
+					),
+					Name: "struct_arr",
+				},
+			),
 			ID:       5,
 			Name:     "struct",
 			Required: true,
@@ -3026,9 +3073,9 @@ func TestUnknownTypeValidation(t *testing.T) {
 	t.Run("ValidNestedUnknownType", func(t *testing.T) {
 		validSchema := iceberg.NewSchema(1,
 			iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.Int64Type{}, Required: true},
-			iceberg.NestedField{ID: 2, Name: "nested", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
-				{ID: 3, Name: "unknown_field", Type: iceberg.UnknownType{}, Required: false},
-			}}, Required: false},
+			iceberg.NestedField{ID: 2, Name: "nested", Type: iceberg.NewStructType(
+				iceberg.NestedField{ID: 3, Name: "unknown_field", Type: iceberg.UnknownType{}, Required: false},
+			), Required: false},
 		)
 		err := checkSchemaCompatibility(validSchema, 3)
 		require.NoError(t, err, "Valid nested unknown type schema should pass validation")
@@ -3036,9 +3083,9 @@ func TestUnknownTypeValidation(t *testing.T) {
 
 	t.Run("InvalidRequiredNestedUnknownType", func(t *testing.T) {
 		invalidSchema := iceberg.NewSchema(1,
-			iceberg.NestedField{ID: 2, Name: "nested", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
-				{ID: 3, Name: "unknown_field", Type: iceberg.UnknownType{}, Required: true},
-			}}, Required: false},
+			iceberg.NestedField{ID: 2, Name: "nested", Type: iceberg.NewStructType(
+				iceberg.NestedField{ID: 3, Name: "unknown_field", Type: iceberg.UnknownType{}, Required: true},
+			), Required: false},
 		)
 		err := checkSchemaCompatibility(invalidSchema, 3)
 		require.Error(t, err, "should error when unknown type is required")
@@ -3048,7 +3095,7 @@ func TestUnknownTypeValidation(t *testing.T) {
 	t.Run("ValidListWithUnknownType", func(t *testing.T) {
 		validSchema := iceberg.NewSchema(1,
 			iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.Int64Type{}, Required: true},
-			iceberg.NestedField{ID: 2, Name: "list", Type: &iceberg.ListType{ElementID: 3, Element: iceberg.UnknownType{}, ElementRequired: false}, Required: false},
+			iceberg.NestedField{ID: 2, Name: "list", Type: iceberg.NewListType(3, iceberg.UnknownType{}, false), Required: false},
 		)
 		err := checkSchemaCompatibility(validSchema, 3)
 		require.NoError(t, err, "Valid list with unknown type schema should pass validation")
@@ -3057,7 +3104,7 @@ func TestUnknownTypeValidation(t *testing.T) {
 	t.Run("InvalidRequiredListElement", func(t *testing.T) {
 		invalidSchema := iceberg.NewSchema(1,
 			iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.Int64Type{}, Required: true},
-			iceberg.NestedField{ID: 2, Name: "list", Type: &iceberg.ListType{ElementID: 3, Element: iceberg.UnknownType{}, ElementRequired: true}, Required: false},
+			iceberg.NestedField{ID: 2, Name: "list", Type: iceberg.NewListType(3, iceberg.UnknownType{}, true), Required: false},
 		)
 		err := checkSchemaCompatibility(invalidSchema, 3)
 		require.Error(t, err, "should error when unknown type is required")
@@ -3067,7 +3114,7 @@ func TestUnknownTypeValidation(t *testing.T) {
 	t.Run("ValidMapWithUnknownType", func(t *testing.T) {
 		validSchema := iceberg.NewSchema(1,
 			iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.Int64Type{}, Required: true},
-			iceberg.NestedField{ID: 2, Name: "map", Type: &iceberg.MapType{KeyID: 3, KeyType: iceberg.StringType{}, ValueID: 4, ValueType: iceberg.UnknownType{}, ValueRequired: false}, Required: false},
+			iceberg.NestedField{ID: 2, Name: "map", Type: iceberg.NewMapType(3, iceberg.StringType{}, 4, iceberg.UnknownType{}, false), Required: false},
 		)
 		err := checkSchemaCompatibility(validSchema, 3)
 		require.NoError(t, err, "Valid map with unknown type schema should pass validation")
@@ -3075,7 +3122,7 @@ func TestUnknownTypeValidation(t *testing.T) {
 
 	t.Run("InvalidUnknownMapKey", func(t *testing.T) {
 		invalidSchema := iceberg.NewSchema(1,
-			iceberg.NestedField{ID: 2, Name: "invalid_map", Type: &iceberg.MapType{KeyID: 3, KeyType: iceberg.UnknownType{}, ValueID: 4, ValueType: iceberg.StringType{}, ValueRequired: false}, Required: true},
+			iceberg.NestedField{ID: 2, Name: "invalid_map", Type: iceberg.NewMapType(3, iceberg.UnknownType{}, 4, iceberg.StringType{}, false), Required: true},
 		)
 		err := checkSchemaCompatibility(invalidSchema, 3)
 		require.Error(t, err, "should error when unknown type is used as map key")
@@ -3084,7 +3131,7 @@ func TestUnknownTypeValidation(t *testing.T) {
 
 	t.Run("InvalidUnknownMapValue", func(t *testing.T) {
 		invalidSchema := iceberg.NewSchema(1,
-			iceberg.NestedField{ID: 2, Name: "invalid_map", Type: &iceberg.MapType{KeyID: 3, KeyType: iceberg.StringType{}, ValueID: 4, ValueType: iceberg.UnknownType{}, ValueRequired: true}, Required: false},
+			iceberg.NestedField{ID: 2, Name: "invalid_map", Type: iceberg.NewMapType(3, iceberg.StringType{}, 4, iceberg.UnknownType{}, true), Required: false},
 		)
 		err := checkSchemaCompatibility(invalidSchema, 3)
 		require.Error(t, err, "should error when unknown type is used as map value")
@@ -3124,11 +3171,9 @@ func TestValidateNoReservedFieldIDs(t *testing.T) {
 		{
 			name: "reserved id inside struct child",
 			schema: iceberg.NewSchema(1,
-				iceberg.NestedField{ID: 1, Name: "outer", Required: true, Type: &iceberg.StructType{
-					FieldList: []iceberg.NestedField{
-						{ID: reservedNonLineageFieldID, Name: "inner", Type: iceberg.PrimitiveTypes.Int64},
-					},
-				}},
+				iceberg.NestedField{ID: 1, Name: "outer", Required: true, Type: iceberg.NewStructType(
+					iceberg.NestedField{ID: reservedNonLineageFieldID, Name: "inner", Type: iceberg.PrimitiveTypes.Int64},
+				)},
 			),
 			wantColumn: "outer.inner",
 			wantID:     reservedNonLineageFieldID,
@@ -3136,9 +3181,7 @@ func TestValidateNoReservedFieldIDs(t *testing.T) {
 		{
 			name: "reserved id on list element",
 			schema: iceberg.NewSchema(1,
-				iceberg.NestedField{ID: 1, Name: "arr", Required: true, Type: &iceberg.ListType{
-					ElementID: reservedNonLineageFieldID, Element: iceberg.PrimitiveTypes.Int64, ElementRequired: false,
-				}},
+				iceberg.NestedField{ID: 1, Name: "arr", Required: true, Type: iceberg.NewListType(reservedNonLineageFieldID, iceberg.PrimitiveTypes.Int64, false)},
 			),
 			wantColumn: "arr.element",
 			wantID:     reservedNonLineageFieldID,
@@ -3146,10 +3189,7 @@ func TestValidateNoReservedFieldIDs(t *testing.T) {
 		{
 			name: "reserved id on map key",
 			schema: iceberg.NewSchema(1,
-				iceberg.NestedField{ID: 1, Name: "m", Required: true, Type: &iceberg.MapType{
-					KeyID: reservedNonLineageFieldID, KeyType: iceberg.PrimitiveTypes.String,
-					ValueID: 2, ValueType: iceberg.PrimitiveTypes.Int64, ValueRequired: false,
-				}},
+				iceberg.NestedField{ID: 1, Name: "m", Required: true, Type: iceberg.NewMapType(reservedNonLineageFieldID, iceberg.PrimitiveTypes.String, 2, iceberg.PrimitiveTypes.Int64, false)},
 			),
 			wantColumn: "m.key",
 			wantID:     reservedNonLineageFieldID,
@@ -3157,10 +3197,7 @@ func TestValidateNoReservedFieldIDs(t *testing.T) {
 		{
 			name: "reserved id on map value",
 			schema: iceberg.NewSchema(1,
-				iceberg.NestedField{ID: 1, Name: "m", Required: true, Type: &iceberg.MapType{
-					KeyID: 2, KeyType: iceberg.PrimitiveTypes.String,
-					ValueID: reservedNonLineageFieldID, ValueType: iceberg.PrimitiveTypes.Int64, ValueRequired: false,
-				}},
+				iceberg.NestedField{ID: 1, Name: "m", Required: true, Type: iceberg.NewMapType(2, iceberg.PrimitiveTypes.String, reservedNonLineageFieldID, iceberg.PrimitiveTypes.Int64, false)},
 			),
 			wantColumn: "m.value",
 			wantID:     reservedNonLineageFieldID,
@@ -3211,6 +3248,76 @@ func TestNewMetadataRejectsReservedFieldIDsBeforeReassignment(t *testing.T) {
 			assert.Contains(t, err.Error(), "reserved metadata column ID")
 		})
 	}
+}
+
+// With two fields at ID 0, day(created_at) could randomly become
+// day(event) (#2393).
+func TestNewMetadataRejectsDuplicateFieldIDs(t *testing.T) {
+	newInput := func(createdAtID, eventID int) (*iceberg.Schema, iceberg.PartitionSpec) {
+		sc := iceberg.NewSchema(0,
+			iceberg.NestedField{ID: createdAtID, Name: "created_at", Type: iceberg.PrimitiveTypes.TimestampTz, Required: true},
+			iceberg.NestedField{ID: eventID, Name: "event", Type: iceberg.PrimitiveTypes.String, Required: true},
+		)
+		// Keep the spec unbound: the duplicate IDs are intentionally invalid and
+		// must be detected when NewMetadata checks the submitted schema.
+		spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+			SourceIDs: []int{createdAtID}, FieldID: 1000, Name: "created_day", Transform: iceberg.DayTransform{},
+		})
+
+		return sc, spec
+	}
+
+	t.Run("partitioned, both ids unset", func(t *testing.T) {
+		sc, spec := newInput(0, 0)
+		_, err := NewMetadata(sc, &spec, UnsortedSortOrder, "s3://bucket/table", nil)
+		require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+		assert.ErrorContains(t, err, "multiple fields for id 0: created_at and event")
+	})
+
+	t.Run("unpartitioned, both ids unset", func(t *testing.T) {
+		sc, _ := newInput(0, 0)
+		_, err := NewMetadata(sc, iceberg.UnpartitionedSpec, UnsortedSortOrder, "s3://bucket/table", nil)
+		require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+	})
+
+	t.Run("single zero id keeps the partition on its column", func(t *testing.T) {
+		sc, spec := newInput(0, 1)
+		meta, err := NewMetadata(sc, &spec, UnsortedSortOrder, "s3://bucket/table", nil)
+		require.NoError(t, err)
+
+		gotSpec := meta.PartitionSpec()
+		col, ok := meta.CurrentSchema().FindColumnName(gotSpec.Field(0).FirstSourceID())
+		require.True(t, ok)
+		assert.Equal(t, "created_at", col)
+	})
+
+	// Sort source IDs go through the same lookup. A REST create-table request
+	// can carry source-id 0 (e.g. Spark numbers new columns from zero), so the
+	// order is decoded unbound.
+	sortOnFirstColumn := func(t *testing.T) SortOrder {
+		var order UnboundSortOrder
+		require.NoError(t, json.Unmarshal([]byte(`{"order-id": 1, "fields": [
+			{"transform": "identity", "source-id": 0, "direction": "asc", "null-order": "nulls-first"}]}`), &order))
+
+		return order.SortOrder
+	}
+
+	t.Run("sorted, both ids unset", func(t *testing.T) {
+		sc, _ := newInput(0, 0)
+		_, err := NewMetadata(sc, iceberg.UnpartitionedSpec, sortOnFirstColumn(t), "s3://bucket/table", nil)
+		require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+		assert.ErrorContains(t, err, "multiple fields for id 0: created_at and event")
+	})
+
+	t.Run("single zero id keeps the sort on its column", func(t *testing.T) {
+		sc, _ := newInput(0, 1)
+		meta, err := NewMetadata(sc, iceberg.UnpartitionedSpec, sortOnFirstColumn(t), "s3://bucket/table", nil)
+		require.NoError(t, err)
+
+		col, ok := meta.CurrentSchema().FindColumnName(meta.SortOrder().Field(0).SourceIDs[0])
+		require.True(t, ok)
+		assert.Equal(t, "created_at", col)
+	})
 }
 
 // TestCheckSchemaCompatibilityReservedIDs locks in the deliberate asymmetry of
@@ -3547,49 +3654,41 @@ func TestNonSpecialDefaultsRequireV3(t *testing.T) {
 func TestComplexTypeDefaultValidation(t *testing.T) {
 	t.Run("InvalidStructInitialDefault", func(t *testing.T) {
 		schema := iceberg.NewSchema(1,
-			iceberg.NestedField{ID: 1, Name: "s", Type: &iceberg.StructType{
-				FieldList: []iceberg.NestedField{
-					{ID: 2, Name: "x", Type: iceberg.Int32Type{}, Required: false},
-				},
-			}, Required: false, InitialDefault: "not a struct"},
+			iceberg.NestedField{ID: 1, Name: "s", Type: iceberg.NewStructType(
+				iceberg.NestedField{ID: 2, Name: "x", Type: iceberg.Int32Type{}, Required: false},
+			), Required: false, InitialDefault: "not a struct"},
 		)
 		err := checkSchemaCompatibility(schema, 3)
 		require.Error(t, err)
-		require.ErrorContains(t, err, "struct type field 's' (id: 1) must have null or JSON object initial-default")
+		require.ErrorContains(t, err, "struct type field 's' (id: 1) must have null or empty JSON object initial-default")
 	})
 
 	t.Run("InvalidStructWriteDefault", func(t *testing.T) {
 		schema := iceberg.NewSchema(1,
-			iceberg.NestedField{ID: 1, Name: "s", Type: &iceberg.StructType{
-				FieldList: []iceberg.NestedField{
-					{ID: 2, Name: "x", Type: iceberg.Int32Type{}, Required: false},
-				},
-			}, Required: false, WriteDefault: float64(42)},
+			iceberg.NestedField{ID: 1, Name: "s", Type: iceberg.NewStructType(
+				iceberg.NestedField{ID: 2, Name: "x", Type: iceberg.Int32Type{}, Required: false},
+			), Required: false, WriteDefault: float64(42)},
 		)
 		err := checkSchemaCompatibility(schema, 3)
 		require.Error(t, err)
-		require.ErrorContains(t, err, "struct type field 's' (id: 1) must have null or JSON object write-default")
+		require.ErrorContains(t, err, "struct type field 's' (id: 1) must have null or empty JSON object write-default")
 	})
 
 	t.Run("ValidStructNullDefault", func(t *testing.T) {
 		schema := iceberg.NewSchema(1,
-			iceberg.NestedField{ID: 1, Name: "s", Type: &iceberg.StructType{
-				FieldList: []iceberg.NestedField{
-					{ID: 2, Name: "x", Type: iceberg.Int32Type{}, Required: false},
-				},
-			}, Required: false},
+			iceberg.NestedField{ID: 1, Name: "s", Type: iceberg.NewStructType(
+				iceberg.NestedField{ID: 2, Name: "x", Type: iceberg.Int32Type{}, Required: false},
+			), Required: false},
 		)
 		err := checkSchemaCompatibility(schema, 3)
 		require.NoError(t, err)
 	})
 
-	t.Run("ValidStructObjectDefault", func(t *testing.T) {
+	t.Run("ValidStructEmptyObjectDefault", func(t *testing.T) {
 		schema := iceberg.NewSchema(1,
-			iceberg.NestedField{ID: 1, Name: "s", Type: &iceberg.StructType{
-				FieldList: []iceberg.NestedField{
-					{ID: 2, Name: "x", Type: iceberg.Int32Type{}, Required: false},
-				},
-			}, Required: false, InitialDefault: map[string]any{"x": float64(1)}},
+			iceberg.NestedField{ID: 1, Name: "s", Type: iceberg.NewStructType(
+				iceberg.NestedField{ID: 2, Name: "x", Type: iceberg.Int32Type{}, Required: false},
+			), Required: false, InitialDefault: map[string]any{}},
 		)
 		err := checkSchemaCompatibility(schema, 3)
 		require.NoError(t, err)
@@ -3597,9 +3696,7 @@ func TestComplexTypeDefaultValidation(t *testing.T) {
 
 	t.Run("InvalidListInitialDefault", func(t *testing.T) {
 		schema := iceberg.NewSchema(1,
-			iceberg.NestedField{ID: 1, Name: "l", Type: &iceberg.ListType{
-				ElementID: 2, Element: iceberg.StringType{}, ElementRequired: false,
-			}, Required: false, InitialDefault: "not a list"},
+			iceberg.NestedField{ID: 1, Name: "l", Type: iceberg.NewListType(2, iceberg.StringType{}, false), Required: false, InitialDefault: "not a list"},
 		)
 		err := checkSchemaCompatibility(schema, 3)
 		require.Error(t, err)
@@ -3608,9 +3705,7 @@ func TestComplexTypeDefaultValidation(t *testing.T) {
 
 	t.Run("InvalidListWriteDefault", func(t *testing.T) {
 		schema := iceberg.NewSchema(1,
-			iceberg.NestedField{ID: 1, Name: "l", Type: &iceberg.ListType{
-				ElementID: 2, Element: iceberg.StringType{}, ElementRequired: false,
-			}, Required: false, WriteDefault: map[string]any{"a": "b"}},
+			iceberg.NestedField{ID: 1, Name: "l", Type: iceberg.NewListType(2, iceberg.StringType{}, false), Required: false, WriteDefault: map[string]any{"a": "b"}},
 		)
 		err := checkSchemaCompatibility(schema, 3)
 		require.Error(t, err)
@@ -3619,9 +3714,7 @@ func TestComplexTypeDefaultValidation(t *testing.T) {
 
 	t.Run("ValidListNullDefault", func(t *testing.T) {
 		schema := iceberg.NewSchema(1,
-			iceberg.NestedField{ID: 1, Name: "l", Type: &iceberg.ListType{
-				ElementID: 2, Element: iceberg.StringType{}, ElementRequired: false,
-			}, Required: false},
+			iceberg.NestedField{ID: 1, Name: "l", Type: iceberg.NewListType(2, iceberg.StringType{}, false), Required: false},
 		)
 		err := checkSchemaCompatibility(schema, 3)
 		require.NoError(t, err)
@@ -3629,9 +3722,7 @@ func TestComplexTypeDefaultValidation(t *testing.T) {
 
 	t.Run("ValidListArrayDefault", func(t *testing.T) {
 		schema := iceberg.NewSchema(1,
-			iceberg.NestedField{ID: 1, Name: "l", Type: &iceberg.ListType{
-				ElementID: 2, Element: iceberg.StringType{}, ElementRequired: false,
-			}, Required: false, InitialDefault: []any{"a", "b"}},
+			iceberg.NestedField{ID: 1, Name: "l", Type: iceberg.NewListType(2, iceberg.StringType{}, false), Required: false, InitialDefault: []any{"a", "b"}},
 		)
 		err := checkSchemaCompatibility(schema, 3)
 		require.NoError(t, err)
@@ -3639,9 +3730,7 @@ func TestComplexTypeDefaultValidation(t *testing.T) {
 
 	t.Run("InvalidMapInitialDefault", func(t *testing.T) {
 		schema := iceberg.NewSchema(1,
-			iceberg.NestedField{ID: 1, Name: "m", Type: &iceberg.MapType{
-				KeyID: 2, KeyType: iceberg.StringType{}, ValueID: 3, ValueType: iceberg.Int32Type{}, ValueRequired: false,
-			}, Required: false, InitialDefault: []any{"not", "a", "map"}},
+			iceberg.NestedField{ID: 1, Name: "m", Type: iceberg.NewMapType(2, iceberg.StringType{}, 3, iceberg.Int32Type{}, false), Required: false, InitialDefault: []any{"not", "a", "map"}},
 		)
 		err := checkSchemaCompatibility(schema, 3)
 		require.Error(t, err)
@@ -3650,9 +3739,7 @@ func TestComplexTypeDefaultValidation(t *testing.T) {
 
 	t.Run("InvalidMapWriteDefault", func(t *testing.T) {
 		schema := iceberg.NewSchema(1,
-			iceberg.NestedField{ID: 1, Name: "m", Type: &iceberg.MapType{
-				KeyID: 2, KeyType: iceberg.StringType{}, ValueID: 3, ValueType: iceberg.Int32Type{}, ValueRequired: false,
-			}, Required: false, WriteDefault: "not a map"},
+			iceberg.NestedField{ID: 1, Name: "m", Type: iceberg.NewMapType(2, iceberg.StringType{}, 3, iceberg.Int32Type{}, false), Required: false, WriteDefault: "not a map"},
 		)
 		err := checkSchemaCompatibility(schema, 3)
 		require.Error(t, err)
@@ -3661,9 +3748,7 @@ func TestComplexTypeDefaultValidation(t *testing.T) {
 
 	t.Run("ValidMapNullDefault", func(t *testing.T) {
 		schema := iceberg.NewSchema(1,
-			iceberg.NestedField{ID: 1, Name: "m", Type: &iceberg.MapType{
-				KeyID: 2, KeyType: iceberg.StringType{}, ValueID: 3, ValueType: iceberg.Int32Type{}, ValueRequired: false,
-			}, Required: false},
+			iceberg.NestedField{ID: 1, Name: "m", Type: iceberg.NewMapType(2, iceberg.StringType{}, 3, iceberg.Int32Type{}, false), Required: false},
 		)
 		err := checkSchemaCompatibility(schema, 3)
 		require.NoError(t, err)
@@ -3671,9 +3756,7 @@ func TestComplexTypeDefaultValidation(t *testing.T) {
 
 	t.Run("ValidMapObjectDefault", func(t *testing.T) {
 		schema := iceberg.NewSchema(1,
-			iceberg.NestedField{ID: 1, Name: "m", Type: &iceberg.MapType{
-				KeyID: 2, KeyType: iceberg.StringType{}, ValueID: 3, ValueType: iceberg.Int32Type{}, ValueRequired: false,
-			}, Required: false, InitialDefault: map[string]any{"keys": []any{"a"}, "values": []any{float64(1)}}},
+			iceberg.NestedField{ID: 1, Name: "m", Type: iceberg.NewMapType(2, iceberg.StringType{}, 3, iceberg.Int32Type{}, false), Required: false, InitialDefault: map[string]any{"keys": []any{"a"}, "values": []any{float64(1)}}},
 		)
 		err := checkSchemaCompatibility(schema, 3)
 		require.NoError(t, err)
@@ -3689,13 +3772,9 @@ func TestComplexTypeDefaultValidation(t *testing.T) {
 
 	t.Run("InvalidNestedStructDefault", func(t *testing.T) {
 		schema := iceberg.NewSchema(1,
-			iceberg.NestedField{ID: 1, Name: "outer", Type: &iceberg.StructType{
-				FieldList: []iceberg.NestedField{
-					{ID: 2, Name: "inner", Type: &iceberg.ListType{
-						ElementID: 3, Element: iceberg.StringType{}, ElementRequired: false,
-					}, Required: false, InitialDefault: "not a list"},
-				},
-			}, Required: false},
+			iceberg.NestedField{ID: 1, Name: "outer", Type: iceberg.NewStructType(
+				iceberg.NestedField{ID: 2, Name: "inner", Type: iceberg.NewListType(3, iceberg.StringType{}, false), Required: false, InitialDefault: "not a list"},
+			), Required: false},
 		)
 		err := checkSchemaCompatibility(schema, 3)
 		require.Error(t, err)

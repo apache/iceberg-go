@@ -292,6 +292,7 @@ type Snapshot struct {
 	SchemaID          *int     `json:"schema-id,omitempty"`
 	FirstRowID        *int64   `json:"first-row-id,omitempty"` // V3: Starting row ID for this snapshot
 	AddedRows         *int64   `json:"added-rows,omitempty"`   // V3: Number of rows added by this snapshot
+	KeyID             *string  `json:"key-id,omitempty"`       // V3: Manifest list encryption key ID
 }
 
 func (s *Snapshot) UnmarshalJSON(data []byte) error {
@@ -400,6 +401,10 @@ func (s Snapshot) Equals(other Snapshot) bool {
 	case s.AddedRows == nil && other.AddedRows != nil:
 		fallthrough
 	case s.AddedRows != nil && other.AddedRows == nil:
+		fallthrough
+	case s.KeyID == nil && other.KeyID != nil:
+		fallthrough
+	case s.KeyID != nil && other.KeyID == nil:
 		return false
 	}
 
@@ -408,6 +413,7 @@ func (s Snapshot) Equals(other Snapshot) bool {
 		((s.SchemaID == other.SchemaID) || (*s.SchemaID == *other.SchemaID)) &&
 		((s.FirstRowID == other.FirstRowID) || (*s.FirstRowID == *other.FirstRowID)) &&
 		((s.AddedRows == other.AddedRows) || (*s.AddedRows == *other.AddedRows)) &&
+		((s.KeyID == other.KeyID) || (*s.KeyID == *other.KeyID)) &&
 		s.SequenceNumber == other.SequenceNumber &&
 		s.TimestampMs == other.TimestampMs &&
 		s.ManifestList == other.ManifestList &&
@@ -568,9 +574,53 @@ type MetadataLogEntry struct {
 	TimestampMs  int64  `json:"timestamp-ms"`
 }
 
+// UnmarshalJSON requires both fields that identify an entry in the metadata log.
+// Decoding into non-pointer fields would silently accept missing or null fields
+// as an empty file path or a timestamp of zero.
+func (e *MetadataLogEntry) UnmarshalJSON(data []byte) error {
+	var wire struct {
+		MetadataFile *string `json:"metadata-file"`
+		TimestampMs  *int64  `json:"timestamp-ms"`
+	}
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	if wire.MetadataFile == nil {
+		return fmt.Errorf("%w: metadata-log entry is missing required metadata-file", ErrInvalidMetadata)
+	}
+	if wire.TimestampMs == nil {
+		return fmt.Errorf("%w: metadata-log entry is missing required timestamp-ms", ErrInvalidMetadata)
+	}
+
+	*e = MetadataLogEntry{MetadataFile: *wire.MetadataFile, TimestampMs: *wire.TimestampMs}
+
+	return nil
+}
+
 type SnapshotLogEntry struct {
 	SnapshotID  int64 `json:"snapshot-id"`
 	TimestampMs int64 `json:"timestamp-ms"`
+}
+
+// UnmarshalJSON distinguishes absent or null log fields from valid zero values.
+func (e *SnapshotLogEntry) UnmarshalJSON(data []byte) error {
+	var wire struct {
+		SnapshotID  *int64 `json:"snapshot-id"`
+		TimestampMs *int64 `json:"timestamp-ms"`
+	}
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	if wire.SnapshotID == nil {
+		return fmt.Errorf("%w: snapshot-log entry is missing required snapshot-id", ErrInvalidMetadata)
+	}
+	if wire.TimestampMs == nil {
+		return fmt.Errorf("%w: snapshot-log entry is missing required timestamp-ms", ErrInvalidMetadata)
+	}
+
+	*e = SnapshotLogEntry{SnapshotID: *wire.SnapshotID, TimestampMs: *wire.TimestampMs}
+
+	return nil
 }
 
 // SnapshotLogEntryAsOf returns the snapshot-log entry with the greatest
@@ -640,12 +690,12 @@ func (s *SnapshotSummaryCollector) partitionPath(partition map[int]any, sc *iceb
 	plan, ok := s.partitionPathPlans[key]
 	if !ok {
 		partitionType := spec.PartitionType(sc)
-		pathPlan := partitionPathPlan{fields: make([]partitionPathField, 0, len(partitionType.FieldList))}
+		pathPlan := partitionPathPlan{fields: make([]partitionPathField, 0, partitionType.NumFields())}
 		for i, field := range spec.Fields() {
 			pathField := partitionPathField{
 				escapedName: field.EscapedName(),
 				transform:   field.Transform,
-				resultType:  partitionType.FieldList[i].Type,
+				resultType:  partitionType.Field(i).Type,
 			}
 			pathPlan.fields = append(pathPlan.fields, pathField)
 			pathPlan.estimatedSize += len(pathField.escapedName) + 20
@@ -760,8 +810,21 @@ func updateSnapshotSummaries(sum Summary, previous iceberg.Properties) (Summary,
 		}
 	}
 
+	// A total is carried forward only when the previous snapshot reports it
+	// as a valid non-negative number. A missing or unparseable total is
+	// unknown and is left out rather than restarted from 0, matching Java's
+	// SnapshotProducer.updateTotal.
 	updateTotals := func(totalProp, addedProp, removedProp string) {
-		newTotal := previous.GetInt64(totalProp, 0)
+		prevTotal, ok := previous[totalProp]
+		if !ok {
+			return
+		}
+
+		newTotal, err := strconv.ParseInt(prevTotal, 10, 64)
+		if err != nil || newTotal < 0 {
+			return
+		}
+
 		newTotal += sum.Properties.GetInt64(addedProp, 0)
 		newTotal -= sum.Properties.GetInt64(removedProp, 0)
 
