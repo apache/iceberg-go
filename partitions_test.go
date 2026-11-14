@@ -789,6 +789,11 @@ func TestPartitionFieldUnmarshalJSON(t *testing.T) {
 		assert.Equal(t, 1001, field.FieldID)
 		assert.Equal(t, "int_bucket", field.Name)
 		assert.Equal(t, iceberg.BucketTransform{NumBuckets: 25}, field.Transform)
+
+		data, err := json.Marshal(field)
+		require.NoError(t, err)
+		assert.Contains(t, string(data), `"source-id":2`)
+		assert.NotContains(t, string(data), `"source-ids"`)
 	})
 
 	t.Run("unmarshal with multiple source-ids for unknown transform", func(t *testing.T) {
@@ -933,6 +938,47 @@ func TestPartitionFieldJSONRejectsMultipleSourcesForBuiltInTransforms(t *testing
 			}
 		})
 	}
+}
+
+func TestPartitionSpecJSONRejectsMultipleSourcesForBuiltInTransform(t *testing.T) {
+	fieldJSON := `{"source-ids":[1,2],"field-id":1000,"name":"part","transform":"bucket[16]"}`
+	specJSON := `{"spec-id":1,"fields":[` + fieldJSON + `]}`
+
+	var decoded iceberg.PartitionSpec
+	err := json.Unmarshal([]byte(specJSON), &decoded)
+	require.ErrorIs(t, err, iceberg.ErrInvalidPartitionSpec)
+	assert.ErrorContains(t, err, "requires exactly one source ID, got 2")
+
+	spec := iceberg.NewPartitionSpecID(1, iceberg.PartitionField{
+		SourceIDs: []int{1, 2},
+		FieldID:   1000,
+		Name:      "part",
+		Transform: iceberg.BucketTransform{NumBuckets: 16},
+	})
+	_, err = json.Marshal(spec)
+	require.ErrorIs(t, err, iceberg.ErrInvalidPartitionSpec)
+	assert.ErrorContains(t, err, "requires exactly one source ID, got 2")
+}
+
+func TestPartitionSpecJSONRoundTripsMultiSourceUnknownTransform(t *testing.T) {
+	transform, err := iceberg.ParseTransform("custom_three_arg")
+	require.NoError(t, err)
+
+	spec := iceberg.NewPartitionSpecID(2, iceberg.PartitionField{
+		SourceIDs: []int{1, 2, 3},
+		FieldID:   1000,
+		Name:      "combined",
+		Transform: transform,
+	})
+
+	data, err := json.Marshal(spec)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), `"source-ids":[1,2,3]`)
+
+	var decoded iceberg.PartitionSpec
+	require.NoError(t, json.Unmarshal(data, &decoded))
+	assert.True(t, spec.Equals(decoded))
+	assert.Equal(t, []int{1, 2, 3}, decoded.Field(0).SourceIDs)
 }
 
 func TestPartitionFieldUnmarshalPreservesJSONFieldPresence(t *testing.T) {
