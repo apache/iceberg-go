@@ -791,13 +791,13 @@ func TestPartitionFieldUnmarshalJSON(t *testing.T) {
 		assert.Equal(t, iceberg.BucketTransform{NumBuckets: 25}, field.Transform)
 	})
 
-	t.Run("unmarshal with multiple source-ids", func(t *testing.T) {
+	t.Run("unmarshal with multiple source-ids for unknown transform", func(t *testing.T) {
 		jsonData := `
 		{
 			"source-ids": [2, 3],
 			"field-id": 1001,
-			"transform": "bucket[25]",
-			"name": "int_bucket"
+			"transform": "custom",
+			"name": "multi_arg"
 		}`
 		var field iceberg.PartitionField
 		err := json.Unmarshal([]byte(jsonData), &field)
@@ -805,16 +805,15 @@ func TestPartitionFieldUnmarshalJSON(t *testing.T) {
 		assert.Equal(t, 2, field.FirstSourceID(), "FirstSourceID should return the first element")
 		assert.Equal(t, []int{2, 3}, field.SourceIDs, "SourceIDs should contain all elements")
 		assert.Equal(t, 1001, field.FieldID)
-		assert.Equal(t, "int_bucket", field.Name)
+		assert.Equal(t, "multi_arg", field.Name)
+		assert.Equal(t, "custom", field.Transform.String())
 	})
 
 	t.Run("marshal multi-arg round-trip", func(t *testing.T) {
-		field := iceberg.PartitionField{
-			SourceIDs: []int{2, 3},
-			FieldID:   1001,
-			Name:      "multi_arg",
-			Transform: iceberg.BucketTransform{NumBuckets: 25},
-		}
+		var field iceberg.PartitionField
+		jsonData := `{"source-ids":[2,3],"field-id":1001,"name":"multi_arg","transform":"custom"}`
+		require.NoError(t, json.Unmarshal([]byte(jsonData), &field))
+
 		data, err := json.Marshal(field)
 		require.NoError(t, err)
 		assert.Contains(t, string(data), `"source-ids"`)
@@ -893,6 +892,47 @@ func TestPartitionFieldUnmarshalJSON(t *testing.T) {
 		}`), &field))
 		assert.Equal(t, 1, field.FirstSourceID())
 	})
+}
+
+func TestPartitionFieldJSONRejectsMultipleSourcesForBuiltInTransforms(t *testing.T) {
+	tests := []struct {
+		name      string
+		transform string
+		value     iceberg.Transform
+		pointer   iceberg.Transform
+	}{
+		{name: "identity", transform: "identity", value: iceberg.IdentityTransform{}, pointer: &iceberg.IdentityTransform{}},
+		{name: "void", transform: "void", value: iceberg.VoidTransform{}, pointer: &iceberg.VoidTransform{}},
+		{name: "bucket", transform: "bucket[16]", value: iceberg.BucketTransform{NumBuckets: 16}, pointer: &iceberg.BucketTransform{NumBuckets: 16}},
+		{name: "truncate", transform: "truncate[4]", value: iceberg.TruncateTransform{Width: 4}, pointer: &iceberg.TruncateTransform{Width: 4}},
+		{name: "year", transform: "year", value: iceberg.YearTransform{}, pointer: &iceberg.YearTransform{}},
+		{name: "month", transform: "month", value: iceberg.MonthTransform{}, pointer: &iceberg.MonthTransform{}},
+		{name: "day", transform: "day", value: iceberg.DayTransform{}, pointer: &iceberg.DayTransform{}},
+		{name: "hour", transform: "hour", value: iceberg.HourTransform{}, pointer: &iceberg.HourTransform{}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			jsonData := fmt.Sprintf(`{"source-ids":[1,2],"field-id":1000,"name":"part","transform":%q}`, tt.transform)
+			var decoded iceberg.PartitionField
+			err := json.Unmarshal([]byte(jsonData), &decoded)
+			require.ErrorIs(t, err, iceberg.ErrInvalidPartitionSpec)
+			assert.ErrorContains(t, err, "requires exactly one source ID, got 2")
+
+			field := iceberg.PartitionField{
+				SourceIDs: []int{1, 2},
+				FieldID:   1000,
+				Name:      "part",
+				Transform: tt.value,
+			}
+			for _, transform := range []iceberg.Transform{tt.value, tt.pointer} {
+				field.Transform = transform
+				_, err = json.Marshal(field)
+				require.ErrorIs(t, err, iceberg.ErrInvalidPartitionSpec)
+				assert.ErrorContains(t, err, "requires exactly one source ID, got 2")
+			}
+		})
+	}
 }
 
 func TestPartitionFieldUnmarshalPreservesJSONFieldPresence(t *testing.T) {
@@ -1603,14 +1643,17 @@ func TestNewPartitionSpecOptsRejectsNilTransform(t *testing.T) {
 // Multi-argument transforms carry several source IDs, and redundancy is keyed on
 // the whole list, so neighbouring lists must not be conflated.
 func TestValidatePartitionFieldsMultiSourceRedundancy(t *testing.T) {
+	multiArgumentTransform, err := iceberg.ParseTransform("custom")
+	require.NoError(t, err)
+
 	redundant := iceberg.NewPartitionSpecID(1,
 		iceberg.PartitionField{
 			SourceIDs: []int{1, 2}, FieldID: 1000, Name: "first",
-			Transform: iceberg.IdentityTransform{},
+			Transform: multiArgumentTransform,
 		},
 		iceberg.PartitionField{
 			SourceIDs: []int{1, 2}, FieldID: 1001, Name: "second",
-			Transform: iceberg.IdentityTransform{},
+			Transform: multiArgumentTransform,
 		},
 	)
 	data, err := json.Marshal(redundant)
@@ -1625,11 +1668,11 @@ func TestValidatePartitionFieldsMultiSourceRedundancy(t *testing.T) {
 	distinct := iceberg.NewPartitionSpecID(1,
 		iceberg.PartitionField{
 			SourceIDs: []int{1, 2}, FieldID: 1000, Name: "first",
-			Transform: iceberg.IdentityTransform{},
+			Transform: multiArgumentTransform,
 		},
 		iceberg.PartitionField{
 			SourceIDs: []int{1, 23}, FieldID: 1001, Name: "second",
-			Transform: iceberg.IdentityTransform{},
+			Transform: multiArgumentTransform,
 		},
 	)
 	data, err = json.Marshal(distinct)

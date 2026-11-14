@@ -90,7 +90,20 @@ func (p *PartitionField) EscapedName() string {
 	return url.QueryEscape(p.Name)
 }
 
+func validatePartitionFieldSourceCount(transform Transform, sourceIDs []int) error {
+	if len(sourceIDs) > 1 && isBuiltInPartitionTransform(transform) {
+		return fmt.Errorf("%w: built-in partition transform %s requires exactly one source ID, got %d",
+			ErrInvalidPartitionSpec, transform, len(sourceIDs))
+	}
+
+	return nil
+}
+
 func (p PartitionField) MarshalJSON() ([]byte, error) {
+	if err := validatePartitionFieldSourceCount(p.Transform, p.SourceIDs); err != nil {
+		return nil, err
+	}
+
 	if len(p.SourceIDs) == 1 && p.SourceIDs[0] == 0 {
 		if _, isVoid := p.Transform.(VoidTransform); isVoid {
 			return json.Marshal(struct {
@@ -211,6 +224,9 @@ func (p *PartitionField) unmarshal(b []byte, binding specBinding) error {
 		// Preserve compatibility with historical source-less void tombstones,
 		// which carry no source column to validate.
 		next.SourceIDs = []int{0}
+	}
+	if err := validatePartitionFieldSourceCount(next.Transform, next.SourceIDs); err != nil {
+		return err
 	}
 	if hasSourceID || hasSourceIDs {
 		for _, sourceID := range next.SourceIDs {
