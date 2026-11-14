@@ -4989,7 +4989,8 @@ func TestUpdateTableKeepsOnlyCatalogScanPlanningDirective(t *testing.T) {
 
 // TestUnsupportedOperationStatusesAreNotImplemented: 406, the spec's
 // UnsupportedOperationResponse, and 501 both mean the server does not support
-// the operation, so both surface as iceberg.ErrNotImplemented.
+// the operation, so both surface as iceberg.ErrNotImplemented and stay
+// rest.ErrRESTError.
 func TestUnsupportedOperationStatusesAreNotImplemented(t *testing.T) {
 	for _, status := range []int{http.StatusNotAcceptable, http.StatusNotImplemented} {
 		t.Run(http.StatusText(status), func(t *testing.T) {
@@ -5017,6 +5018,7 @@ func TestUnsupportedOperationStatusesAreNotImplemented(t *testing.T) {
 
 			err = cat.CreateNamespace(context.Background(), table.Identifier{"ns"}, iceberg.Properties{"owner": "x"})
 			require.ErrorIs(t, err, iceberg.ErrNotImplemented)
+			assert.ErrorIs(t, err, rest.ErrRESTError)
 			assert.ErrorContains(t, err, "metadata is not supported")
 		})
 	}
