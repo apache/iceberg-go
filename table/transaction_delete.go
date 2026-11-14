@@ -1121,62 +1121,65 @@ func (t *Transaction) makePositionDeleteRecordsForFilter(ctx context.Context, fs
 		return nil, err
 	}
 
-	deletesPerFile, err := readAllDeleteFiles(ctx, fs, tasks, concurrency)
-	if err != nil {
-		// readAllDeleteFiles can return a partially-populated map alongside
-		// the error if some goroutines completed before the failure.
-		releasePerFilePosDeletes(deletesPerFile)
+	return func(yield func(arrow.RecordBatch, error) bool) {
+		deletesPerFile, err := readAllDeleteFiles(ctx, fs, tasks, concurrency)
+		if err != nil {
+			// readAllDeleteFiles can return a partially-populated map alongside
+			// the error if some goroutines completed before the failure.
+			releasePerFilePosDeletes(deletesPerFile)
+			yield(nil, err)
 
-		return nil, err
-	}
-
-	extSet := substrait.NewExtensionSet()
-
-	ctx, cancel := context.WithCancelCause(exprs.WithExtensionIDSet(ctx, extSet))
-	taskChan := make(chan tblutils.Enumerated[FileScanTask], len(tasks))
-
-	numWorkers := min(concurrency, len(tasks))
-	records := make(chan enumeratedRecord, numWorkers)
-
-	var wg sync.WaitGroup
-	wg.Add(numWorkers)
-	for range numWorkers {
-		go func() {
-			defer wg.Done()
-			sink := newRecordSink(records)
-			for {
-				if err := sink.reserve(ctx); err != nil {
-					return
-				}
-				select {
-				case <-ctx.Done():
-					return
-				case task, ok := <-taskChan:
-					if !ok {
-						return
-					}
-
-					if err := scanner.producePosDeletesFromTask(ctx, task, deletesPerFile[task.Value.File.FilePath()], sink, invariants); err != nil {
-						cancel(err)
-
-						return
-					}
-				}
-			}
-		}()
-	}
-
-	go func() {
-		for i, t := range tasks {
-			taskChan <- tblutils.Enumerated[FileScanTask]{
-				Value: t, Index: i, Last: i == len(tasks)-1,
-			}
+			return
 		}
-		close(taskChan)
 
-		wg.Wait()
-		close(records)
-	}()
+		extSet := substrait.NewExtensionSet()
 
-	return createIterator(ctx, uint(numWorkers), records, deletesPerFile, cancel, scanner.rowLimit), nil
+		scanCtx, cancel := context.WithCancelCause(exprs.WithExtensionIDSet(ctx, extSet))
+		taskChan := make(chan tblutils.Enumerated[FileScanTask], len(tasks))
+
+		numWorkers := min(concurrency, len(tasks))
+		records := make(chan enumeratedRecord, numWorkers)
+
+		var wg sync.WaitGroup
+		wg.Add(numWorkers)
+		for range numWorkers {
+			go func() {
+				defer wg.Done()
+				sink := newRecordSink(records)
+				for {
+					if err := sink.reserve(scanCtx); err != nil {
+						return
+					}
+					select {
+					case <-scanCtx.Done():
+						return
+					case task, ok := <-taskChan:
+						if !ok {
+							return
+						}
+
+						if err := scanner.producePosDeletesFromTask(scanCtx, task, deletesPerFile[task.Value.File.FilePath()], sink, invariants); err != nil {
+							cancel(err)
+
+							return
+						}
+					}
+				}
+			}()
+		}
+
+		go func() {
+			for i, t := range tasks {
+				taskChan <- tblutils.Enumerated[FileScanTask]{
+					Value: t, Index: i, Last: i == len(tasks)-1,
+				}
+			}
+			close(taskChan)
+
+			wg.Wait()
+			close(records)
+		}()
+
+		createIterator(scanCtx, uint(numWorkers), records, deletesPerFile, cancel, scanner.rowLimit)(yield)
+	}, nil
 }
