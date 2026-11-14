@@ -213,6 +213,7 @@ func (s *SortField) unmarshal(b []byte, binding orderBinding) error {
 	if next.Transform, err = iceberg.ParseTransform(transformString); err != nil {
 		return err
 	}
+
 	switch next.Direction {
 	case SortASC, SortDESC:
 	default:
@@ -525,6 +526,7 @@ func (s *SortOrder) CheckCompatibility(schema *iceberg.Schema) error {
 		if err := validateSortSourceIDs(field.SourceIDs, boundOrder); err != nil {
 			return fmt.Errorf("sort field has invalid source IDs: %w", err)
 		}
+
 		var firstField iceberg.NestedField
 		for idx, sourceID := range field.SourceIDs {
 			f, ok := schema.FindFieldByID(sourceID)
