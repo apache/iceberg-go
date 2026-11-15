@@ -104,6 +104,32 @@ func TestLocalFSWalkDirReturnsCanceledContext(t *testing.T) {
 	assert.False(t, called)
 }
 
+func TestLocalFSMkdirAllReturnsCanceledContext(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "nested", "dir")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := (LocalFS{}).MkdirAll(ctx, dir)
+	require.ErrorIs(t, err, context.Canceled)
+	_, err = os.Stat(dir)
+	require.ErrorIs(t, err, fs.ErrNotExist)
+}
+
+func TestLocalFSRemoveAllReturnsCanceledContext(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "data")
+	file := filepath.Join(dir, "file.parquet")
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	require.NoError(t, os.WriteFile(file, []byte("keep"), 0o644))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := (LocalFS{}).RemoveAll(ctx, dir)
+	require.ErrorIs(t, err, context.Canceled)
+	content, err := os.ReadFile(file)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("keep"), content)
+}
+
 func TestLocalFSWriteFileCreatesParentDirectories(t *testing.T) {
 	dir := t.TempDir()
 	content := []byte("content")
