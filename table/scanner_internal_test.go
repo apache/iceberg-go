@@ -754,6 +754,38 @@ func TestPartitionsMatchUsesFloatSemantics(t *testing.T) {
 	}
 }
 
+func TestDVPartitionsMatchUsesPromotedIdentityType(t *testing.T) {
+	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{1}, FieldID: 1000, Name: "score", Transform: iceberg.IdentityTransform{},
+	})
+	doubleSchema := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "score", Type: iceberg.PrimitiveTypes.Float64})
+	floatSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "score", Type: iceberg.PrimitiveTypes.Float32})
+	tests := []struct {
+		name   string
+		data   any
+		dv     any
+		schema *iceberg.Schema
+		match  bool
+	}{
+		{name: "exact float widening", data: float32(0.1), dv: float64(float32(0.1)), schema: doubleSchema, match: true},
+		{name: "distinct double value", data: float32(0.1), dv: float64(0.1), schema: doubleSchema},
+		{name: "NaN payloads", data: math.Float32frombits(0x7fc00001), dv: math.Float64frombits(0x7ff8000000000002), schema: doubleSchema, match: true},
+		{name: "negative zero promotion", data: float32(math.Copysign(0, -1)), dv: math.Copysign(0, -1), schema: doubleSchema, match: true},
+		{name: "signed zero mismatch", data: float32(math.Copysign(0, -1)), dv: float64(0), schema: doubleSchema},
+		{name: "no promotion in current schema", data: float32(4.5), dv: float64(4.5), schema: floatSchema},
+		{name: "reverse width is not promotion", data: float64(4.5), dv: float32(4.5), schema: doubleSchema},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.match,
+				dvPartitionsMatch(map[int]any{1000: tt.data}, map[int]any{1000: tt.dv}, &spec, tt.schema))
+		})
+	}
+}
+
 func TestMatchEqualityDeletesToDataHandlesBinaryPartitions(t *testing.T) {
 	dataSeqNum := int64(1)
 	deleteSeqNum := int64(2)

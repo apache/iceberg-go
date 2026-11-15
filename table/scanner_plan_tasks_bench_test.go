@@ -191,7 +191,12 @@ func planBufferedDataManifestTasks(
 
 	tasks := make([]FileScanTask, 0, len(entries.dataEntries))
 	for _, entry := range entries.dataEntries {
-		task, err := fileScanTaskForDataEntry(entry, posDeleteIndex, dvIndex, eqDeleteIndex)
+		var spec *iceberg.PartitionSpec
+		if _, hasDV := dvIndex[entry.DataFile().FilePath()]; hasDV {
+			spec = scan.metadata.PartitionSpecByID(int(entry.DataFile().SpecID()))
+		}
+		task, err := fileScanTaskForDataEntryWithSchema(
+			entry, posDeleteIndex, dvIndex, eqDeleteIndex, spec, schema)
 		if err != nil {
 			return nil, err
 		}

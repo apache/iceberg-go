@@ -19,6 +19,7 @@ package table
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/apache/iceberg-go"
@@ -28,12 +29,29 @@ import (
 
 func TestLocalScanValidatesDeletionVectorPartitionsAcrossSchemaPromotion(t *testing.T) {
 	for _, tt := range []struct {
-		name          string
-		dvPartition   int64
-		wantPartition int64
+		name         string
+		oldType      iceberg.Type
+		promotedType iceberg.Type
+		dataValue    any
+		dvValue      any
+		mismatch     bool
 	}{
-		{name: "matching promoted value", dvPartition: 7, wantPartition: 7},
-		{name: "mismatched promoted value", dvPartition: 8, wantPartition: 7},
+		{
+			name: "matching integer promotion", oldType: iceberg.PrimitiveTypes.Int32,
+			promotedType: iceberg.PrimitiveTypes.Int64, dataValue: int32(7), dvValue: int64(7),
+		},
+		{
+			name: "mismatched integer promotion", oldType: iceberg.PrimitiveTypes.Int32,
+			promotedType: iceberg.PrimitiveTypes.Int64, dataValue: int32(7), dvValue: int64(8), mismatch: true,
+		},
+		{
+			name: "matching float promotion", oldType: iceberg.PrimitiveTypes.Float32,
+			promotedType: iceberg.PrimitiveTypes.Float64, dataValue: float32(4.5), dvValue: float64(4.5),
+		},
+		{
+			name: "mismatched float promotion", oldType: iceberg.PrimitiveTypes.Float32,
+			promotedType: iceberg.PrimitiveTypes.Float64, dataValue: float32(4.5), dvValue: float64(4.6), mismatch: true,
+		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := context.Background()
@@ -47,9 +65,9 @@ func TestLocalScanValidatesDeletionVectorPartitionsAcrossSchemaPromotion(t *test
 			const currentManifestListPath = location + "/metadata/snap-2.avro"
 
 			oldSchema := iceberg.NewSchema(0,
-				iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true})
+				iceberg.NestedField{ID: 1, Name: "id", Type: tt.oldType, Required: true})
 			promotedSchema := iceberg.NewSchema(1,
-				iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true})
+				iceberg.NestedField{ID: 1, Name: "id", Type: tt.promotedType, Required: true})
 			spec := iceberg.NewPartitionSpecID(0, iceberg.PartitionField{
 				SourceIDs: []int{1}, FieldID: 1000, Name: "id", Transform: iceberg.IdentityTransform{},
 			})
@@ -59,7 +77,7 @@ func TestLocalScanValidatesDeletionVectorPartitionsAcrossSchemaPromotion(t *test
 			require.NoError(t, err)
 
 			dataFile, err := iceberg.NewDataFileBuilder(spec, iceberg.EntryContentData, dataPath,
-				iceberg.ParquetFile, map[int]any{1000: int32(tt.wantPartition)}, nil, nil, 1, 100)
+				iceberg.ParquetFile, map[int]any{1000: tt.dataValue}, nil, nil, 1, 100)
 			require.NoError(t, err)
 			const firstSnapshotID, firstSequenceNumber = int64(1), int64(1)
 			dataEntry := iceberg.NewManifestEntry(iceberg.EntryStatusADDED,
@@ -88,7 +106,7 @@ func TestLocalScanValidatesDeletionVectorPartitionsAcrossSchemaPromotion(t *test
 			require.NoError(t, err)
 
 			dvFile, err := iceberg.NewDataFileBuilder(spec, iceberg.EntryContentPosDeletes, dvPath,
-				iceberg.PuffinFile, map[int]any{1000: tt.dvPartition}, nil, nil, 1, 100)
+				iceberg.PuffinFile, map[int]any{1000: tt.dvValue}, nil, nil, 1, 100)
 			require.NoError(t, err)
 			dvFile.ContentOffset(0).ContentSizeInBytes(10).ReferencedDataFile(dataPath)
 			const currentSnapshotID, currentSequenceNumber = int64(2), int64(2)
@@ -132,21 +150,29 @@ func TestLocalScanValidatesDeletionVectorPartitionsAcrossSchemaPromotion(t *test
 
 			tbl := New(Identifier{"db", "dv_partition"}, meta, "metadata.json",
 				func(context.Context) (iceio.IO, error) { return fs, nil }, nil)
-			tasks, err := tbl.Scan().planFiles(ctx, false)
-			if tt.dvPartition == tt.wantPartition {
-				require.NoError(t, err)
-				require.Len(t, tasks, 1)
-				require.Len(t, tasks[0].DeletionVectorFiles, 1)
-				require.Equal(t, dvPath, tasks[0].DeletionVectorFiles[0].FilePath())
-				require.IsType(t, int32(0), dataFilePartition(tasks[0].File)[1000])
-				require.IsType(t, int64(0), dataFilePartition(tasks[0].DeletionVectorFiles[0])[1000])
-			} else {
-				require.ErrorIs(t, err, ErrInvalidMetadata)
-				require.Nil(t, tasks)
-				require.ErrorContains(t, err, dvPath)
-				require.ErrorContains(t, err, dataPath)
-				require.ErrorContains(t, err, "map[1000:8]")
-				require.ErrorContains(t, err, "map[1000:7]")
+			for _, projected := range []bool{false, true} {
+				mode := "full"
+				if projected {
+					mode = "projected"
+				}
+				t.Run(mode, func(t *testing.T) {
+					tasks, err := tbl.Scan().planFiles(ctx, projected)
+					if !tt.mismatch {
+						require.NoError(t, err)
+						require.Len(t, tasks, 1)
+						require.Len(t, tasks[0].DeletionVectorFiles, 1)
+						require.Equal(t, dvPath, tasks[0].DeletionVectorFiles[0].FilePath())
+						require.IsType(t, tt.dataValue, dataFilePartition(tasks[0].File)[1000])
+						require.IsType(t, tt.dvValue, dataFilePartition(tasks[0].DeletionVectorFiles[0])[1000])
+					} else {
+						require.ErrorIs(t, err, ErrInvalidMetadata)
+						require.Nil(t, tasks)
+						require.ErrorContains(t, err, dvPath)
+						require.ErrorContains(t, err, dataPath)
+						require.ErrorContains(t, err, fmt.Sprintf("map[1000:%v]", tt.dvValue))
+						require.ErrorContains(t, err, fmt.Sprintf("map[1000:%v]", tt.dataValue))
+					}
+				})
 			}
 		})
 	}

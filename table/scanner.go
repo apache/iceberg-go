@@ -1020,6 +1020,78 @@ func partitionsMatch(a, b map[int]any) bool {
 	return maps.EqualFunc(a, b, partitionValuesEqual)
 }
 
+func dvPartitionsMatch(
+	data, dv map[int]any,
+	spec *iceberg.PartitionSpec,
+	schema *iceberg.Schema,
+) bool {
+	if len(data) != len(dv) {
+		return false
+	}
+
+	for partitionFieldID, dataValue := range data {
+		dvValue, ok := dv[partitionFieldID]
+		if !ok || !dvPartitionValuesEqual(partitionFieldID, dataValue, dvValue, spec, schema) {
+			return false
+		}
+	}
+
+	return true
+}
+
+func dvPartitionValuesEqual(
+	partitionFieldID int,
+	dataValue, dvValue any,
+	spec *iceberg.PartitionSpec,
+	schema *iceberg.Schema,
+) bool {
+	dataFloat, dataIsFloat32 := dataValue.(float32)
+	dvFloat, dvIsFloat64 := dvValue.(float64)
+	if dataIsFloat32 && dvIsFloat64 && partitionFieldIsPromotedFloatIdentity(partitionFieldID, spec, schema) {
+		// Historical manifests keep the float32 representation. Iceberg's
+		// float-to-double promotion widens that value exactly before comparing
+		// it with a newer DV manifest.
+		return partitionValuesEqual(float64(dataFloat), dvFloat)
+	}
+
+	return partitionValuesEqual(dataValue, dvValue)
+}
+
+func partitionFieldIsPromotedFloatIdentity(
+	partitionFieldID int,
+	spec *iceberg.PartitionSpec,
+	schema *iceberg.Schema,
+) bool {
+	if spec == nil || schema == nil {
+		return false
+	}
+
+	for i := 0; i < spec.NumFields(); i++ {
+		field := spec.Field(i)
+		if field.FieldID != partitionFieldID ||
+			len(field.SourceIDs) != 1 ||
+			!isIdentityPartitionTransform(field.Transform) {
+			continue
+		}
+
+		sourceField, ok := schema.FindFieldByID(field.SourceIDs[0])
+		return ok && sourceField.Type.Equals(iceberg.PrimitiveTypes.Float64)
+	}
+
+	return false
+}
+
+func isIdentityPartitionTransform(transform iceberg.Transform) bool {
+	switch transform := transform.(type) {
+	case iceberg.IdentityTransform:
+		return true
+	case *iceberg.IdentityTransform:
+		return transform != nil
+	default:
+		return false
+	}
+}
+
 // buildDVIndex indexes deletion vectors by the data file path they reference.
 // A missing reference must fail planning instead of silently exposing deleted
 // rows. The spec also requires at most one DV per data file.
@@ -1056,6 +1128,15 @@ func buildDVIndex(dvEntries []iceberg.ManifestEntry) (map[string]iceberg.Manifes
 // resurfacing deleted rows; an unset data sequence likewise satisfies
 // -1 <= dvSeq for any known DV sequence.
 func matchDVToData(dataEntry iceberg.ManifestEntry, dvIndex map[string]iceberg.ManifestEntry) ([]iceberg.DataFile, error) {
+	return matchDVToDataWithSchema(dataEntry, dvIndex, nil, nil)
+}
+
+func matchDVToDataWithSchema(
+	dataEntry iceberg.ManifestEntry,
+	dvIndex map[string]iceberg.ManifestEntry,
+	spec *iceberg.PartitionSpec,
+	schema *iceberg.Schema,
+) ([]iceberg.DataFile, error) {
 	dataFile := dataEntry.DataFile()
 	dvEntry, ok := dvIndex[dataFile.FilePath()]
 	if !ok {
@@ -1075,7 +1156,7 @@ func matchDVToData(dataEntry iceberg.ManifestEntry, dvIndex map[string]iceberg.M
 	}
 	dvPartition := dataFilePartition(dvFile)
 	dataPartition := dataFilePartition(dataFile)
-	if !partitionsMatch(dataPartition, dvPartition) {
+	if !dvPartitionsMatch(dataPartition, dvPartition, spec, schema) {
 		return nil, fmt.Errorf("%w: deletion vector %s has partition %v, which does not match data file %s partition %v",
 			ErrInvalidMetadata, dvFile.FilePath(), dvPartition, dataFile.FilePath(), dataPartition)
 	}
@@ -1548,7 +1629,11 @@ func (scan *Scan) planDataManifestTasksWithOptions(
 						ErrInvalidMetadata, dataFile.ContentType(), dataFile.FilePath())
 				}
 
-				task, err := fileScanTaskForDataEntry(entry, posDeleteIndex, dvIndex, eqDeleteIndex)
+				var spec *iceberg.PartitionSpec
+				if _, hasDV := dvIndex[dataFile.FilePath()]; hasDV {
+					spec = scan.metadata.PartitionSpecByID(int(dataFile.SpecID()))
+				}
+				task, err := fileScanTaskForDataEntryWithSchema(entry, posDeleteIndex, dvIndex, eqDeleteIndex, spec, schema)
 				if err != nil {
 					return err
 				}
@@ -1640,13 +1725,24 @@ func fileScanTaskForDataEntry(
 	dvIndex map[string]iceberg.ManifestEntry,
 	eqDeleteIndex *equalityDeleteIndex,
 ) (FileScanTask, error) {
+	return fileScanTaskForDataEntryWithSchema(entry, posDeleteIndex, dvIndex, eqDeleteIndex, nil, nil)
+}
+
+func fileScanTaskForDataEntryWithSchema(
+	entry iceberg.ManifestEntry,
+	posDeleteIndex *positionalDeleteIndex,
+	dvIndex map[string]iceberg.ManifestEntry,
+	eqDeleteIndex *equalityDeleteIndex,
+	spec *iceberg.PartitionSpec,
+	schema *iceberg.Schema,
+) (FileScanTask, error) {
 	// Spec §Scan Planning: when a deletion vector applies to a data file,
 	// positional-delete files must NOT be applied. The DV is guaranteed to
 	// encode all prior pos-delete positions; reading the pos-delete Parquet too
 	// would be wasteful I/O, and on a buggy writer whose DV omits prior
 	// positions, applying both would over-delete. Mirrors Java's
 	// DeleteFileIndex.forDataFile.
-	dvFiles, err := matchDVToData(entry, dvIndex)
+	dvFiles, err := matchDVToDataWithSchema(entry, dvIndex, spec, schema)
 	if err != nil {
 		return FileScanTask{}, err
 	}

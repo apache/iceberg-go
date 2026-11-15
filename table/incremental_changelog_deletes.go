@@ -48,9 +48,11 @@ type changelogTaskPlan struct {
 // changelogDeleteIndex matches delete files to a data file with the same
 // sequence rules as a normal scan.
 type changelogDeleteIndex struct {
-	pos *positionalDeleteIndex
-	dv  map[string]iceberg.ManifestEntry
-	eq  *equalityDeleteIndex
+	pos    *positionalDeleteIndex
+	dv     map[string]iceberg.ManifestEntry
+	eq     *equalityDeleteIndex
+	specs  partitionSpecLookup
+	schema *iceberg.Schema
 }
 
 // changelogDeleteState tracks delete files added and removed inside the
@@ -534,7 +536,11 @@ func (idx *changelogDeleteIndex) forDataFile(entry iceberg.ManifestEntry) ([]ice
 	if idx == nil {
 		return nil, nil
 	}
-	task, err := fileScanTaskForDataEntry(entry, idx.pos, idx.dv, idx.eq)
+	var spec *iceberg.PartitionSpec
+	if _, hasDV := idx.dv[entry.DataFile().FilePath()]; hasDV && idx.specs != nil {
+		spec = idx.specs.PartitionSpecByID(int(entry.DataFile().SpecID()))
+	}
+	task, err := fileScanTaskForDataEntryWithSchema(entry, idx.pos, idx.dv, idx.eq, spec, idx.schema)
 	if err != nil {
 		return nil, err
 	}
@@ -577,7 +583,7 @@ func buildChangelogDeleteIndex(entries []iceberg.ManifestEntry, specs partitionS
 		return nil, err
 	}
 
-	return &changelogDeleteIndex{pos: pos, dv: dv, eq: eq}, nil
+	return &changelogDeleteIndex{pos: pos, dv: dv, eq: eq, specs: specs, schema: schema}, nil
 }
 
 // changelogDataFilters returns the partition and metrics evaluators applied
