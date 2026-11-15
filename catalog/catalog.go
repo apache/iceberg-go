@@ -142,12 +142,13 @@ type TableCatalog interface {
 // NamespaceCatalog contains the namespace operations supported by every
 // catalog. All built-in catalogs implement these operations.
 type NamespaceCatalog interface {
-	// ListNamespaces returns the list of available namespaces, optionally filtering by a
-	// parent namespace
+	// ListNamespaces returns the namespaces one level below parent, or the
+	// top-level namespaces when parent is empty.
 	ListNamespaces(ctx context.Context, parent table.Identifier) ([]table.Identifier, error)
 	// CreateNamespace tells the catalog to create a new namespace with the given properties
 	CreateNamespace(ctx context.Context, namespace table.Identifier, props iceberg.Properties) error
-	// DropNamespace tells the catalog to drop the namespace and all tables in that namespace
+	// DropNamespace drops an empty namespace. It returns ErrNamespaceNotEmpty
+	// while the namespace holds tables, views, or child namespaces.
 	DropNamespace(ctx context.Context, namespace table.Identifier) error
 	// CheckNamespaceExists returns if the namespace exists
 	CheckNamespaceExists(ctx context.Context, namespace table.Identifier) (bool, error)
