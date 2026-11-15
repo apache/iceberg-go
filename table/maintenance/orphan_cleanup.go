@@ -249,7 +249,12 @@ type OrphanCleanupPlan struct {
 	orphanFiles         []OrphanFile
 	totalSizeBytes      int64
 	cutoff              time.Time
+	metadataLocation    string
 }
+
+// ErrStaleOrphanCleanupPlan is returned when the table metadata changes after
+// planning. Create a new plan before deleting files.
+var ErrStaleOrphanCleanupPlan = errors.New("orphan cleanup plan is stale")
 
 // Files returns a copy of the files in the cleanup plan.
 func (p OrphanCleanupPlan) Files() []string {
@@ -357,8 +362,9 @@ func PlanOrphanFiles(ctx context.Context, tbl *table.Table, opts ...OrphanCleanu
 	return planOrphanFiles(ctx, tbl, cfg)
 }
 
-// ExecuteOrphanCleanup deletes exactly the files in plan. It does not perform
-// another orphan scan, so files appearing after planning are not included.
+// ExecuteOrphanCleanup deletes the files in plan if the table metadata has not
+// changed since planning. Execution requires a catalog-backed table so it can
+// refresh metadata and reject stale plans before deleting files.
 // Orphan cleanup is rejected when garbage collection is disabled via gc.enabled.
 func ExecuteOrphanCleanup(ctx context.Context, tbl *table.Table, plan OrphanCleanupPlan, opts ...OrphanCleanupOption) (OrphanCleanupResult, error) {
 	cfg := newExecutionOrphanCleanupConfig(opts...)
@@ -374,8 +380,26 @@ func ExecuteOrphanCleanup(ctx context.Context, tbl *table.Table, plan OrphanClea
 	if cfg.dryRun {
 		return plan.result(), nil
 	}
+	if len(plan.orphanFileLocations) == 0 {
+		return plan.result(), nil
+	}
 
-	return executeOrphanCleanup(ctx, tbl, plan, cfg)
+	refreshed := *tbl
+	if err := refreshed.Refresh(ctx); err != nil {
+		return OrphanCleanupResult{}, fmt.Errorf("failed to refresh table before orphan cleanup: %w", err)
+	}
+	if err := validateOrphanCleanupGC(&refreshed); err != nil {
+		return OrphanCleanupResult{}, err
+	}
+	if plan.metadataLocation == "" {
+		return OrphanCleanupResult{}, fmt.Errorf("%w: plan has no metadata location", ErrStaleOrphanCleanupPlan)
+	}
+	if refreshed.MetadataLocation() != plan.metadataLocation {
+		return OrphanCleanupResult{}, fmt.Errorf("%w: metadata location changed from %q to %q",
+			ErrStaleOrphanCleanupPlan, plan.metadataLocation, refreshed.MetadataLocation())
+	}
+
+	return executeOrphanCleanup(ctx, &refreshed, plan, cfg)
 }
 
 func validateOrphanCleanupGC(tbl *table.Table) error {
@@ -446,6 +470,7 @@ func planOrphanFiles(ctx context.Context, tbl *table.Table, cfg *orphanCleanupCo
 		return OrphanCleanupPlan{}, err
 	}
 	plan.cutoff = cutoff
+	plan.metadataLocation = tbl.MetadataLocation()
 
 	return plan, nil
 }

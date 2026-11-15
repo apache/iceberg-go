@@ -184,7 +184,7 @@ func TestOrphanCleanupPlanDoesNotExpandAfterPlanning(t *testing.T) {
 		meta,
 		metadataLocation,
 		func(context.Context) (iceio.IO, error) { return fs, nil },
-		nil,
+		&orphanCleanupTestCatalog{metadata: meta, location: metadataLocation, fsF: testFSF(fs)},
 	)
 
 	plan, err := PlanOrphanFiles(ctx, tbl, WithCleanupFilesOlderThan(time.Hour))
@@ -206,6 +206,57 @@ func TestOrphanCleanupPlanDoesNotExpandAfterPlanning(t *testing.T) {
 	file, err := fs.Open(context.Background(), newOrphan)
 	require.NoError(t, err)
 	assert.NoError(t, file.Close())
+}
+
+func TestExecuteOrphanCleanupRejectsStalePlanWhenFileBecomesLive(t *testing.T) {
+	ctx := context.Background()
+	fs := iceio.NewMemFS()
+	location := "mem://stale-plan/table"
+	metadataLocation := location + "/metadata/v1.metadata.json"
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+	)
+	meta, err := table.NewMetadata(schema, iceberg.UnpartitionedSpec, table.UnsortedSortOrder, location,
+		iceberg.Properties{table.PropertyFormatVersion: "2"})
+	require.NoError(t, err)
+	fsF := testFSF(fs)
+	catalog := &orphanCleanupTestCatalog{
+		metadata: meta,
+		location: metadataLocation,
+		fsF:      fsF,
+	}
+	tbl := table.New(table.Identifier{"db", "stale_plan"}, meta, metadataLocation, fsF, catalog)
+
+	dataPath := location + "/data/newly-live.parquet"
+	require.NoError(t, fs.WriteFile(ctx, dataPath, []byte("data")))
+	plan, err := PlanOrphanFiles(ctx, tbl, WithCleanupFilesOlderThan(0))
+	require.NoError(t, err)
+	require.Equal(t, []string{dataPath}, plan.Files())
+
+	fileBuilder, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec,
+		iceberg.EntryContentData,
+		dataPath,
+		iceberg.ParquetFile,
+		nil,
+		nil,
+		nil,
+		1,
+		int64(len("data")),
+	)
+	require.NoError(t, err)
+	peer := tbl.NewTransaction()
+	require.NoError(t, peer.AddDataFiles(ctx, []iceberg.DataFile{fileBuilder.Build()}, nil))
+	committed, err := peer.Commit(ctx)
+	require.NoError(t, err)
+	require.NotEqual(t, plan.metadataLocation, committed.MetadataLocation())
+
+	_, err = ExecuteOrphanCleanup(ctx, tbl, plan)
+	require.ErrorIs(t, err, ErrStaleOrphanCleanupPlan)
+
+	file, err := fs.Open(ctx, dataPath)
+	require.NoError(t, err, "a file committed after planning must not be deleted")
+	require.NoError(t, file.Close())
 }
 
 func TestExecuteOrphanCleanupRejectsPlanningOptions(t *testing.T) {
@@ -2336,6 +2387,42 @@ func testFSF(io iceio.IO) func(context.Context) (iceio.IO, error) {
 
 type inMemoryCatalog struct {
 	metadata table.Metadata
+}
+
+// orphanCleanupTestCatalog tracks metadata locations so cleanup tests can
+// model catalog commits between planning and execution.
+type orphanCleanupTestCatalog struct {
+	metadata table.Metadata
+	location string
+	fsF      table.FSysF
+	nextFile int
+}
+
+func (c *orphanCleanupTestCatalog) LoadTable(_ context.Context, ident table.Identifier) (*table.Table, error) {
+	return table.New(ident, c.metadata, c.location, c.fsF, c), nil
+}
+
+func (c *orphanCleanupTestCatalog) CommitTable(
+	_ context.Context,
+	_ table.Identifier,
+	reqs []table.Requirement,
+	updates []table.Update,
+) (table.Metadata, string, error) {
+	for _, req := range reqs {
+		if err := req.Validate(c.metadata); err != nil {
+			return nil, "", fmt.Errorf("%w: %w", table.ErrCommitFailed, err)
+		}
+	}
+
+	meta, err := table.UpdateTableMetadata(c.metadata, updates, "")
+	if err != nil {
+		return nil, "", err
+	}
+	c.metadata = meta
+	c.nextFile++
+	c.location = fmt.Sprintf("%s/metadata/v%d.metadata.json", meta.Location(), c.nextFile+1)
+
+	return meta, c.location, nil
 }
 
 func (c *inMemoryCatalog) CommitTable(
