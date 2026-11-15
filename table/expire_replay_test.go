@@ -51,6 +51,40 @@ func newExpireReplayTable(t *testing.T, props iceberg.Properties) (*memIO, *reqV
 	return fs, cat, newOCCTable(t, meta, fs, cat)
 }
 
+type refsOnlyReloadCatalog struct {
+	*reqValidatingCatalog
+	partial Metadata
+	loads   int
+}
+
+func (c *refsOnlyReloadCatalog) LoadTable(_ context.Context, ident Identifier) (*Table, error) {
+	c.loads++
+
+	return New(ident, c.partial, "", nil, c, WithSnapshotHistoryLimitedToRefs(true)), nil
+}
+
+func refsOnlySnapshotMetadata(t *testing.T, meta Metadata, keepIDs ...int64) Metadata {
+	t.Helper()
+	keep := make(map[int64]struct{}, len(keepIDs))
+	for _, id := range keepIDs {
+		keep[id] = struct{}{}
+	}
+	var removeIDs []int64
+	for _, snap := range meta.Snapshots() {
+		if _, ok := keep[snap.SnapshotID]; !ok {
+			removeIDs = append(removeIDs, snap.SnapshotID)
+		}
+	}
+
+	builder, err := MetadataBuilderFromBase(meta, "")
+	require.NoError(t, err)
+	require.NoError(t, builder.RemoveSnapshots(removeIDs, false))
+	partial, err := builder.Build()
+	require.NoError(t, err)
+
+	return partial
+}
+
 func stageFiles(t *testing.T, tx *Transaction, names ...string) {
 	t.Helper()
 	files := make([]iceberg.DataFile, 0, len(names))
@@ -164,6 +198,65 @@ func TestExpireReplayPlansWhereExpiryWasStaged(t *testing.T) {
 		assert.Equal(t, a1, parentOf(t, meta, a2))
 		assert.Equal(t, p, parentOf(t, meta, a1))
 		assert.Equal(t, []string{"a1", "a2", "b1", "b2", "b3", "p"}, branchFiles(t, fs, meta, MainBranch))
+	})
+}
+
+func TestExpireReplayRejectsRefsOnlyHistoryAfterRetry(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		fs, inner, tbl := newExpireReplayTable(t, nil)
+		var ids [4]int64
+		for i, name := range []string{"s1", "s2", "s3", "s4"} {
+			tbl, ids[i] = appendOnBranch(t, tbl, MainBranch, name)
+		}
+		peerUpdate(t, inner, NewSetSnapshotRefUpdate("expired-tag", ids[0], TagRef, time.Hour.Milliseconds(), 0, 0))
+		time.Sleep(2 * time.Hour)
+
+		cat := &refsOnlyReloadCatalog{reqValidatingCatalog: inner}
+		tx := newOCCTable(t, inner.metadata, fs, cat).NewTransaction()
+		require.NoError(t, tx.ExpireSnapshots(
+			WithOlderThan(0), WithRetainLast(5), WithPostCommit(false),
+		))
+		staged, err := tx.StagedTable()
+		require.NoError(t, err)
+		assert.Nil(t, staged.Metadata().SnapshotByName("expired-tag"))
+		assert.Equal(t, sortedIDs(ids[:]...), survivors(staged.Metadata()))
+
+		peer := peerAppend(t, fs, inner, MainBranch, "s5")
+		partial := refsOnlySnapshotMetadata(t, inner.metadata, ids[0], peer)
+		assert.Equal(t, sortedIDs(ids[0], peer), survivors(partial))
+		cat.partial = partial
+		attemptsBefore := inner.attempts.Load()
+
+		_, err = tx.Commit(t.Context())
+		require.ErrorIs(t, err, ErrTransactionUnusable)
+		require.ErrorIs(t, err, errSnapshotHistoryIncompleteForExpiration)
+		assert.Equal(t, 1, cat.loads)
+		assert.Equal(t, attemptsBefore+1, inner.attempts.Load(), "retry must stop before resubmitting expiration")
+		assert.Equal(t, sortedIDs(ids[0], ids[1], ids[2], ids[3], peer), survivors(inner.metadata))
+		assert.NotNil(t, inner.metadata.SnapshotByID(ids[0]), "retained history must remain in catalog metadata")
+		assert.NotNil(t, inner.metadata.SnapshotByName("expired-tag"), "failed expiry must not remove the tag")
+		assert.Equal(t, peer, refHead(t, inner.metadata, MainBranch))
+	})
+}
+
+func TestRefsOnlyReloadDoesNotBlockAppendReplay(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		fs, inner, tbl := newExpireReplayTable(t, nil)
+		tbl, first := appendOnBranch(t, tbl, MainBranch, "first")
+		tbl, _ = appendOnBranch(t, tbl, MainBranch, "head")
+		cat := &refsOnlyReloadCatalog{reqValidatingCatalog: inner}
+		tx := newOCCTable(t, inner.metadata, fs, cat).NewTransaction()
+		stageFiles(t, tx, "ours")
+
+		peer := peerAppend(t, fs, inner, MainBranch, "peer")
+		cat.partial = refsOnlySnapshotMetadata(t, inner.metadata, peer)
+		assert.Equal(t, []int64{peer}, survivors(cat.partial))
+		assert.NotContains(t, survivors(cat.partial), first)
+
+		committed, err := tx.Commit(t.Context())
+		require.NoError(t, err)
+		assert.Equal(t, 1, cat.loads)
+		assert.Equal(t, peer, parentOf(t, committed.Metadata(), refHead(t, committed.Metadata(), MainBranch)))
 	})
 }
 

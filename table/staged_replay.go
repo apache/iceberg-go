@@ -52,6 +52,10 @@ func newStagedReplay(branch string, updates []Update, records []expirationRecord
 	}
 }
 
+func (r *stagedReplay) hasExpirationRecords() bool {
+	return r != nil && len(r.records) > 0
+}
+
 // On error, replay returns partial updates and replaced lists for cleanup.
 // The partial updates include a rebuilt snapshot that failed to apply.
 func (r *stagedReplay) replay(ctx context.Context, fresh Metadata, fs io.WriteFileIO, attempt int, force bool) ([]Update, []string, error) {

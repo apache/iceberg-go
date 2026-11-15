@@ -18,8 +18,13 @@
 package table
 
 import (
+	"errors"
 	"fmt"
 	"slices"
+)
+
+var errSnapshotHistoryIncompleteForExpiration = errors.New(
+	"cannot expire snapshots with incomplete history under REST snapshot-loading-mode=refs; reload with snapshot-loading-mode=all",
 )
 
 func (r *stagedReplay) replan(b *MetadataBuilder, rec expirationRecord) ([]Update, []string, error) {

@@ -824,6 +824,9 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 					return nil, fmt.Errorf("%w: table was replaced: %w", ErrTransactionUnusable, err)
 				}
 			}
+			if fresh.snapshotHistoryRefsOnly && co.replay.hasExpirationRecords() {
+				return nil, fmt.Errorf("%w: %w", ErrTransactionUnusable, errSnapshotHistoryIncompleteForExpiration)
+			}
 			current, currentLoc = fresh.metadata, fresh.metadataLocation
 			reqs = rewriteRefSnapshotRequirements(reqs, co.branch, current, pinned)
 

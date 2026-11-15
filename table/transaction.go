@@ -828,7 +828,7 @@ func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 		return err
 	}
 	if t.tbl.snapshotHistoryRefsOnly {
-		return fmt.Errorf("cannot expire snapshots with incomplete history under REST snapshot-loading-mode=refs; reload with snapshot-loading-mode=all")
+		return errSnapshotHistoryIncompleteForExpiration
 	}
 
 	updates, walked, err := planExpiration(meta, cfg, nowMs)
