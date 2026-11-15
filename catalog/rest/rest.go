@@ -126,7 +126,8 @@ var (
 	errCommitNoSuchTable  = fmt.Errorf("%w: %w", catalog.ErrNoSuchTable, table.ErrCommitRejected)
 
 	// errNotSupported is a 406 or 501. It keeps ErrRESTError, which a 406
-	// matched before it also became iceberg.ErrNotImplemented.
+	// matched before it also became iceberg.ErrNotImplemented. A 501 gains
+	// ErrRESTError here, like every other 5xx.
 	errNotSupported = fmt.Errorf("%w: %w", ErrRESTError, iceberg.ErrNotImplemented)
 
 	// errNotModified reports a 304 to a request sent with withIfNoneMatch.
