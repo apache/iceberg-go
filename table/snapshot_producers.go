@@ -192,6 +192,8 @@ type overwriteFiles struct {
 	// conflict under serializable isolation. validate() reads this to
 	// decide whether to run filter-bounded or full-table checks.
 	filter iceberg.BooleanExpression
+	// caseSensitive is the setting used to bind the filter for this operation.
+	caseSensitive bool
 
 	// skipDefaultValidator disables the overwrite's pre-commit
 	// conflict check when the producer is driven by a higher-level
@@ -215,7 +217,7 @@ type overwriteParentManifests struct {
 
 func newOverwriteFilesProducer(op Operation, txn *Transaction, fs iceio.WriteFileIO, commitUUID *uuid.UUID, snapshotProps iceberg.Properties) *snapshotProducer {
 	prod := createSnapshotProducer(op, txn, fs, commitUUID, snapshotProps)
-	prod.producerImpl = &overwriteFiles{base: prod}
+	prod.producerImpl = &overwriteFiles{base: prod, caseSensitive: true}
 
 	return prod
 }
@@ -230,6 +232,12 @@ func (sp *snapshotProducer) setOverwriteFilter(filter iceberg.BooleanExpression)
 
 	if of, ok := sp.producerImpl.(*overwriteFiles); ok {
 		of.filter = filter
+	}
+}
+
+func (sp *snapshotProducer) setOverwriteCaseSensitive(caseSensitive bool) {
+	if of, ok := sp.producerImpl.(*overwriteFiles); ok {
+		of.caseSensitive = caseSensitive
 	}
 }
 
@@ -519,7 +527,7 @@ func (of *overwriteFiles) validate(cc *conflictContext) error {
 		filter = iceberg.AlwaysTrue{}
 	}
 
-	return validateAddedDataFilesMatchingFilter(cc, filter)
+	return validateAddedDataFilesMatchingFilterWithCaseSensitivity(cc, filter, of.caseSensitive)
 }
 
 func (of *overwriteFiles) needsValidation() bool { return true }

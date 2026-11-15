@@ -174,6 +174,81 @@ func TestCopyOnWriteConflict_ConcurrentAppendCommits(t *testing.T) {
 	}
 }
 
+func TestCaseInsensitiveFiltersRemainBoundAfterConcurrentAppend(t *testing.T) {
+	tests := []struct {
+		name            string
+		writeDeleteMode string
+		operation       string
+	}{
+		{name: "merge-on-read delete", writeDeleteMode: table.WriteModeMergeOnRead, operation: "delete"},
+		{name: "copy-on-write delete", writeDeleteMode: table.WriteModeCopyOnWrite, operation: "delete"},
+		{name: "overwrite", writeDeleteMode: table.WriteModeMergeOnRead, operation: "overwrite"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			location := filepath.ToSlash(t.TempDir())
+			schema := iceberg.NewSchema(0,
+				iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+				iceberg.NestedField{ID: 2, Name: "CustomerID", Type: iceberg.PrimitiveTypes.Int64, Required: false},
+			)
+			meta, err := table.NewMetadata(schema, iceberg.UnpartitionedSpec, table.UnsortedSortOrder, location,
+				iceberg.Properties{
+					table.PropertyFormatVersion:        "2",
+					table.WriteDeleteModeKey:           tt.writeDeleteMode,
+					table.CommitNumRetriesKey:          "2",
+					table.CommitMinRetryWaitMsKey:      "1",
+					table.CommitMaxRetryWaitMsKey:      "2",
+					table.CommitTotalRetryTimeoutMsKey: "1000",
+				})
+			require.NoError(t, err)
+
+			metaLoc := location + "/metadata/v1.metadata.json"
+			fsF := func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil }
+			cat := &concurrentTestCatalog{metadata: meta, location: metaLoc, fsF: fsF}
+			tbl := table.New(table.Identifier{"db", "case_sensitive_retry"}, meta, metaLoc, fsF, cat)
+
+			tbl, err = tbl.Append(ctx, caseInsensitiveRetryRecords(t, `[{"id":1,"CustomerID":1},{"id":2,"CustomerID":2}]`), nil)
+			require.NoError(t, err)
+
+			txn := tbl.NewTransaction()
+			filter := iceberg.EqualTo(iceberg.Reference("customerid"), int64(2))
+			switch tt.operation {
+			case "delete":
+				err = txn.Delete(ctx, filter, nil, table.WithDeleteCaseInsensitive())
+			case "overwrite":
+				err = txn.Overwrite(ctx, caseInsensitiveRetryRecords(t, `[]`), nil,
+					table.WithOverwriteFilter(filter), table.WithOverwriteCaseInsensitive())
+			}
+			require.NoError(t, err)
+
+			_, err = tbl.Append(ctx, caseInsensitiveRetryRecords(t, `[{"id":3,"CustomerID":99}]`), nil)
+			require.NoError(t, err)
+
+			committed, err := txn.Commit(ctx)
+			require.NoError(t, err)
+			require.Equal(t, []int64{1, 3}, idsInTable(t, committed))
+		})
+	}
+}
+
+func caseInsensitiveRetryRecords(t *testing.T, rowsJSON string) array.RecordReader {
+	t.Helper()
+
+	schema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: false},
+		{Name: "CustomerID", Type: arrow.PrimitiveTypes.Int64, Nullable: true},
+	}, nil)
+	data, err := array.TableFromJSON(memory.DefaultAllocator, schema, []string{rowsJSON})
+	require.NoError(t, err)
+	t.Cleanup(data.Release)
+
+	rdr := array.NewTableReader(data, -1)
+	t.Cleanup(rdr.Release)
+
+	return rdr
+}
+
 // TestCopyOnWriteConflict_ConcurrentDeleteOnUntouchedFileCommits pins the
 // validator's scope: a concurrent delete against a data file this commit does
 // not remove must not reject it. v3 deletion vectors carry

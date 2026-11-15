@@ -732,6 +732,12 @@ func dataFilesMissingError(missing []string, state string) error {
 //  3. The surviving files are evaluated against their column metrics so
 //     files whose bounds cannot match the filter are ignored.
 func validateAddedDataFilesMatchingFilter(cc *conflictContext, filter iceberg.BooleanExpression) error {
+	return validateAddedDataFilesMatchingFilterWithCaseSensitivity(cc, filter, cc.caseSensitive)
+}
+
+func validateAddedDataFilesMatchingFilterWithCaseSensitivity(
+	cc *conflictContext, filter iceberg.BooleanExpression, caseSensitive bool,
+) error {
 	if len(cc.concurrent) == 0 {
 		return nil
 	}
@@ -747,19 +753,19 @@ func validateAddedDataFilesMatchingFilter(cc *conflictContext, filter iceberg.Bo
 	// buildPartitionEvaluator) so there is one code path that pruning
 	// semantics flow through.
 	partitionFilters := newKeyDefaultMapWrapErr(func(specID int) (iceberg.BooleanExpression, error) {
-		return buildPartitionProjection(specID, cc.current, cc.current.CurrentSchema(), filter, cc.caseSensitive)
+		return buildPartitionProjection(specID, cc.current, cc.current.CurrentSchema(), filter, caseSensitive)
 	})
 	manifestEvals := newKeyDefaultMapWrapErr(func(specID int) (func(iceberg.ManifestFile) (bool, error), error) {
-		return buildManifestEvaluator(specID, cc.current, cc.current.CurrentSchema(), partitionFilters, cc.caseSensitive)
+		return buildManifestEvaluator(specID, cc.current, cc.current.CurrentSchema(), partitionFilters, caseSensitive)
 	})
 	partitionEvals := newKeyDefaultMapWrapErr(func(specID int) (func(iceberg.DataFile) (bool, error), error) {
-		return buildPartitionEvaluator(specID, cc.current, cc.current.CurrentSchema(), partitionFilters, cc.caseSensitive)
+		return buildPartitionEvaluator(specID, cc.current, cc.current.CurrentSchema(), partitionFilters, caseSensitive)
 	})
 	// Eval copies each file's metrics into fresh evaluator state, so this
 	// evaluator can be reused across concurrent manifests.
 	// includeEmptyFiles=false is intentional: an empty file has no rows that
 	// can match the filter and must not create a conflict.
-	metricsEval, err := newInclusiveMetricsEvaluator(cc.current.CurrentSchema(), filter, cc.caseSensitive, false)
+	metricsEval, err := newInclusiveMetricsEvaluator(cc.current.CurrentSchema(), filter, caseSensitive, false)
 	if err != nil {
 		return fmt.Errorf("failed to build metrics evaluator: %w", err)
 	}

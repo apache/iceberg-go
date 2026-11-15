@@ -902,10 +902,9 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 		// snapshots on a branch that does not yet exist, and
 		// newConflictContext would otherwise return ErrCommitDiverged.
 		if co.branch != "" && len(co.validators) > 0 && current.SnapshotByName(co.branch) != nil {
-			// caseSensitive is hardcoded to true here: transaction-
-			// level case-sensitivity is not yet threaded through the
-			// Commit path, and true is the scan default throughout the
-			// codebase.
+			// Most validators use case-sensitive name binding. Filtered
+			// overwrite producers retain their own setting because Delete
+			// and Overwrite allow case-insensitive binding.
 			cc, ccErr := newConflictContext(ctx, t.metadata, current, co.branch, fs, true)
 			if ccErr != nil {
 				// ErrCommitDiverged — terminal, do not retry. The
