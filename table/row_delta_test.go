@@ -59,29 +59,6 @@ func newRowDeltaTestTable(t *testing.T, formatVersion int) *table.Table {
 	)
 }
 
-func newRowDeltaTestTableWithMemFS(t *testing.T, formatVersion int) *table.Table {
-	t.Helper()
-
-	schema := iceberg.NewSchema(0,
-		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
-		iceberg.NestedField{ID: 2, Name: "data", Type: iceberg.PrimitiveTypes.String, Required: false},
-	)
-	location := "mem://bucket/test"
-	meta, err := table.NewMetadata(schema, iceberg.UnpartitionedSpec,
-		table.UnsortedSortOrder, location,
-		iceberg.Properties{table.PropertyFormatVersion: formatVersionStr(formatVersion)})
-	require.NoError(t, err)
-	fs := iceio.NewMemFS()
-
-	return table.New(
-		table.Identifier{"db", "test_table"},
-		meta,
-		location+"/metadata/v1.metadata.json",
-		func(context.Context) (iceio.IO, error) { return fs, nil },
-		nil,
-	)
-}
-
 func newRowDeltaFloatingPointTestTable(t *testing.T) *table.Table {
 	t.Helper()
 
@@ -184,9 +161,9 @@ func TestRowDeltaRejectsDuplicateDataFilePaths(t *testing.T) {
 		{name: "separate AddRows calls", separate: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			tbl := newRowDeltaTestTableWithMemFS(t, 2)
+			tbl := newRowDeltaTestTable(t, 2)
 			rd := tbl.NewTransaction().NewRowDelta(nil)
-			const path = "mem://bucket/test/data/duplicate.parquet"
+			const path = "s3://bucket/test/data/duplicate.parquet"
 			file := buildDataFile(t, path)
 			if tt.separate {
 				rd.AddRows(file)
