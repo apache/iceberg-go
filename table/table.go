@@ -94,11 +94,13 @@ var ErrCommitRejected = errors.New("commit rejected")
 // concurrent commit removed, a commit branch that became a tag or was
 // deleted, a replaced table, or a staged update that cannot apply after
 // refresh. With snapshot expiry, they also include disabled GC and replanning
-// that changes whether a commit branch other than main is removed. Only the
-// commit branch's head assertion is rebased. A staged update that cannot
-// apply keeps the builder's error as its cause. Transaction.Commit also
-// returns it, on any attempt, when a delete references data files that are
-// missing (ErrDataFilesMissing).
+// that changes whether a commit branch other than main is removed. An expiry
+// replay also becomes unusable if a commit retry refreshes to refs-only
+// snapshot history; load with `snapshot-loading-mode=all` and start a new
+// transaction. Only the commit branch's head assertion is rebased. A staged
+// update that cannot apply keeps the builder's error as its cause.
+// Transaction.Commit also returns it, on any attempt, when a delete references
+// data files that are missing (ErrDataFilesMissing).
 var ErrTransactionUnusable = errors.New("transaction cannot be committed again")
 
 // ErrWriteIORequired is returned by write paths when the table's file system

@@ -139,7 +139,7 @@ Per-release notes (highlights, breaking changes, contributors) are published on 
 - **Commit rejections now match `table.ErrCommitRejected`.** SQL, Glue, Hive and Hadoop failures while preparing metadata, plus REST commit responses 400, 401, 403 and 404, leave transactions committable (after a REST 404, the next `Commit` fails when it reloads the table). Existing `errors.Is` matches keep working, but SQL, Glue, Hive and Hadoop rejection messages now start with `commit rejected: `, so code that matches error text may need updating.
 - **Float comparisons against literals beyond the float32 range follow IEEE 754.** On a float32 column, `x < 1e100` no longer returns NaN, `+Inf` or NULL rows, and `NOT(x > 1e100)` no longer returns NULL rows. An infinite literal now binds to a float32 infinity, so `x = +Inf` matches `+Inf` rows. Java still folds these comparisons to always true or false, see [apache/iceberg#18700](https://github.com/apache/iceberg/issues/18700).
 
-- **Snapshot expiration requires complete snapshot history.** `Transaction.ExpireSnapshots` now returns an error when REST loaded the table with `snapshot-loading-mode=refs`; reload with `snapshot-loading-mode=all`.
+- **Snapshot expiration requires complete snapshot history.** Staging `Transaction.ExpireSnapshots` fails when REST loaded the table with `snapshot-loading-mode=refs`. A commit retry can also return `table.ErrTransactionUnusable` if its refresh omits history before expiration replay. Reload with `snapshot-loading-mode=all` and start a new transaction.
 
 ## Verifying and producing releases
 
