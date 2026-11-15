@@ -82,6 +82,9 @@ func TestExternalRestCatalogConformance(t *testing.T) {
 		nestedNamespaces, err = strconv.ParseBool(v)
 		require.NoError(t, err, "%s must be a boolean", externalNestedNamespacesEnv)
 	}
+	if !nestedNamespaces {
+		t.Logf("%s not set: skipping the nested namespace tests", externalNestedNamespacesEnv)
+	}
 
 	catalogtest.RunCatalogTests(t, catalogtest.Config{
 		SupportsNamespaceProperties: true,
