@@ -1053,6 +1053,13 @@ func dvPartitionValuesEqual(
 		// it with a newer DV manifest.
 		return partitionValuesEqual(float64(dataFloat), dvFloat)
 	}
+	dataFloat64, dataIsFloat64 := dataValue.(float64)
+	dvFloat32, dvIsFloat32 := dvValue.(float32)
+	if dataIsFloat64 && dvIsFloat32 && partitionFieldIsPromotedFloatIdentity(partitionFieldID, spec, schema) {
+		// A manifest rewrite can instead widen the data manifest while leaving
+		// the older DV manifest at float32 width.
+		return partitionValuesEqual(dataFloat64, float64(dvFloat32))
+	}
 
 	return partitionValuesEqual(dataValue, dvValue)
 }

@@ -775,7 +775,12 @@ func TestDVPartitionsMatchUsesPromotedIdentityType(t *testing.T) {
 		{name: "negative zero promotion", data: float32(math.Copysign(0, -1)), dv: math.Copysign(0, -1), schema: doubleSchema, match: true},
 		{name: "signed zero mismatch", data: float32(math.Copysign(0, -1)), dv: float64(0), schema: doubleSchema},
 		{name: "no promotion in current schema", data: float32(4.5), dv: float64(4.5), schema: floatSchema},
-		{name: "reverse width is not promotion", data: float64(4.5), dv: float32(4.5), schema: doubleSchema},
+		{name: "reverse exact widening", data: float64(float32(0.1)), dv: float32(0.1), schema: doubleSchema, match: true},
+		{name: "reverse widening keeps different double unequal", data: float64(0.1), dv: float32(0.1), schema: doubleSchema},
+		{name: "reverse width promotion", data: float64(4.5), dv: float32(4.5), schema: doubleSchema, match: true},
+		{name: "reverse NaN payloads", data: math.Float64frombits(0x7ff8000000000001), dv: math.Float32frombits(0x7fc00002), schema: doubleSchema, match: true},
+		{name: "reverse negative zero promotion", data: math.Copysign(0, -1), dv: float32(math.Copysign(0, -1)), schema: doubleSchema, match: true},
+		{name: "reverse signed zero mismatch", data: float64(0), dv: float32(math.Copysign(0, -1)), schema: doubleSchema},
 	}
 
 	for _, tt := range tests {
