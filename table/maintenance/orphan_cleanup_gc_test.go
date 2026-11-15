@@ -41,8 +41,9 @@ func orphanCleanupGCTestTable(t *testing.T, fs *iceio.MemFS, props iceberg.Prope
 	require.NoError(t, fs.WriteFile(t.Context(), metadataPath, nil))
 	require.NoError(t, fs.WriteFile(t.Context(), orphan, []byte("orphan")))
 
-	return table.New(table.Identifier{"db", "gc"}, meta, metadataPath,
-		func(context.Context) (iceio.IO, error) { return fs, nil }, nil), orphan
+	fsF := testFSF(fs)
+	catalog := &orphanCleanupTestCatalog{metadata: meta, location: metadataPath, fsF: fsF}
+	return table.New(table.Identifier{"db", "gc"}, meta, metadataPath, fsF, catalog), orphan
 }
 
 func TestOrphanCleanupRespectsGCDisabled(t *testing.T) {

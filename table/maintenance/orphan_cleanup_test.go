@@ -259,6 +259,55 @@ func TestExecuteOrphanCleanupRejectsStalePlanWhenFileBecomesLive(t *testing.T) {
 	require.NoError(t, file.Close())
 }
 
+func TestDeleteOrphanFilesRejectsFileCommittedAfterPlanning(t *testing.T) {
+	ctx := context.Background()
+	fs := iceio.NewMemFS()
+	location := "mem://stale-plan/one-shot"
+	metadataLocation := location + "/metadata/v1.metadata.json"
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+	)
+	meta, err := table.NewMetadata(schema, iceberg.UnpartitionedSpec, table.UnsortedSortOrder, location,
+		iceberg.Properties{table.PropertyFormatVersion: "2"})
+	require.NoError(t, err)
+	fsF := testFSF(fs)
+	catalog := &orphanCleanupTestCatalog{metadata: meta, location: metadataLocation, fsF: fsF}
+	tbl := table.New(table.Identifier{"db", "one_shot_stale_plan"}, meta, metadataLocation, fsF, catalog)
+
+	dataPath := location + "/data/newly-live.parquet"
+	require.NoError(t, fs.WriteFile(ctx, dataPath, []byte("data")))
+	fileBuilder, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec,
+		iceberg.EntryContentData,
+		dataPath,
+		iceberg.ParquetFile,
+		nil,
+		nil,
+		nil,
+		1,
+		int64(len("data")),
+	)
+	require.NoError(t, err)
+
+	catalog.beforeLoad = func() error {
+		catalog.beforeLoad = nil
+		peer := tbl.NewTransaction()
+		if err := peer.AddDataFiles(ctx, []iceberg.DataFile{fileBuilder.Build()}, nil); err != nil {
+			return err
+		}
+		_, err := peer.Commit(ctx)
+
+		return err
+	}
+
+	_, err = DeleteOrphanFiles(ctx, tbl, WithCleanupFilesOlderThan(0))
+	require.ErrorIs(t, err, ErrStaleOrphanCleanupPlan)
+
+	file, err := fs.Open(ctx, dataPath)
+	require.NoError(t, err, "the one-shot API must preserve a file committed after planning")
+	require.NoError(t, file.Close())
+}
+
 func TestExecuteOrphanCleanupRejectsPlanForDifferentTable(t *testing.T) {
 	ctx := context.Background()
 	fs := iceio.NewMemFS()
@@ -2115,7 +2164,11 @@ func TestDeleteOrphanFilesPrefixMismatchModes(t *testing.T) {
 				meta,
 				"s3://bucket/table/metadata/v1.metadata.json",
 				func(context.Context) (iceio.IO, error) { return fsys, nil },
-				nil,
+				&orphanCleanupTestCatalog{
+					metadata: meta,
+					location: "s3://bucket/table/metadata/v1.metadata.json",
+					fsF:      func(context.Context) (iceio.IO, error) { return fsys, nil },
+				},
 			)
 
 			for _, mode := range []PrefixMismatchMode{
@@ -2452,13 +2505,22 @@ type inMemoryCatalog struct {
 // orphanCleanupTestCatalog tracks metadata locations so cleanup tests can
 // model catalog commits between planning and execution.
 type orphanCleanupTestCatalog struct {
-	metadata table.Metadata
-	location string
-	fsF      table.FSysF
-	nextFile int
+	metadata   table.Metadata
+	location   string
+	fsF        table.FSysF
+	nextFile   int
+	beforeLoad func() error
 }
 
 func (c *orphanCleanupTestCatalog) LoadTable(_ context.Context, ident table.Identifier) (*table.Table, error) {
+	if c.beforeLoad != nil {
+		beforeLoad := c.beforeLoad
+		c.beforeLoad = nil
+		if err := beforeLoad(); err != nil {
+			return nil, err
+		}
+	}
+
 	return table.New(ident, c.metadata, c.location, c.fsF, c), nil
 }
 

@@ -327,6 +327,11 @@ func rejectPlanOption(cfg *orphanCleanupConfig, name string) {
 //
 // The table filesystem must implement io.ListableIO so orphan cleanup can
 // fully enumerate candidate files before deciding what is safe to delete.
+// Before deleting, cleanup refreshes metadata and rejects a plan that was
+// already stale at that point. This is a best-effort check: it does not prevent
+// a concurrent commit after refresh. Keep the age threshold longer than the
+// longest expected write; the default is 72 hours. Actual deletion requires a
+// catalog-backed table so cleanup can refresh metadata; dry runs do not.
 // Orphan cleanup, including dry runs, is rejected when garbage collection is disabled via gc.enabled.
 func DeleteOrphanFiles(ctx context.Context, tbl *table.Table, opts ...OrphanCleanupOption) (OrphanCleanupResult, error) {
 	cfg := newOrphanCleanupConfig(opts...)
@@ -345,7 +350,7 @@ func DeleteOrphanFiles(ctx context.Context, tbl *table.Table, opts ...OrphanClea
 		return plan.result(), nil
 	}
 
-	return executeOrphanCleanup(ctx, tbl, plan, cfg)
+	return executeOrphanCleanupPlan(ctx, tbl, plan, cfg)
 }
 
 // PlanOrphanFiles identifies orphan files without deleting anything. The
@@ -365,7 +370,9 @@ func PlanOrphanFiles(ctx context.Context, tbl *table.Table, opts ...OrphanCleanu
 
 // ExecuteOrphanCleanup deletes the files in plan if the table metadata has not
 // changed since planning. Execution requires a catalog-backed table so it can
-// refresh metadata and reject stale plans before deleting files.
+// refresh metadata and reject plans that are already stale. This check does
+// not coordinate with commits that happen after the refresh; use an age
+// threshold longer than the longest expected write (the default is 72 hours).
 // Orphan cleanup is rejected when garbage collection is disabled via gc.enabled.
 func ExecuteOrphanCleanup(ctx context.Context, tbl *table.Table, plan OrphanCleanupPlan, opts ...OrphanCleanupOption) (OrphanCleanupResult, error) {
 	cfg := newExecutionOrphanCleanupConfig(opts...)
@@ -381,6 +388,10 @@ func ExecuteOrphanCleanup(ctx context.Context, tbl *table.Table, plan OrphanClea
 	if cfg.dryRun {
 		return plan.result(), nil
 	}
+	return executeOrphanCleanupPlan(ctx, tbl, plan, cfg)
+}
+
+func executeOrphanCleanupPlan(ctx context.Context, tbl *table.Table, plan OrphanCleanupPlan, cfg *orphanCleanupConfig) (OrphanCleanupResult, error) {
 	if len(plan.orphanFileLocations) == 0 {
 		return plan.result(), nil
 	}
