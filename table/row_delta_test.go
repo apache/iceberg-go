@@ -526,43 +526,21 @@ func TestRowDeltaCommitSingleShot(t *testing.T) {
 	})
 
 	t.Run("deletion vector supersession", func(t *testing.T) {
-		tbl := newRowDeltaCommitTestTableVersion(t, 3)
-		location := tbl.Location()
+		tbl, location, dataPath, dv1 := newTableWithLiveDV(t)
 
-		arrowSc, err := table.SchemaToArrowSchema(tbl.Schema(), nil, false, false)
-		require.NoError(t, err)
-
-		dataPath := location + "/data/data-001.parquet"
-		writeParquetFile(t, dataPath, arrowSc, `[
-			{"id": 1, "data": "alpha"},
-			{"id": 2, "data": "beta"},
-			{"id": 3, "data": "gamma"}
-		]`)
-
+		dv2 := writeDV(t, location, "dv-002.puffin", dataPath, []int64{0, 1})
 		tx := tbl.NewTransaction()
-		require.NoError(t, tx.AddDataFilesByPath(t.Context(), []string{dataPath}, nil, false))
-		tbl, err = tx.Commit(t.Context())
-		require.NoError(t, err)
-
-		dv1 := writeDV(t, location, "dv-001.puffin", dataPath, []int64{1})
-		tx2 := tbl.NewTransaction()
-		require.NoError(t, tx2.NewRowDelta(nil).AddDeletes(dv1).Commit(t.Context()))
-		tbl, err = tx2.Commit(t.Context())
-		require.NoError(t, err)
-
-		dv2 := writeDV(t, location, "dv-002.puffin", dataPath, []int64{1, 2})
-		tx3 := tbl.NewTransaction()
-		rd := tx3.NewRowDelta(nil).AddDeletes(dv2).RemoveDeletes(dv1)
+		rd := tx.NewRowDelta(nil).AddDeletes(dv2).RemoveDeletes(dv1)
 		require.NoError(t, rd.Commit(t.Context()))
 
-		err = rd.Commit(t.Context())
+		err := rd.Commit(t.Context())
 		require.Error(t, err)
 		assert.ErrorIs(t, err, table.ErrInvalidOperation)
 		assert.Contains(t, err.Error(), "already called")
 
-		tbl, err = tx3.Commit(t.Context())
+		tbl, err = tx.Commit(t.Context())
 		require.NoError(t, err)
-		assertRowCount(t, tbl, 1)
+		assertRowCount(t, tbl, 0)
 	})
 
 	t.Run("after a failed first call", func(t *testing.T) {
@@ -598,26 +576,17 @@ func TestRowDeltaRemoveDeletesMissingFromStagedSnapshot(t *testing.T) {
 
 	for _, branch := range []string{table.MainBranch, "feature"} {
 		t.Run(branch, func(t *testing.T) {
-			tbl := newRowDeltaCommitTestTableVersion(t, 3)
-			location := tbl.Location()
-			dataPath := location + "/data/data-001.parquet"
-			tbl = seedRowDeltaDataFile(t, tbl, dataPath, 1, 2, 3)
+			tbl, location, dataPath, dv1 := newTableWithLiveDV(t)
 
-			dv0 := writeDV(t, location, "dv-000.puffin", dataPath, []int64{0})
+			dv2 := writeDV(t, location, "dv-002.puffin", dataPath, []int64{0, 1})
 			tx := tbl.NewTransaction()
-			require.NoError(t, tx.NewRowDelta(nil).AddDeletes(dv0).Commit(t.Context()))
+			require.NoError(t, tx.NewRowDelta(nil).AddDeletes(dv2).RemoveDeletes(dv1).Commit(t.Context()))
 			tbl, err := tx.Commit(t.Context())
 			require.NoError(t, err)
 
-			dv1 := writeDV(t, location, "dv-001.puffin", dataPath, []int64{0, 1})
-			tx = tbl.NewTransaction()
-			require.NoError(t, tx.NewRowDelta(nil).AddDeletes(dv1).RemoveDeletes(dv0).Commit(t.Context()))
-			tbl, err = tx.Commit(t.Context())
-			require.NoError(t, err)
-
-			dv2 := writeDV(t, location, "dv-002.puffin", dataPath, []int64{0, 1, 2})
-			dv3 := writeDV(t, location, "dv-003.puffin", dataPath, []int64{0, 1, 2})
-			neverCommitted := writeDV(t, location, "dv-never.puffin", dataPath, []int64{2})
+			dv3 := writeDV(t, location, "dv-003.puffin", dataPath, []int64{0, 1})
+			dv4 := writeDV(t, location, "dv-004.puffin", dataPath, []int64{0, 1})
+			neverCommitted := writeDV(t, location, "dv-never.puffin", dataPath, []int64{1})
 
 			tests := []struct {
 				name    string
@@ -625,17 +594,17 @@ func TestRowDeltaRemoveDeletesMissingFromStagedSnapshot(t *testing.T) {
 				want    string
 				notWant string
 			}{
-				{"removed earlier in the transaction", dv1, removedEarlier, notInTable},
+				{"removed earlier in the transaction", dv2, removedEarlier, notInTable},
 				{"never committed", neverCommitted, notInTable, removedEarlier},
-				{"removed before the transaction", dv0, notInTable, removedEarlier},
+				{"removed before the transaction", dv1, notInTable, removedEarlier},
 			}
 			for _, tt := range tests {
 				t.Run(tt.name, func(t *testing.T) {
 					tx, err := tbl.NewTransactionOnBranch(branch)
 					require.NoError(t, err)
-					require.NoError(t, tx.NewRowDelta(nil).AddDeletes(dv2).RemoveDeletes(dv1).Commit(t.Context()))
+					require.NoError(t, tx.NewRowDelta(nil).AddDeletes(dv3).RemoveDeletes(dv2).Commit(t.Context()))
 
-					err = tx.NewRowDelta(nil).AddDeletes(dv3).RemoveDeletes(tt.remove).Commit(t.Context())
+					err = tx.NewRowDelta(nil).AddDeletes(dv4).RemoveDeletes(tt.remove).Commit(t.Context())
 					require.Error(t, err)
 					assert.Contains(t, err.Error(), tt.want)
 					assert.NotContains(t, err.Error(), tt.notWant)
