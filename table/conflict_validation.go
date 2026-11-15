@@ -413,9 +413,10 @@ func (c *conflictContext) manifestsFor(snap Snapshot) ([]iceberg.ManifestFile, e
 // branch. It walks the ancestry of the branch's current head back to
 // the writer's base snapshot to enumerate concurrent commits.
 //
-// caseSensitive must match the value the committer used when it bound
-// its filter (typically the scan's case-sensitivity) so
-// partition-spec projection resolves the same column identifiers.
+// caseSensitive is the default used by validators that do not carry an
+// operation-specific setting. Validators for filters with their own binding
+// option must use that option so partition-spec projection resolves the same
+// column identifiers used when the operation was staged.
 //
 // When base and current point at the same snapshot on the branch, the
 // returned context has no concurrent snapshots and validators that

@@ -228,6 +228,56 @@ func TestCaseInsensitiveFiltersRemainBoundAfterConcurrentAppend(t *testing.T) {
 	}
 }
 
+func TestCaseInsensitiveConflictValidationUsesPartitionProjection(t *testing.T) {
+	operations := []struct {
+		name      string
+		overwrite bool
+	}{
+		{name: "delete"},
+		{name: "overwrite", overwrite: true},
+	}
+	scenarios := []struct {
+		name             string
+		appendCustomerID int64
+		wantConflict     bool
+	}{
+		{name: "unrelated partition", appendCustomerID: 99},
+		{name: "matching partition", appendCustomerID: 2, wantConflict: true},
+	}
+	for _, operation := range operations {
+		for _, scenario := range scenarios {
+			operation, scenario := operation, scenario
+			t.Run(operation.name+"/"+scenario.name, func(t *testing.T) {
+				ctx := context.Background()
+				tbl := newPartitionedCaseInsensitiveRetryTable(t, table.WriteModeMergeOnRead)
+				txn := tbl.NewTransaction()
+				filter := iceberg.EqualTo(iceberg.Reference("customerid"), int64(2))
+				var err error
+				if operation.overwrite {
+					err = txn.Overwrite(ctx, caseInsensitiveRetryRecords(t, `[]`), nil,
+						table.WithOverwriteFilter(filter), table.WithOverwriteCaseInsensitive())
+				} else {
+					err = txn.Delete(ctx, filter, nil, table.WithDeleteCaseInsensitive())
+				}
+				require.NoError(t, err)
+
+				concurrentRows := fmt.Sprintf(`[ {"id":3,"CustomerID":%d} ]`, scenario.appendCustomerID)
+				_, err = tbl.Append(ctx, caseInsensitiveRetryRecords(t, concurrentRows), nil)
+				require.NoError(t, err)
+
+				committed, err := txn.Commit(ctx)
+				if scenario.wantConflict {
+					require.ErrorIs(t, err, table.ErrConflictingDataFiles)
+
+					return
+				}
+				require.NoError(t, err)
+				require.Equal(t, []int64{1, 3}, idsInTable(t, committed))
+			})
+		}
+	}
+}
+
 func TestConflictChecksKeepCaseSensitivityPerOperation(t *testing.T) {
 	ctx := context.Background()
 	tbl := newCaseInsensitiveRetryTable(t, table.WriteModeMergeOnRead)
@@ -250,6 +300,21 @@ func TestConflictChecksKeepCaseSensitivityPerOperation(t *testing.T) {
 }
 
 func newCaseInsensitiveRetryTable(t *testing.T, deleteMode string) *table.Table {
+	return newCaseInsensitiveRetryTableWithSpec(t, deleteMode, *iceberg.UnpartitionedSpec)
+}
+
+func newPartitionedCaseInsensitiveRetryTable(t *testing.T, deleteMode string) *table.Table {
+	spec := iceberg.NewPartitionSpecID(0, iceberg.PartitionField{
+		SourceIDs: []int{2},
+		FieldID:   1000,
+		Name:      "customer_id",
+		Transform: iceberg.IdentityTransform{},
+	})
+
+	return newCaseInsensitiveRetryTableWithSpec(t, deleteMode, spec)
+}
+
+func newCaseInsensitiveRetryTableWithSpec(t *testing.T, deleteMode string, spec iceberg.PartitionSpec) *table.Table {
 	t.Helper()
 	ctx := context.Background()
 	location := filepath.ToSlash(t.TempDir())
@@ -257,7 +322,7 @@ func newCaseInsensitiveRetryTable(t *testing.T, deleteMode string) *table.Table 
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
 		iceberg.NestedField{ID: 2, Name: "CustomerID", Type: iceberg.PrimitiveTypes.Int64, Required: false},
 	)
-	meta, err := table.NewMetadata(schema, iceberg.UnpartitionedSpec, table.UnsortedSortOrder, location,
+	meta, err := table.NewMetadata(schema, &spec, table.UnsortedSortOrder, location,
 		iceberg.Properties{
 			table.PropertyFormatVersion:        "2",
 			table.WriteDeleteModeKey:           deleteMode,
