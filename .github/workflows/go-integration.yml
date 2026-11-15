@@ -87,6 +87,8 @@ jobs:
       # conformance suite runs on one matrix leg only.
       - name: Run external REST catalog conformance tests (Apache Polaris)
         if: ${{ matrix.spark.version == '3.5' }}
+        env:
+          REST_CATALOG_NESTED_NAMESPACES: "true"
         run: |
           make integration-setup-polaris
           make integration-external-rest

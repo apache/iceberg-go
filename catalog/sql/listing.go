@@ -81,7 +81,7 @@ func (c *Catalog) listObjectsAll(ctx context.Context, namespace table.Identifier
 	if len(namespace) > 0 {
 		var exists bool
 		var err error
-		ns, exists, err = c.resolveNamespaceKey(ctx, namespace)
+		ns, exists, err = c.resolveListableNamespaceKey(ctx, namespace)
 		if err != nil {
 			return nil, err
 		}
