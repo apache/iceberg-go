@@ -42,6 +42,17 @@ import (
 // use the returned filesystem to remove the file after a confirmed failed
 // commit. A commit with an unknown outcome must retain the file.
 func WriteMetadata(ctx context.Context, metadata Metadata, ioProps iceberg.Properties) (string, icebergio.WriteFileIO, error) {
+	return WriteMetadataWithRegistry(ctx, metadata, ioProps, nil)
+}
+
+// WriteMetadataWithRegistry writes a new view metadata file through the
+// selected FileIO registry. A nil registry uses the process-wide default.
+// The registry pointer is shared; later Register and Unregister calls are
+// visible to this write.
+func WriteMetadataWithRegistry(
+	ctx context.Context, metadata Metadata, ioProps iceberg.Properties,
+	registry *icebergio.Registry,
+) (string, icebergio.WriteFileIO, error) {
 	if err := ctx.Err(); err != nil {
 		return "", nil, err
 	}
@@ -59,7 +70,11 @@ func WriteMetadata(ctx context.Context, metadata Metadata, ioProps iceberg.Prope
 	if err != nil {
 		return "", nil, fmt.Errorf("failed to marshal view metadata: %w", err)
 	}
-	fs, err := icebergio.LoadFS(ctx, ioProps, location)
+	loadFS := icebergio.LoadFS
+	if registry != nil {
+		loadFS = registry.LoadFS
+	}
+	fs, err := loadFS(ctx, ioProps, location)
 	if err != nil {
 		return "", nil, fmt.Errorf("failed to load filesystem for view metadata: %w", err)
 	}

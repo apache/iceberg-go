@@ -69,7 +69,7 @@ func (c *Catalog) UpdateView(ctx context.Context, ident table.Identifier, requir
 		ioProps = make(map[string]string)
 	}
 	maps.Copy(ioProps, metadata.Properties())
-	metadataLocation, fs, err := view.WriteMetadata(ctx, metadata.Metadata, ioProps)
+	metadataLocation, fs, err := view.WriteMetadataWithRegistry(ctx, metadata.Metadata, ioProps, c.ioRegistry)
 	if err != nil {
 		return nil, err
 	}
