@@ -176,20 +176,13 @@ func (s *SqliteCatalogTestSuite) SetupTest() {
 }
 
 // catalogUri returns the file-backed SQLite DSN the whole suite shares, with a
-// busy timeout so every pooled connection waits for a competing writer instead
-// of surfacing SQLITE_BUSY. sqliteshim selects mattn (cgo) or modernc, whose
-// DSN parameters differ; see the NewCatalog documentation on SQLite concurrent
-// writers, which is exactly what the concurrency tests in this suite exercise.
+// busy timeout on every pooled connection; mattn and modernc both read
+// _busy_timeout. The timeout applies where SQLite consults the busy handler: a
+// lock requested before the transaction has read anything. A transaction that
+// reads first and then writes fails with SQLITE_BUSY at once, whatever the
+// timeout.
 func (s *SqliteCatalogTestSuite) catalogUri() string {
-	uri := "file://" + filepath.Join(s.warehouse, "sql-catalog.db")
-	switch sqliteshim.DriverName() {
-	case "sqlite3": // mattn
-		return uri + "?_busy_timeout=5000"
-	case "sqlite": // modernc
-		return uri + "?_pragma=busy_timeout(5000)"
-	default:
-		return uri
-	}
+	return "file://" + filepath.Join(s.warehouse, "sql-catalog.db") + "?_busy_timeout=5000"
 }
 
 func (s *SqliteCatalogTestSuite) confirmNoTables(db *sql.DB) {
