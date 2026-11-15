@@ -1277,8 +1277,14 @@ func (s *SqliteCatalogTestSuite) TestCreateInNamespaceWithOnlyChildren() {
 		}
 
 		viewNS := childrenOnly()
-		s.Require().NoError(createTestView(ctx, cat, append(slices.Clone(viewNS), tableName()), schema,
+		createdView := append(slices.Clone(viewNS), tableName())
+		s.Require().NoError(createTestView(ctx, cat, createdView, schema,
 			view.Representation{SQL: "SELECT 1", Dialect: "spark"}, nil))
+
+		renameViewNS := childrenOnly()
+		movedView := append(slices.Clone(renameViewNS), tableName())
+		_, err = cat.RenameView(ctx, createdView, movedView)
+		s.Require().NoError(err)
 
 		commitNS := childrenOnly()
 		_, _, err = cat.CommitTable(ctx, append(slices.Clone(commitNS), tableName()),
@@ -1295,6 +1301,8 @@ func (s *SqliteCatalogTestSuite) TestCreateInNamespaceWithOnlyChildren() {
 		s.ErrorIs(err, catalog.ErrNoSuchNamespace)
 		s.ErrorIs(createTestView(ctx, cat, append(slices.Clone(missing), tableName()), schema,
 			view.Representation{SQL: "SELECT 1", Dialect: "spark"}, nil), catalog.ErrNoSuchNamespace)
+		_, err = cat.RenameView(ctx, movedView, append(slices.Clone(missing), tableName()))
+		s.ErrorIs(err, catalog.ErrNoSuchNamespace)
 		_, _, err = cat.CommitTable(ctx, append(slices.Clone(missing), tableName()),
 			[]table.Requirement{table.AssertCreate()}, []table.Update{
 				table.NewSetLocationUpdate("file:///tmp/warehouse/" + strings.Join(missing, "/")),

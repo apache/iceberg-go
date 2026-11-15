@@ -1341,11 +1341,11 @@ func (c *Catalog) DropNamespace(ctx context.Context, namespace table.Identifier)
 			return err
 		}
 
-		children, err := c.childNamespacesInTx(ctx, tx, namespace)
+		hasChildren, err := c.hasChildNamespaceInTx(ctx, tx, namespace)
 		if err != nil {
 			return fmt.Errorf("error checking namespace '%s' for child namespaces: %w", nsToDelete, err)
 		}
-		if len(children) > 0 {
+		if hasChildren {
 			return fmt.Errorf("%w: child namespaces exist in namespace %s", catalog.ErrNamespaceNotEmpty, nsToDelete)
 		}
 		if !exists {
@@ -1452,9 +1452,46 @@ func (c *Catalog) ListNamespaces(ctx context.Context, parent table.Identifier) (
 // childNamespacesInTx returns the namespaces one level below parent, or the
 // distinct first levels when parent is empty, as Java's JdbcCatalog does.
 // A namespace counts if it has properties of its own or holds a table or view
-// anywhere below it. LIKE ignores case on some databases, so the levels are
-// compared exactly after the query.
+// anywhere below it.
 func (c *Catalog) childNamespacesInTx(ctx context.Context, tx bun.Tx, parent table.Identifier) ([]table.Identifier, error) {
+	ret := make([]table.Identifier, 0)
+	seen := make(map[string]struct{})
+	err := c.walkNamespacesBelowInTx(ctx, tx, parent, " UNION ", func(child table.Identifier) bool {
+		key := namespaceToString(child)
+		if _, ok := seen[key]; !ok {
+			seen[key] = struct{}{}
+			ret = append(ret, child)
+		}
+
+		return true
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return ret, nil
+}
+
+// hasChildNamespaceInTx reports whether childNamespacesInTx would return
+// anything, and stops reading at the first row that says so.
+func (c *Catalog) hasChildNamespaceInTx(ctx context.Context, tx bun.Tx, parent table.Identifier) (bool, error) {
+	found := false
+	// UNION ALL lets the database hand over the first row without
+	// deduplicating the rest.
+	err := c.walkNamespacesBelowInTx(ctx, tx, parent, " UNION ALL ", func(table.Identifier) bool {
+		found = true
+
+		return false
+	})
+
+	return found, err
+}
+
+// walkNamespacesBelowInTx calls yield with the direct child of parent that
+// each stored namespace below parent belongs to, repeats included, until
+// yield returns false. LIKE ignores case on some databases, so the levels are
+// compared exactly here and not in the query.
+func (c *Catalog) walkNamespacesBelowInTx(ctx context.Context, tx bun.Tx, parent table.Identifier, union string, yield func(table.Identifier) bool) error {
 	tableQuery := tx.NewSelect().Model((*sqlIcebergTable)(nil)).
 		Column("table_namespace").Where("catalog_name = ?", c.name)
 	nsQuery := tx.NewSelect().Model((*sqlIcebergNamespaceProps)(nil)).
@@ -1464,41 +1501,36 @@ func (c *Catalog) childNamespacesInTx(ctx context.Context, tx bun.Tx, parent tab
 		nsQuery = whereNamespaceDescendant(nsQuery, "namespace", parent)
 	}
 
-	rows, err := tx.QueryContext(ctx, tableQuery.String()+" UNION "+nsQuery.String())
+	rows, err := tx.QueryContext(ctx, tableQuery.String()+union+nsQuery.String())
 	if err != nil {
-		return nil, err
+		return err
 	}
+	defer rows.Close()
 
-	var namespaces []string
-	if err := c.db.ScanRows(ctx, rows, &namespaces); err != nil {
-		return nil, err
-	}
-
-	ret := make([]table.Identifier, 0, len(namespaces))
-	seen := make(map[string]struct{}, len(namespaces))
-	for _, n := range namespaces {
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			return err
+		}
 		ident, err := namespaceFromString(n)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		if len(ident) <= len(parent) || !slices.Equal(ident[:len(parent)], parent) {
 			continue
 		}
-		ident = ident[:len(parent)+1]
-		key := namespaceToString(ident)
-		if _, ok := seen[key]; ok {
-			continue
+		if !yield(ident[:len(parent)+1]) {
+			return nil
 		}
-		seen[key] = struct{}{}
-		ret = append(ret, ident)
 	}
 
-	return ret, nil
+	return rows.Err()
 }
 
 // resolveListableNamespaceKey is resolveNamespaceKey for read operations and
-// for creating tables and views in a namespace, where a namespace also exists
-// while it has child namespaces, even without a row of its own. CreateNamespace
+// for creating tables and views in a namespace or renaming them into it, where
+// a namespace also exists while it has child namespaces, even without a row of
+// its own. CreateNamespace
 // and UpdateNamespaceProperties keep the exact check, so CreateNamespace is
 // how such a namespace gets a row.
 func (c *Catalog) resolveListableNamespaceKey(ctx context.Context, namespace table.Identifier) (string, bool, error) {
@@ -1507,14 +1539,14 @@ func (c *Catalog) resolveListableNamespaceKey(ctx context.Context, namespace tab
 		return key, exists, err
 	}
 
-	children, err := withReadTx(ctx, c.db, func(ctx context.Context, tx bun.Tx) ([]table.Identifier, error) {
-		return c.childNamespacesInTx(ctx, tx, namespace)
+	hasChildren, err := withReadTx(ctx, c.db, func(ctx context.Context, tx bun.Tx) (bool, error) {
+		return c.hasChildNamespaceInTx(ctx, tx, namespace)
 	})
 	if err != nil {
 		return "", false, err
 	}
 
-	return key, len(children) > 0, nil
+	return key, hasChildren, nil
 }
 
 // listableNamespaceExistsInTx is the in-transaction counterpart of
@@ -1525,12 +1557,7 @@ func (c *Catalog) listableNamespaceExistsInTx(ctx context.Context, tx bun.Tx, na
 		return exists, err
 	}
 
-	children, err := c.childNamespacesInTx(ctx, tx, namespace)
-	if err != nil {
-		return false, err
-	}
-
-	return len(children) > 0, nil
+	return c.hasChildNamespaceInTx(ctx, tx, namespace)
 }
 
 func (c *Catalog) UpdateNamespaceProperties(ctx context.Context, namespace table.Identifier, removals []string, updates iceberg.Properties) (catalog.PropertiesUpdateSummary, error) {
