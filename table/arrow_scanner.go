@@ -2919,8 +2919,10 @@ type partitionConstantFolder struct {
 	changed    bool
 }
 
-func (*partitionConstantFolder) VisitTrue() iceberg.BooleanExpression  { return iceberg.AlwaysTrue{} }
+func (*partitionConstantFolder) VisitTrue() iceberg.BooleanExpression { return iceberg.AlwaysTrue{} }
+
 func (*partitionConstantFolder) VisitFalse() iceberg.BooleanExpression { return iceberg.AlwaysFalse{} }
+
 func (*partitionConstantFolder) VisitNot(child iceberg.BooleanExpression) iceberg.BooleanExpression {
 	return iceberg.NewNot(child)
 }
