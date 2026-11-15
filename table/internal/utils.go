@@ -231,6 +231,7 @@ type DataFileStatistics struct {
 	NullValueCounts  map[int]int64
 	NanValueCounts   map[int]int64
 	ColAggs          map[int]StatsAgg
+	incompleteBounds map[int]StatsAgg
 	SplitOffsets     []int64
 	EqualityFieldIDs []int
 	// Variant bounds: serialized variant objects keyed by parent variant field id.
@@ -238,9 +239,16 @@ type DataFileStatistics struct {
 	VariantUpperBounds map[int][]byte
 }
 
+// PartitionValue returns the partition value indicated by the available bounds,
+// which lets a caller check a supplied value. ToDataFile requires complete
+// bounds when inferring a value.
 func (d *DataFileStatistics) PartitionValue(field iceberg.PartitionField, sc *iceberg.Schema) any {
-	agg, ok := d.ColAggs[field.FirstSourceID()]
-	if !ok {
+	sourceID := field.FirstSourceID()
+	agg := d.ColAggs[sourceID]
+	if agg == nil {
+		agg = d.incompleteBounds[sourceID]
+	}
+	if agg == nil {
 		return nil
 	}
 
@@ -321,6 +329,10 @@ func (d *DataFileStatistics) ToDataFile(opts DataFileOpts) iceberg.DataFile {
 				// prioritizing caller-supplied value.
 				fieldIDToPartitionData[field.FieldID] = partitionVal
 			case field.Transform.PreservesOrder() && sourceFieldFound:
+				if _, incomplete := d.incompleteBounds[field.FirstSourceID()]; incomplete {
+					panic(fmt.Errorf("%w: cannot infer partition field %q (id %d) from incomplete Parquet bounds; supply a partition value",
+						iceberg.ErrInvalidArgument, field.Name, field.FieldID))
+				}
 				fieldIDToPartitionData[field.FieldID] = d.partitionValueWithSourceType(
 					field, d.ColAggs[field.FirstSourceID()], sourceField.Type)
 			case field.Transform.PreservesOrder():

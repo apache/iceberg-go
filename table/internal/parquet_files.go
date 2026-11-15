@@ -1927,17 +1927,35 @@ func resolveParquetStatsColumns(meta *metadata.FileMetaData, statsCols map[int]S
 	return columns
 }
 
+// ParquetColumnStatsPresence reads the optional fields from the footer because
+// Arrow's typed statistics can report an absent null count as zero or a
+// one-sided bound as a min/max pair.
+func ParquetColumnStatsPresence(meta *metadata.FileMetaData, rowGroup, column int) (nullCount, bounds bool) {
+	chunk := meta.RowGroups[rowGroup].Columns[column].MetaData
+	if chunk == nil || chunk.Statistics == nil {
+		return false, false
+	}
+	stats := chunk.Statistics
+	if meta.Schema.Column(column).ColumnOrder() == parquet.ColumnOrders.TypeDefinedOrder {
+		return stats.IsSetNullCount(), stats.IsSetMinValue() && stats.IsSetMaxValue()
+	}
+
+	return stats.IsSetNullCount(), stats.IsSetMin() && stats.IsSetMax()
+}
+
 func (p parquetFormat) DataFileStatsFromMeta(meta Metadata, statsCols map[int]StatisticsCollector, colMapping map[string]int, variantFieldIDs map[int]struct{}, arrowSchema *arrow.Schema) *DataFileStatistics {
 	pqmeta := meta.(*metadata.FileMetaData)
 	columns := resolveParquetStatsColumns(pqmeta, statsCols, colMapping, variantFieldIDs)
 	var (
-		colSizes        = make(map[int]int64)
-		valueCounts     = make(map[int]int64)
-		splitOffsets    = make([]int64, 0)
-		nullValueCounts = make(map[int]int64)
-		nanValueCounts  = make(map[int]int64)
-		invalidateCol   = make(map[int]struct{})
-		colAggs         = make(map[int]StatsAgg)
+		colSizes         = make(map[int]int64)
+		valueCounts      = make(map[int]int64)
+		splitOffsets     = make([]int64, 0)
+		nullValueCounts  = make(map[int]int64)
+		nanValueCounts   = make(map[int]int64)
+		invalidateCol    = make(map[int]struct{})
+		missingNulls     = make(map[int]struct{})
+		incompleteBounds = make(map[int]StatsAgg)
+		colAggs          = make(map[int]StatsAgg)
 	)
 
 	for rg := range pqmeta.NumRowGroups() {
@@ -2000,11 +2018,14 @@ func (p parquetFormat) DataFileStatsFromMeta(meta Metadata, statsCols map[int]St
 				continue
 			}
 
-			if stats.HasNullCount() {
+			hasNullCount, hasBounds := ParquetColumnStatsPresence(pqmeta, rg, pos)
+			if hasNullCount {
 				nullValueCounts[fieldID] += stats.NullCount()
+			} else {
+				missingNulls[fieldID] = struct{}{}
 			}
 
-			if statsCol.Mode.Typ == MetricModeCounts || !stats.HasMinMax() {
+			if statsCol.Mode.Typ == MetricModeCounts {
 				continue
 			}
 
@@ -2013,6 +2034,13 @@ func (p parquetFormat) DataFileStatsFromMeta(meta Metadata, statsCols map[int]St
 			// injected separately, so skip the generic min/max aggregator here
 			// while still keeping the column's counts, sizes, and null counts.
 			if isGeoType(statsCol.IcebergTyp) {
+				continue
+			}
+			if !hasBounds || !stats.HasMinMax() {
+				if !hasNullCount || stats.NullCount() != colChunk.NumValues() {
+					incompleteBounds[fieldID] = nil
+				}
+
 				continue
 			}
 
@@ -2041,16 +2069,18 @@ func (p parquetFormat) DataFileStatsFromMeta(meta Metadata, statsCols map[int]St
 	}
 
 	slices.Sort(splitOffsets)
-	maps.DeleteFunc(nullValueCounts, func(fieldID int, _ int64) bool {
-		_, ok := invalidateCol[fieldID]
-
-		return ok
-	})
-	maps.DeleteFunc(colAggs, func(fieldID int, _ StatsAgg) bool {
-		_, ok := invalidateCol[fieldID]
-
-		return ok
-	})
+	for fieldID := range invalidateCol {
+		delete(nullValueCounts, fieldID)
+		delete(colAggs, fieldID)
+	}
+	for fieldID := range missingNulls {
+		delete(nullValueCounts, fieldID)
+	}
+	// Keep observed bounds available to validate an explicit partition value.
+	for fieldID := range incompleteBounds {
+		incompleteBounds[fieldID] = colAggs[fieldID]
+		delete(colAggs, fieldID)
+	}
 
 	vlo, vup := p.collectVariantBoundsWithColumns(pqmeta, arrowSchema, colMapping, statsCols, columns)
 
@@ -2062,6 +2092,7 @@ func (p parquetFormat) DataFileStatsFromMeta(meta Metadata, statsCols map[int]St
 		NanValueCounts:     nanValueCounts,
 		SplitOffsets:       splitOffsets,
 		ColAggs:            colAggs,
+		incompleteBounds:   incompleteBounds,
 		VariantLowerBounds: vlo,
 		VariantUpperBounds: vup,
 	}
@@ -2176,11 +2207,12 @@ func (p parquetFormat) collectVariantBoundsWithColumns(meta *metadata.FileMetaDa
 				// Non-null residual entries invalidate the bound unless they are all variant-null.
 				set, serr := cc.StatsSet()
 				st, terr := cc.Statistics()
+				hasNullCount, hasBounds := ParquetColumnStatsPresence(meta, rg, pos)
 				switch {
-				case serr != nil || !set || terr != nil || st == nil || !st.HasNullCount():
+				case serr != nil || !set || terr != nil || st == nil || !hasNullCount:
 					residualBad[path] = true
 				case cc.NumValues()-st.NullCount() > 0:
-					if !st.HasMinMax() || !residualAllVariantNull(st) {
+					if !hasBounds || !st.HasMinMax() || !residualAllVariantNull(st) {
 						residualBad[path] = true
 					}
 				}
@@ -2194,10 +2226,11 @@ func (p parquetFormat) collectVariantBoundsWithColumns(meta *metadata.FileMetaDa
 			}
 			set, serr := cc.StatsSet()
 			st, terr := cc.Statistics()
+			hasNullCount, hasBounds := ParquetColumnStatsPresence(meta, rg, pos)
 			switch {
 			case serr != nil || !set || terr != nil || st == nil:
 				e.invalid = true
-			case st.HasMinMax():
+			case hasBounds && st.HasMinMax():
 				if e.agg == nil {
 					agg, aerr := p.createStatsAgg(e.leaf.icebergType, st.Type().String(), 0)
 					if aerr != nil {
@@ -2209,7 +2242,7 @@ func (p parquetFormat) collectVariantBoundsWithColumns(meta *metadata.FileMetaDa
 					e.agg = agg
 				}
 				e.agg.Update(wrapStatsForType(st, e.leaf.icebergType))
-			case !st.HasNullCount() || cc.NumValues()-st.NullCount() > 0:
+			case !hasNullCount || cc.NumValues()-st.NullCount() > 0:
 				e.invalid = true
 			}
 		}
@@ -2283,11 +2316,14 @@ type RowGroupDictionaryPred struct {
 	PhysBytes [][]byte // one entry for EqualTo; one per value for In
 }
 
+// ParquetRowGroupStatsFn tests a row group using its footer statistics.
+type ParquetRowGroupStatsFn func(meta *metadata.FileMetaData, rowGroup int, columns []int) (bool, error)
+
 // ParquetRowGroupTester combines stats-based, dictionary, and bloom filter row
 // group pruning.
 // Pass it as the tester argument to wrapPqArrowReader.GetRecords.
 type ParquetRowGroupTester struct {
-	StatsFn func(*metadata.RowGroupMetaData, []int) (bool, error)
+	StatsFn ParquetRowGroupStatsFn
 	// StatsFieldIDs limits StatsFn to Parquet columns referenced by the pruning
 	// expression. Nil preserves the historical behavior of using all read columns.
 	// A non-nil empty slice requests no column statistics.
@@ -2515,12 +2551,9 @@ func (w wrapPqArrowReader) GetRecords(ctx context.Context, cols []int, tester an
 				}
 				use = offset >= rangeStart && offset < rangeEnd
 			}
-			if use && (rowGroupTester.StatsFn != nil || bfReader != nil) && rgMeta == nil {
-				rgMeta = fileMeta.RowGroup(rg)
-			}
 			if use && rowGroupTester.StatsFn != nil {
 				var err error
-				use, err = rowGroupTester.StatsFn(rgMeta, statsCols)
+				use, err = rowGroupTester.StatsFn(fileMeta, rg, statsCols)
 				if err != nil {
 					return nil, err
 				}

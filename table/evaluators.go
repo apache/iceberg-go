@@ -926,7 +926,7 @@ func newInclusiveMetricsEvaluator(s *iceberg.Schema, expr iceberg.BooleanExpress
 
 func newParquetRowGroupStatsEvaluator(fileSchema *iceberg.Schema, expr iceberg.BooleanExpression,
 	includeEmptyFiles bool,
-) (func(*metadata.RowGroupMetaData, []int) (bool, error), error) {
+) (internal.ParquetRowGroupStatsFn, error) {
 	rewritten, err := iceberg.RewriteNotExpr(expr)
 	if err != nil {
 		return nil, err
@@ -937,7 +937,7 @@ func newParquetRowGroupStatsEvaluator(fileSchema *iceberg.Schema, expr iceberg.B
 
 func newParquetRowGroupStatsEvaluatorFromRewritten(
 	expr iceberg.BooleanExpression, includeEmptyFiles bool,
-) func(*metadata.RowGroupMetaData, []int) (bool, error) {
+) internal.ParquetRowGroupStatsFn {
 	return (&inclusiveMetricsEval{
 		includeEmptyFiles: includeEmptyFiles,
 		expr:              expr,
@@ -985,7 +985,8 @@ func parquetStatsBounds(stats metadata.TypedStatistics) (lower, upper []byte) {
 	return lower, upper
 }
 
-func (m *inclusiveMetricsEval) TestRowGroup(rgmeta *metadata.RowGroupMetaData, colIndices []int) (bool, error) {
+func (m *inclusiveMetricsEval) TestRowGroup(meta *metadata.FileMetaData, rowGroup int, colIndices []int) (bool, error) {
+	rgmeta := meta.RowGroup(rowGroup)
 	if !m.includeEmptyFiles && rgmeta.NumRows() == 0 {
 		return rowsCannotMatch, nil
 	}
@@ -1029,10 +1030,11 @@ func (m *inclusiveMetricsEval) TestRowGroup(rgmeta *metadata.RowGroupMetaData, c
 
 		fieldID := int(stats.Descr().SchemaNode().FieldID())
 		m.valueCounts[fieldID] = colMeta.NumValues()
-		if stats.HasNullCount() {
+		hasNullCount, hasBounds := internal.ParquetColumnStatsPresence(meta, rowGroup, c)
+		if hasNullCount {
 			m.nullCounts[fieldID] = stats.NullCount()
 		}
-		if stats.HasMinMax() {
+		if hasBounds && stats.HasMinMax() {
 			if m.lowerBounds == nil {
 				// Lower and upper bounds are always allocated together.
 				m.lowerBounds = make(map[int][]byte, len(colIndices))

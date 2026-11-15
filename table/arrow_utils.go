@@ -2158,11 +2158,6 @@ func fileToDataFile(ctx context.Context, fileIO iceio.IO, filePath string, curre
 			panic(fmt.Errorf("%w: cannot infer partition field %q (id %d) with transform %s; supply WithFilePartitionValues",
 				iceberg.ErrInvalidArgument, field.Name, field.FieldID, field.Transform))
 		}
-
-		partitionVal := statistics.PartitionValue(field, currentSchema)
-		if partitionVal != nil {
-			partitionValues[field.FieldID] = partitionVal
-		}
 	}
 
 	return statistics.ToDataFile(tblutils.DataFileOpts{
