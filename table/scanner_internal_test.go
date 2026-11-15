@@ -739,6 +739,8 @@ func TestPartitionsMatchUsesFloatSemantics(t *testing.T) {
 		{name: "float32 signed zero", left: float32(math.Copysign(0, -1)), right: float32(0), match: false},
 		{name: "float64 signed zero", left: math.Copysign(0, -1), right: float64(0), match: false},
 		{name: "float widths differ", left: float32(1), right: float64(1), match: false},
+		{name: "promoted integer widths", left: int32(7), right: int64(7), match: true},
+		{name: "different promoted integer values", left: int32(7), right: int64(8), match: false},
 		{name: "pass-through integer", left: int64(42), right: int64(42), match: true},
 		{name: "pass-through strings differ", left: "a", right: "b", match: false},
 		{name: "nil values", left: nil, right: nil, match: true},

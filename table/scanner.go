@@ -1069,12 +1069,15 @@ func matchDVToData(dataEntry iceberg.ManifestEntry, dvIndex map[string]iceberg.M
 	// A path reference alone does not make a DV applicable: the partition
 	// spec and values must match the data file (Iceberg spec, Scan Planning).
 	if dvFile.SpecID() != dataFile.SpecID() {
-		return nil, fmt.Errorf("%w: deletion vector %s uses partition spec %d, but data file %s uses partition spec %d",
-			ErrInvalidMetadata, dvFile.FilePath(), dvFile.SpecID(), dataFile.FilePath(), dataFile.SpecID())
+		return nil, fmt.Errorf("%w: deletion vector %s uses partition spec %d with partition %v, but data file %s uses partition spec %d with partition %v",
+			ErrInvalidMetadata, dvFile.FilePath(), dvFile.SpecID(), dataFilePartition(dvFile),
+			dataFile.FilePath(), dataFile.SpecID(), dataFilePartition(dataFile))
 	}
-	if !partitionsMatch(dataFilePartition(dataFile), dataFilePartition(dvFile)) {
-		return nil, fmt.Errorf("%w: deletion vector %s partition does not match data file %s",
-			ErrInvalidMetadata, dvFile.FilePath(), dataFile.FilePath())
+	dvPartition := dataFilePartition(dvFile)
+	dataPartition := dataFilePartition(dataFile)
+	if !partitionsMatch(dataPartition, dvPartition) {
+		return nil, fmt.Errorf("%w: deletion vector %s has partition %v, which does not match data file %s partition %v",
+			ErrInvalidMetadata, dvFile.FilePath(), dvPartition, dataFile.FilePath(), dataPartition)
 	}
 
 	return []iceberg.DataFile{dvFile}, nil

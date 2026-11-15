@@ -84,6 +84,7 @@ type (
 	binaryPartitionKey  string
 	float32PartitionKey uint32
 	float64PartitionKey uint64
+	integerPartitionKey int64
 )
 
 const (
@@ -98,6 +99,20 @@ func comparablePartitionKey(value any) any {
 	switch value := value.(type) {
 	case []byte:
 		return binaryPartitionKey(value)
+	case int:
+		return integerPartitionKey(value)
+	case int32:
+		return integerPartitionKey(value)
+	case int64:
+		return integerPartitionKey(value)
+	case iceberg.Date:
+		return integerPartitionKey(value)
+	case iceberg.Time:
+		return integerPartitionKey(value)
+	case iceberg.Timestamp:
+		return integerPartitionKey(value)
+	case iceberg.TimestampNano:
+		return integerPartitionKey(value)
 	case float32:
 		rawBits := math.Float32bits(value)
 		if math.IsNaN(float64(value)) {
@@ -118,9 +133,11 @@ func comparablePartitionKey(value any) any {
 }
 
 func partitionValuesEqual(left, right any) bool {
-	// Supported partition values are primitive literals; []byte is converted to
-	// a string key and float values are converted to comparable width-aware keys
-	// above. The default branch preserves comparable scalar values.
+	// Integer-backed partition values are normalized across manifest decoder
+	// representations and Iceberg integer promotions. []byte is converted to a
+	// string key and floats use width-aware keys so NaNs compare consistently
+	// while signed zero and float width remain significant.
+	// The default branch preserves comparable scalar values.
 	return comparablePartitionKey(left) == comparablePartitionKey(right)
 }
 

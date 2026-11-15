@@ -915,7 +915,7 @@ func TestIncrementalChangelogScanPlansDeletionVectors(t *testing.T) {
 	data := newTestDataFile(t, spec, "mem://default/changelog-dv/data.parquet", map[int]any{1000: int32(1)})
 	posDelete := newTestPosDeleteFileForSpec(t, spec,
 		"mem://default/changelog-dv/pos.parquet", map[int]any{1000: int32(1)}, data.FilePath())
-	dv := newChangelogDeletionVector(t, spec, "mem://default/changelog-dv/dv.puffin", data.FilePath())
+	dv := newChangelogDeletionVector(t, spec, "mem://default/changelog-dv/dv.puffin", data.FilePath(), dataFilePartition(data))
 	tbl := writeChangelogScanTable(t, "changelog-dv", []changelogScanStep{
 		{
 			operation: OpAppend,
@@ -1239,9 +1239,9 @@ func TestIncrementalChangelogScanKeepsSiblingDeletionVector(t *testing.T) {
 	dataA := newTestDataFile(t, spec, "mem://default/changelog-puffin/a.parquet", map[int]any{1000: int32(1)})
 	dataB := newTestDataFile(t, spec, "mem://default/changelog-puffin/b.parquet", map[int]any{1000: int32(2)})
 	puffin := "mem://default/changelog-puffin/both.puffin"
-	dvA := newSharedDeletionVector(t, spec, puffin, dataA.FilePath(), 0)
-	dvB := newSharedDeletionVector(t, spec, puffin, dataB.FilePath(), 64)
-	rewrittenA := newSharedDeletionVector(t, spec, "mem://default/changelog-puffin/a.puffin", dataA.FilePath(), 0)
+	dvA := newSharedDeletionVector(t, spec, puffin, dataA.FilePath(), dataFilePartition(dataA), 0)
+	dvB := newSharedDeletionVector(t, spec, puffin, dataB.FilePath(), dataFilePartition(dataB), 64)
+	rewrittenA := newSharedDeletionVector(t, spec, "mem://default/changelog-puffin/a.puffin", dataA.FilePath(), dataFilePartition(dataA), 0)
 	later := newTestPosDeleteFileForSpec(t, spec,
 		"mem://default/changelog-puffin/later.parquet", map[int]any{1000: int32(2)}, dataB.FilePath())
 	tbl := writeChangelogScanTable(t, "changelog-puffin", []changelogScanStep{
@@ -1408,8 +1408,8 @@ func TestIncrementalChangelogScanReplaceRewritesDVWhenParentExpired(t *testing.T
 	txn, fs := createTestTransactionWithMemIO(t, spec)
 	schema := simpleSchema()
 	data := newTestDataFile(t, spec, "mem://default/changelog-expired-replace/data.parquet", map[int]any{1000: int32(1)})
-	oldDV := newChangelogDeletionVector(t, spec, "mem://default/changelog-expired-replace/old.puffin", data.FilePath())
-	newDV := newChangelogDeletionVector(t, spec, "mem://default/changelog-expired-replace/new.puffin", data.FilePath())
+	oldDV := newChangelogDeletionVector(t, spec, "mem://default/changelog-expired-replace/old.puffin", data.FilePath(), dataFilePartition(data))
+	newDV := newChangelogDeletionVector(t, spec, "mem://default/changelog-expired-replace/new.puffin", data.FilePath(), dataFilePartition(data))
 	expiredParent := int64(1)
 	replaceID := int64(2)
 	overwriteID := int64(3)
@@ -1665,8 +1665,8 @@ func TestEntriesBeforeDropsRemovedDeleteFiles(t *testing.T) {
 
 func TestKeepNewestDeletionVector(t *testing.T) {
 	spec := partitionedSpec()
-	older := newChangelogDeletionVector(t, spec, "older.puffin", "data.parquet")
-	newer := newChangelogDeletionVector(t, spec, "newer.puffin", "data.parquet")
+	older := newChangelogDeletionVector(t, spec, "older.puffin", "data.parquet", nil)
+	newer := newChangelogDeletionVector(t, spec, "newer.puffin", "data.parquet", nil)
 	pos := changelogTestDataFile(t, "pos.parquet", iceberg.EntryContentPosDeletes, iceberg.ParquetFile)
 	got := keepNewestDeletionVector([]iceberg.ManifestEntry{
 		changelogManifestEntry(iceberg.EntryStatusADDED, 1, 1, older),
@@ -1716,7 +1716,7 @@ func changelogSequenceDelete(t *testing.T, spec iceberg.PartitionSpec, kind, pat
 	case "eq":
 		return newChangelogEqDelete(t, spec, path+".parquet", map[int]any{1000: int32(1)}), 2
 	default:
-		return newChangelogDeletionVector(t, spec, path+".puffin", data.FilePath()), 3
+		return newChangelogDeletionVector(t, spec, path+".puffin", data.FilePath(), dataFilePartition(data)), 3
 	}
 }
 
@@ -1773,17 +1773,23 @@ func newChangelogEqDelete(t *testing.T, spec iceberg.PartitionSpec, path string,
 	return builder.EqualityFieldIDs([]int{1}).Build()
 }
 
-func newChangelogDeletionVector(t *testing.T, spec iceberg.PartitionSpec, path, dataPath string) iceberg.DataFile {
+func newChangelogDeletionVector(t *testing.T, spec iceberg.PartitionSpec, path, dataPath string, partition map[int]any) iceberg.DataFile {
 	t.Helper()
 
-	return newSharedDeletionVector(t, spec, path, dataPath, 0)
+	return newSharedDeletionVector(t, spec, path, dataPath, partition, 0)
 }
 
-func newSharedDeletionVector(t *testing.T, spec iceberg.PartitionSpec, path, dataPath string, offset int64) iceberg.DataFile {
+func newSharedDeletionVector(
+	t *testing.T,
+	spec iceberg.PartitionSpec,
+	path, dataPath string,
+	partition map[int]any,
+	offset int64,
+) iceberg.DataFile {
 	t.Helper()
 
 	builder, err := iceberg.NewDataFileBuilder(
-		spec, iceberg.EntryContentPosDeletes, path, iceberg.PuffinFile, nil, nil, nil, 1, 1)
+		spec, iceberg.EntryContentPosDeletes, path, iceberg.PuffinFile, partition, nil, nil, 1, 1)
 	require.NoError(t, err)
 
 	return builder.ReferencedDataFile(dataPath).ContentOffset(offset).ContentSizeInBytes(16).Build()
