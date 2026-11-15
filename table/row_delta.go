@@ -151,10 +151,11 @@ func (rd *RowDelta) RemoveDeletes(files ...iceberg.DataFile) *RowDelta {
 // deletion vector lacks a replacement or is not referenced by the
 // current snapshot, if the delta would leave two live deletion vectors
 // on one data file (a replacement added while the superseded live DV
-// is not removed, or two added replacements for one data file), if a
-// position delete references a data file that an operation staged
-// earlier in the transaction removed (ErrDataFilesMissing), or if the
-// table format version does not support delete files.
+// is not removed, or two added replacements for one data file), if an
+// added data file path appears more than once, if a position delete
+// references a data file that an operation staged earlier in the
+// transaction removed (ErrDataFilesMissing), or if the table format
+// version does not support delete files.
 // Deletes require v2 or later, DVs require v3 or later.
 //
 // With removals present the staged commit is non-replayable: an
@@ -187,11 +188,17 @@ func (rd *RowDelta) Commit(ctx context.Context) error {
 			meta.formatVersion)
 	}
 
+	seenDataFilePaths := make(map[string]struct{}, len(rd.dataFiles))
 	for _, f := range rd.dataFiles {
 		if f.ContentType() != iceberg.EntryContentData {
 			return fmt.Errorf("expected data file, got content type %s: %s",
 				f.ContentType(), f.FilePath())
 		}
+		path := f.FilePath()
+		if _, exists := seenDataFilePaths[path]; exists {
+			return fmt.Errorf("row delta contains duplicate data file path %q", path)
+		}
+		seenDataFilePaths[path] = struct{}{}
 	}
 
 	schema := meta.CurrentSchema()
