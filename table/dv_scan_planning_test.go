@@ -319,7 +319,6 @@ func TestDVMatchingNoMatch(t *testing.T) {
 	assert.Empty(t, matched)
 }
 
-
 func TestMatchDVToDataValidatesPartition(t *testing.T) {
 	const dataPath = "s3://bucket/data/partitioned.parquet"
 	snapshotID, dvSeq := int64(1), int64(5)
@@ -334,26 +333,26 @@ func TestMatchDVToDataValidatesPartition(t *testing.T) {
 		wantError     bool
 	}{
 		{
-			name: "matching partition",
+			name:          "matching partition",
 			dataPartition: map[int]any{1000: int32(4)},
 			dvPartition:   map[int]any{1000: int32(4)},
 			dataSeq:       4,
 		},
 		{
-			name: "different partition values",
+			name:          "different partition values",
 			dataPartition: map[int]any{1000: int32(4)},
 			dvPartition:   map[int]any{1000: int32(5)},
 			dataSeq:       4,
 			wantError:     true,
 		},
 		{
-			name:       "different spec IDs",
-			dvSpecID:   1,
+			name:      "different spec IDs",
+			dvSpecID:  1,
 			dataSeq:   4,
 			wantError: true,
 		},
 		{
-			name: "inapplicable older DV",
+			name:          "inapplicable older DV",
 			dataPartition: map[int]any{1000: int32(4)},
 			dvPartition:   map[int]any{1000: int32(5)},
 			dataSeq:       6,
