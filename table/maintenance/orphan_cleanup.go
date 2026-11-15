@@ -253,8 +253,9 @@ type OrphanCleanupPlan struct {
 	metadataLocation    string
 }
 
-// ErrStaleOrphanCleanupPlan is returned when the table metadata changes after
-// planning. Create a new plan before deleting files.
+// ErrStaleOrphanCleanupPlan marks a plan that cannot be safely executed against
+// the current table. Execution refreshes a copy of the table, so callers must
+// refresh or reload their table before planning again after this error.
 var ErrStaleOrphanCleanupPlan = errors.New("orphan cleanup plan is stale")
 
 // Files returns a copy of the files in the cleanup plan.
@@ -332,6 +333,8 @@ func rejectPlanOption(cfg *orphanCleanupConfig, name string) {
 // a concurrent commit after refresh. Keep the age threshold longer than the
 // longest expected write; the default is 72 hours. Actual deletion requires a
 // catalog-backed table so cleanup can refresh metadata; dry runs do not.
+// If execution returns ErrStaleOrphanCleanupPlan, refresh or reload tbl before
+// retrying so the next plan uses current metadata.
 // Orphan cleanup, including dry runs, is rejected when garbage collection is disabled via gc.enabled.
 func DeleteOrphanFiles(ctx context.Context, tbl *table.Table, opts ...OrphanCleanupOption) (OrphanCleanupResult, error) {
 	cfg := newOrphanCleanupConfig(opts...)
@@ -373,6 +376,8 @@ func PlanOrphanFiles(ctx context.Context, tbl *table.Table, opts ...OrphanCleanu
 // refresh metadata and reject plans that are already stale. This check does
 // not coordinate with commits that happen after the refresh; use an age
 // threshold longer than the longest expected write (the default is 72 hours).
+// If this returns ErrStaleOrphanCleanupPlan, tbl is unchanged; refresh or
+// reload it before planning again.
 // Orphan cleanup is rejected when garbage collection is disabled via gc.enabled.
 func ExecuteOrphanCleanup(ctx context.Context, tbl *table.Table, plan OrphanCleanupPlan, opts ...OrphanCleanupOption) (OrphanCleanupResult, error) {
 	cfg := newExecutionOrphanCleanupConfig(opts...)
