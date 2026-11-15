@@ -1047,7 +1047,7 @@ func dvPartitionValuesEqual(
 ) bool {
 	dataFloat, dataIsFloat32 := dataValue.(float32)
 	dvFloat, dvIsFloat64 := dvValue.(float64)
-	if dataIsFloat32 && dvIsFloat64 && partitionFieldIsPromotedFloatIdentity(partitionFieldID, spec, schema) {
+	if dataIsFloat32 && dvIsFloat64 && partitionFieldAllowsFloatWidening(partitionFieldID, spec, schema) {
 		// Historical manifests keep the float32 representation. Iceberg's
 		// float-to-double promotion widens that value exactly before comparing
 		// it with a newer DV manifest.
@@ -1055,7 +1055,7 @@ func dvPartitionValuesEqual(
 	}
 	dataFloat64, dataIsFloat64 := dataValue.(float64)
 	dvFloat32, dvIsFloat32 := dvValue.(float32)
-	if dataIsFloat64 && dvIsFloat32 && partitionFieldIsPromotedFloatIdentity(partitionFieldID, spec, schema) {
+	if dataIsFloat64 && dvIsFloat32 && partitionFieldAllowsFloatWidening(partitionFieldID, spec, schema) {
 		// A manifest rewrite can instead widen the data manifest while leaving
 		// the older DV manifest at float32 width.
 		return partitionValuesEqual(dataFloat64, float64(dvFloat32))
@@ -1064,7 +1064,7 @@ func dvPartitionValuesEqual(
 	return partitionValuesEqual(dataValue, dvValue)
 }
 
-func partitionFieldIsPromotedFloatIdentity(
+func partitionFieldAllowsFloatWidening(
 	partitionFieldID int,
 	spec *iceberg.PartitionSpec,
 	schema *iceberg.Schema,
@@ -1082,7 +1082,11 @@ func partitionFieldIsPromotedFloatIdentity(
 		}
 
 		sourceField, ok := schema.FindFieldByID(field.SourceIDs[0])
-		return ok && sourceField.Type.Equals(iceberg.PrimitiveTypes.Float64)
+		// Historical partition specs can outlive their source column. If the
+		// source still exists, require the current schema to show the allowed
+		// float-to-double promotion. If it was dropped, the retained identity
+		// field and exact widening comparison are the available type context.
+		return !ok || sourceField.Type.Equals(iceberg.PrimitiveTypes.Float64)
 	}
 
 	return false

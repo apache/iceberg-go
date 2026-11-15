@@ -303,6 +303,25 @@ func TestLocalScanMatchesOldFloatDVAfterRewriteManifests(t *testing.T) {
 	require.Equal(t, 1, rewrittenDataManifests)
 	require.Equal(t, 1, retainedDeleteManifests)
 
+	// Remove the partition field before dropping its source column. The
+	// historical spec remains necessary to interpret the rewritten manifests.
+	specTxn := tbl.NewTransaction()
+	require.NoError(t, specTxn.UpdateSpec(true).RemoveField("score").Commit())
+	tbl, err = specTxn.Commit(ctx)
+	require.NoError(t, err)
+
+	schemaTxn := tbl.NewTransaction()
+	require.NoError(t, schemaTxn.UpdateSchema(true, false).DeleteColumn([]string{"score"}).Commit())
+	tbl, err = schemaTxn.Commit(ctx)
+	require.NoError(t, err)
+	_, hasCurrentSource := tbl.Schema().FindFieldByID(1)
+	require.False(t, hasCurrentSource)
+	currentSpec := tbl.Spec()
+	require.Zero(t, currentSpec.NumFields())
+	historicalSpec := tbl.Metadata().PartitionSpecByID(0)
+	require.NotNil(t, historicalSpec)
+	require.Equal(t, 1, historicalSpec.NumFields())
+
 	for _, projected := range []bool{false, true} {
 		mode := "full"
 		if projected {

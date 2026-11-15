@@ -762,6 +762,7 @@ func TestDVPartitionsMatchUsesPromotedIdentityType(t *testing.T) {
 		iceberg.NestedField{ID: 1, Name: "score", Type: iceberg.PrimitiveTypes.Float64})
 	floatSchema := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "score", Type: iceberg.PrimitiveTypes.Float32})
+	droppedSourceSchema := iceberg.NewSchema(2)
 	tests := []struct {
 		name   string
 		data   any
@@ -775,12 +776,18 @@ func TestDVPartitionsMatchUsesPromotedIdentityType(t *testing.T) {
 		{name: "negative zero promotion", data: float32(math.Copysign(0, -1)), dv: math.Copysign(0, -1), schema: doubleSchema, match: true},
 		{name: "signed zero mismatch", data: float32(math.Copysign(0, -1)), dv: float64(0), schema: doubleSchema},
 		{name: "no promotion in current schema", data: float32(4.5), dv: float64(4.5), schema: floatSchema},
+		{name: "reverse no promotion in current schema", data: float64(4.5), dv: float32(4.5), schema: floatSchema},
 		{name: "reverse exact widening", data: float64(float32(0.1)), dv: float32(0.1), schema: doubleSchema, match: true},
 		{name: "reverse widening keeps different double unequal", data: float64(0.1), dv: float32(0.1), schema: doubleSchema},
 		{name: "reverse width promotion", data: float64(4.5), dv: float32(4.5), schema: doubleSchema, match: true},
 		{name: "reverse NaN payloads", data: math.Float64frombits(0x7ff8000000000001), dv: math.Float32frombits(0x7fc00002), schema: doubleSchema, match: true},
 		{name: "reverse negative zero promotion", data: math.Copysign(0, -1), dv: float32(math.Copysign(0, -1)), schema: doubleSchema, match: true},
 		{name: "reverse signed zero mismatch", data: float64(0), dv: float32(math.Copysign(0, -1)), schema: doubleSchema},
+		{name: "dropped source exact widening", data: float64(float32(0.1)), dv: float32(0.1), schema: droppedSourceSchema, match: true},
+		{name: "dropped source keeps distinct double unequal", data: float64(0.1), dv: float32(0.1), schema: droppedSourceSchema},
+		{name: "dropped source NaN payloads", data: math.Float64frombits(0x7ff8000000000001), dv: math.Float32frombits(0x7fc00002), schema: droppedSourceSchema, match: true},
+		{name: "dropped source negative zero widening", data: math.Copysign(0, -1), dv: float32(math.Copysign(0, -1)), schema: droppedSourceSchema, match: true},
+		{name: "dropped source signed zero mismatch", data: float64(0), dv: float32(math.Copysign(0, -1)), schema: droppedSourceSchema},
 	}
 
 	for _, tt := range tests {
@@ -789,6 +796,16 @@ func TestDVPartitionsMatchUsesPromotedIdentityType(t *testing.T) {
 				dvPartitionsMatch(map[int]any{1000: tt.data}, map[int]any{1000: tt.dv}, &spec, tt.schema))
 		})
 	}
+
+	assert.False(t, dvPartitionsMatch(
+		map[int]any{1001: float64(4.5)}, map[int]any{1001: float32(4.5)}, &spec, droppedSourceSchema),
+		"float widening requires the matching retained partition field ID")
+	bucketSpec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{1}, FieldID: 1000, Name: "score_bucket", Transform: iceberg.BucketTransform{NumBuckets: 8},
+	})
+	assert.False(t, dvPartitionsMatch(
+		map[int]any{1000: float64(4.5)}, map[int]any{1000: float32(4.5)}, &bucketSpec, droppedSourceSchema),
+		"float widening is only allowed for identity partition fields")
 }
 
 func TestMatchEqualityDeletesToDataHandlesBinaryPartitions(t *testing.T) {
