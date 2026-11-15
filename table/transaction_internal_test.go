@@ -579,6 +579,19 @@ func TestExpireSnapshotsWithOlderThanDoesNotExpireSnapshotRefs(t *testing.T) {
 	require.True(t, tagExists, "WithOlderThan must not expire a tag without max-ref-age-ms")
 }
 
+func TestExpireSnapshotsRejectsRefsOnlySnapshotHistory(t *testing.T) {
+	txn := newTransactionWithSnapshotRefs(t)
+	txn.tbl.snapshotHistoryRefsOnly = true
+
+	err := txn.ExpireSnapshots(
+		WithOlderThan(0),
+		WithRetainLast(1),
+		WithPostCommit(false),
+	)
+	require.ErrorContains(t, err, "snapshot-loading-mode=refs")
+	require.ErrorContains(t, err, "snapshot-loading-mode=all")
+}
+
 func TestExpireSnapshotsMaterializesDeferredHistory(t *testing.T) {
 	const historicalID = int64(3051729675574597004)
 

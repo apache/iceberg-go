@@ -827,6 +827,9 @@ func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 	if err := validateGCEnabledForSnapshotExpiration(meta.props); err != nil {
 		return err
 	}
+	if t.tbl.snapshotHistoryRefsOnly {
+		return fmt.Errorf("cannot expire snapshots with incomplete history under REST snapshot-loading-mode=refs; reload with snapshot-loading-mode=all")
+	}
 
 	updates, walked, err := planExpiration(meta, cfg, nowMs)
 	if err != nil {
