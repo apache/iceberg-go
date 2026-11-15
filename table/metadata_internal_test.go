@@ -703,7 +703,8 @@ func TestMetadataV3ParsesUnknownTransforms(t *testing.T) {
 
 	reparsed, err := ParseMetadataBytes(out)
 	require.NoError(t, err)
-	assert.Equal(t, []int{1, 2}, reparsed.PartitionSpec().Field(0).SourceIDs)
+	reparsedSpec := reparsed.PartitionSpec()
+	assert.Equal(t, []int{1, 2}, reparsedSpec.Field(0).SourceIDs)
 }
 
 func TestMetadataV3RoundTripsMultipleSourcesForBuiltInTransform(t *testing.T) {
@@ -717,7 +718,8 @@ func TestMetadataV3RoundTripsMultipleSourcesForBuiltInTransform(t *testing.T) {
 
 	meta, err := ParseMetadataBytes([]byte(data))
 	require.NoError(t, err)
-	assert.Equal(t, []int{1, 2}, meta.PartitionSpec().Field(0).SourceIDs)
+	partitionSpec := meta.PartitionSpec()
+	assert.Equal(t, []int{1, 2}, partitionSpec.Field(0).SourceIDs)
 
 	encoded, err := json.Marshal(meta)
 	require.NoError(t, err)
@@ -725,7 +727,8 @@ func TestMetadataV3RoundTripsMultipleSourcesForBuiltInTransform(t *testing.T) {
 
 	reparsed, err := ParseMetadataBytes(encoded)
 	require.NoError(t, err)
-	assert.Equal(t, []int{1, 2}, reparsed.PartitionSpec().Field(0).SourceIDs)
+	reparsedSpec := reparsed.PartitionSpec()
+	assert.Equal(t, []int{1, 2}, reparsedSpec.Field(0).SourceIDs)
 }
 
 func TestMetadataEqualsIncludesStatistics(t *testing.T) {
