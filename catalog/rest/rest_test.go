@@ -1524,6 +1524,33 @@ func (r *RestCatalogSuite) TestCreateTableInvalidReporterDoesNotHitServer() {
 	r.False(serverHit, "create POST must not be sent when the reporter is invalid")
 }
 
+func (r *RestCatalogSuite) TestCreateTableRejectsMultiSourceBuiltInPartitionField() {
+	var serverHit bool
+	r.mux.HandleFunc("/v1/namespaces/fokko/tables", func(w http.ResponseWriter, req *http.Request) {
+		serverHit = true
+		w.Write([]byte(createTableRestExample))
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	spec := iceberg.NewPartitionSpecID(1, iceberg.PartitionField{
+		SourceIDs: []int{1, 2},
+		FieldID:   1000,
+		Name:      "id_bucket",
+		Transform: iceberg.BucketTransform{NumBuckets: 16},
+	})
+	_, err = cat.CreateTable(
+		context.Background(),
+		catalog.ToIdentifier("fokko", "fokko2"),
+		tableSchemaSimple,
+		catalog.WithPartitionSpec(&spec),
+	)
+
+	r.ErrorIs(err, iceberg.ErrInvalidPartitionSpec)
+	r.False(serverHit, "create POST must not be sent with a built-in transform that has multiple sources")
+}
+
 // TestServerVendedReporterImplIgnored pins that a metrics-reporter-impl vended by
 // the server via /v1/config cannot select — or, with an unregistered name, break
 // — the client's reporter. The client configured none, so the op must succeed and
