@@ -79,7 +79,9 @@ func (p *racePause) await(t *testing.T, what string) {
 	}
 }
 
-func isWriteLock(event *bun.QueryEvent) bool { return event.Query == sqliteWriteLockQuery }
+func isWriteLock(event *bun.QueryEvent) bool {
+	return event.Operation() == "UPDATE" && strings.Contains(event.Query, "catalog_name = catalog_name")
+}
 
 func isNamespaceDelete(event *bun.QueryEvent) bool {
 	return event.Operation() == "DELETE" && strings.Contains(event.Query, "iceberg_namespace_properties")

@@ -318,23 +318,20 @@ func runWriteTx(ctx context.Context, db *bun.DB, opts *sql.TxOptions, fn func(co
 	}
 	defer conn.Close()
 
-	busyTimeout, capped, restore, err := capSQLiteBusyTimeout(ctx, conn)
+	capped, restore, err := capSQLiteBusyTimeout(ctx, conn)
 	if err != nil {
 		return err
 	}
 	defer restore()
 
 	return conn.RunInTx(ctx, opts, func(ctx context.Context, tx bun.Tx) error {
-		if err := lockSQLiteForWrite(ctx, tx, busyTimeout, capped); err != nil {
+		if err := lockSQLiteForWrite(ctx, tx, capped); err != nil {
 			return err
 		}
 
 		return fn(ctx, tx)
 	})
 }
-
-// sqliteWriteLockQuery writes no rows; issuing it takes SQLite's write lock.
-const sqliteWriteLockQuery = "UPDATE iceberg_tables SET catalog_name = catalog_name WHERE 0"
 
 // lockSQLiteForWrite takes SQLite's write lock as the transaction's first statement.
 //
@@ -353,12 +350,29 @@ const sqliteWriteLockQuery = "UPDATE iceberg_tables SET catalog_name = catalog_n
 // capped reports that busy_timeout was lowered to ctx's deadline, so a lock timeout
 // means the deadline ended the wait even if ctx has not yet noticed: busy_timeout is
 // whole milliseconds and can run out just before the deadline does.
-func lockSQLiteForWrite(ctx context.Context, tx bun.Tx, busyTimeout int64, capped bool) error {
-	_, err := tx.ExecContext(ctx, sqliteWriteLockQuery)
+func lockSQLiteForWrite(ctx context.Context, tx bun.Tx, capped bool) error {
+	// The statement writes no rows; issuing it takes the write lock.
+	_, err := tx.NewUpdate().Model((*sqlIcebergTable)(nil)).
+		Set("catalog_name = catalog_name").Where("0").Exec(ctx)
+
+	return classifySQLiteLockError(ctx, err, capped, func() int64 {
+		// Read only now, so an uncontended transaction does not pay for it. A
+		// failed read counts as no busy_timeout, which keeps the error retryable.
+		var busyTimeout int64
+		_ = tx.QueryRowContext(ctx, "PRAGMA busy_timeout").Scan(&busyTimeout)
+
+		return busyTimeout
+	})
+}
+
+// classifySQLiteLockError turns the lock statement's error into what the
+// transaction should do. busyTimeout returns the connection's busy_timeout in
+// milliseconds and is called only for a lock SQLite may have waited on.
+func classifySQLiteLockError(ctx context.Context, err error, capped bool, busyTimeout func() int64) error {
 	switch {
 	case err == nil:
 		return nil
-	case ctx.Err() != nil, capped && isSQLiteLockError(err):
+	case ctx.Err() != nil, capped && isSQLiteBusyError(err):
 		// mattn reports a lock timeout here even when ctx's deadline ended the
 		// wait; keep the context error so callers can match it.
 		cause := context.Cause(ctx)
@@ -367,40 +381,52 @@ func lockSQLiteForWrite(ctx context.Context, tx bun.Tx, busyTimeout int64, cappe
 		}
 
 		return fmt.Errorf("failed to acquire sqlite write lock: %w", errors.Join(cause, err))
-	case busyTimeout > 0 && isSQLiteLockError(err):
+	case isSQLiteReadOnlyError(err):
+		// Nothing can be written, so there is no lock to take and no upgrade to
+		// protect. Carry on without it: reads still return the catalog sentinels,
+		// such as an identifier that already exists, and a real write fails with
+		// the driver's own read-only error.
+		return nil
+	case isSQLiteBusyError(err) && busyTimeout() > 0:
 		return &sqliteLockWaitError{err: err}
 	default:
+		// This includes a shared-cache table lock, which SQLite reports at once
+		// without consulting the busy handler; isRetryableSerializableError
+		// retries it.
 		return fmt.Errorf("failed to acquire sqlite write lock: %w", err)
 	}
 }
 
-// capSQLiteBusyTimeout reads conn's busy_timeout and, when ctx's deadline comes
-// sooner, lowers it to the time remaining. Neither driver interrupts the busy handler
-// when ctx ends, so without the cap a deadline would wait out the full busy_timeout.
-// A cancellation without a deadline still does. restore puts the connection's own
-// busy_timeout back, or discards the connection if it cannot, since the pragma would
-// otherwise outlive this call in the pool.
-func capSQLiteBusyTimeout(ctx context.Context, conn bun.Conn) (int64, bool, func(), error) {
+// capSQLiteBusyTimeout lowers conn's busy_timeout to the time remaining when ctx
+// has a deadline that comes sooner, and reports whether it did. Neither driver
+// interrupts the busy handler when ctx ends, so without the cap a deadline would
+// wait out the full busy_timeout. A cancellation without a deadline still does.
+// restore puts the connection's own busy_timeout back, or discards the connection
+// if it cannot, since the pragma would otherwise outlive this call in the pool.
+func capSQLiteBusyTimeout(ctx context.Context, conn bun.Conn) (bool, func(), error) {
 	noRestore := func() {}
-	var busyTimeout int64
-	if err := conn.QueryRowContext(ctx, "PRAGMA busy_timeout").Scan(&busyTimeout); err != nil {
-		return 0, false, noRestore, fmt.Errorf("failed to read sqlite busy_timeout: %w", err)
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return false, noRestore, nil
 	}
 
-	deadline, ok := ctx.Deadline()
-	if !ok || busyTimeout <= 0 {
-		return busyTimeout, false, noRestore, nil
+	var busyTimeout int64
+	if err := conn.QueryRowContext(ctx, "PRAGMA busy_timeout").Scan(&busyTimeout); err != nil {
+		return false, noRestore, fmt.Errorf("failed to read sqlite busy_timeout: %w", err)
+	}
+	if busyTimeout <= 0 {
+		return false, noRestore, nil
 	}
 	remaining := time.Until(deadline).Milliseconds()
 	if remaining <= 0 {
-		return 0, false, noRestore, fmt.Errorf("failed to acquire sqlite write lock: %w", context.DeadlineExceeded)
+		return false, noRestore, fmt.Errorf("failed to acquire sqlite write lock: %w", context.DeadlineExceeded)
 	}
 	if remaining >= busyTimeout {
-		return busyTimeout, false, noRestore, nil
+		return false, noRestore, nil
 	}
 
 	if _, err := conn.ExecContext(ctx, fmt.Sprintf("PRAGMA busy_timeout = %d", remaining)); err != nil {
-		return 0, false, noRestore, fmt.Errorf("failed to cap sqlite busy_timeout: %w", err)
+		return false, noRestore, fmt.Errorf("failed to cap sqlite busy_timeout: %w", err)
 	}
 	restore := func() {
 		query := fmt.Sprintf("PRAGMA busy_timeout = %d", busyTimeout)
@@ -409,16 +435,28 @@ func capSQLiteBusyTimeout(ctx context.Context, conn bun.Conn) (int64, bool, func
 		}
 	}
 
-	return remaining, true, restore, nil
+	return true, restore, nil
 }
 
-// isSQLiteLockError reports a lock conflict. sqliteshim selects different SQLite
-// drivers by build target; their typed error APIs are incompatible, but both expose
-// these stable messages.
-func isSQLiteLockError(err error) bool {
-	msg := err.Error()
+// sqliteshim selects different SQLite drivers by build target; their typed error
+// APIs are incompatible, but both expose the stable messages matched below.
 
-	return strings.Contains(msg, "database is locked") || strings.Contains(msg, "database table is locked")
+// isSQLiteLockError reports a lock conflict of either kind.
+func isSQLiteLockError(err error) bool {
+	return isSQLiteBusyError(err) || strings.Contains(err.Error(), "database table is locked")
+}
+
+// isSQLiteBusyError reports SQLITE_BUSY, the lock another connection holds on the
+// database file and the only one the busy handler waits on. SQLITE_LOCKED, a
+// shared-cache table lock ("database table is locked"), is not one.
+func isSQLiteBusyError(err error) bool {
+	return strings.Contains(err.Error(), "database is locked")
+}
+
+// isSQLiteReadOnlyError reports SQLITE_READONLY: a read-only file, a mode=ro
+// DSN or PRAGMA query_only.
+func isSQLiteReadOnlyError(err error) bool {
+	return strings.Contains(err.Error(), "readonly database")
 }
 
 // sqliteLockWaitError reports a write lock SQLite did not grant within the
