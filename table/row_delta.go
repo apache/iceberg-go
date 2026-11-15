@@ -632,8 +632,11 @@ func (rd *RowDelta) resolveRemovedDeletes(ctx context.Context, fs iceio.IO, meta
 // validate is the client-side conflict check for a RowDelta commit. It
 // runs on every commit attempt: on attempt 0 cc's base and current
 // state coincide (nothing concurrent to check), and on retries cc
-// reflects the freshly refreshed branch state. Two invariants are
-// enforced:
+// reflects the freshly refreshed branch state. The relevant checks are:
+//
+//   - A data path this RowDelta adds must not have been concurrently added
+//     and remain live. A later concurrent deletion resolves the path without
+//     reporting a conflict.
 //
 //   - Every data file in referenced, the position-delete targets that
 //     Commit did not find among the transaction's staged files
@@ -654,8 +657,8 @@ func (rd *RowDelta) resolveRemovedDeletes(ctx context.Context, fs iceio.IO, meta
 //     type-aware partition evaluation — so only concurrent data files
 //     in the same partitions as the equality deletes are rejected.
 //
-// Fast appends alongside a RowDelta see no validators from RowDelta:
-// data-only commits are as safe as a fastAppend.
+// Data-only RowDelta commits skip the delete-related checks above. The
+// concurrent duplicate-path check still applies on retry.
 func (rd *RowDelta) validate(cc *conflictContext, referenced []string) error {
 	meta, err := rd.txn.txnMeta()
 	if err != nil {
