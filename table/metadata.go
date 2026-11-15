@@ -586,6 +586,7 @@ func MetadataBuilderFromBase(metadata Metadata, currentFileLocation string) (*Me
 		b.partitionStatsList = slices.Collect(metadata.PartitionStatistics())
 		b.encryptionKeyList = slices.Collect(metadata.EncryptionKeys())
 	}
+	b.lastColumnId = columnIDFloor(b.lastColumnId, b.schemaList)
 	b.schemaIndex = buildSchemaIndex(b.schemaList)
 
 	b.partitionSpecIndex = buildPartitionSpecIndex(b.specs)
