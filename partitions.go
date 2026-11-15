@@ -80,6 +80,13 @@ func (p PartitionField) FirstSourceID() int {
 	return p.SourceIDs[0]
 }
 
+// HasMultipleSourcesForBuiltInTransform reports whether this field has
+// multiple source IDs and uses a built-in transform. Unknown transforms may
+// have multiple sources.
+func (p PartitionField) HasMultipleSourcesForBuiltInTransform() bool {
+	return hasMultipleSourcesForBuiltInTransform(p.Transform, p.SourceIDs)
+}
+
 // EscapedName returns the URL-escaped version of the partition field name.
 // initialize() pre-populates escapedName for specs built through a constructor.
 func (p *PartitionField) EscapedName() string {
@@ -91,12 +98,16 @@ func (p *PartitionField) EscapedName() string {
 }
 
 func validatePartitionFieldSourceCount(transform Transform, sourceIDs []int) error {
-	if len(sourceIDs) > 1 && isBuiltInPartitionTransform(transform) {
+	if hasMultipleSourcesForBuiltInTransform(transform, sourceIDs) {
 		return fmt.Errorf("%w: built-in partition transform %s requires exactly one source ID, got %d",
 			ErrInvalidPartitionSpec, transform, len(sourceIDs))
 	}
 
 	return nil
+}
+
+func hasMultipleSourcesForBuiltInTransform(transform Transform, sourceIDs []int) bool {
+	return len(sourceIDs) > 1 && isBuiltInPartitionTransform(transform)
 }
 
 func (p PartitionField) MarshalJSON() ([]byte, error) {

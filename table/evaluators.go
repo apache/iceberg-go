@@ -803,6 +803,13 @@ func (p *inclusiveProjection) VisitBound(pred iceberg.BoundPredicate) iceberg.Bo
 
 	var result iceberg.BooleanExpression = iceberg.AlwaysTrue{}
 	for _, part := range parts {
+		if part.HasMultipleSourcesForBuiltInTransform() {
+			// Historical malformed fields remain readable, but their unary
+			// transform semantics are unknown. Do not let them prune manifests or
+			// files based on a projection that assumes only the first source.
+			continue
+		}
+
 		// consider (d = 2019-01-01) with bucket(7, d) and bucket(5, d)
 		// projections: b1 = bucket(7, '2019-01-01') = 5, b2 = bucket(5, '2019-01-01') = 0
 		// any value where b1 != 5 or any value where b2 != 0 cannot be the '2019-01-01'

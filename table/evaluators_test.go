@@ -19,6 +19,7 @@ package table
 
 import (
 	"encoding/binary"
+	"encoding/json"
 	"math"
 	"testing"
 
@@ -1309,6 +1310,65 @@ func (p *ProjectionTestSuite) TestMixedSpecUnknownTransformProjection() {
 	expr, err := project(iceberg.EqualTo(iceberg.Reference("id"), int64(5)))
 	p.Require().NoError(err)
 	p.True(expr.Equals(iceberg.EqualTo(iceberg.Reference("id_bucket"), int32(3))))
+}
+
+func (p *ProjectionTestSuite) TestInvalidBuiltInMultiSourceFieldDoesNotPrune() {
+	schema := p.schema()
+	filter := iceberg.EqualTo(iceberg.Reference("data"), "val")
+	singleSourceSpec := iceberg.NewPartitionSpecID(1, iceberg.PartitionField{
+		SourceIDs: []int{2}, FieldID: 1000, Name: "data_bucket",
+		Transform: iceberg.BucketTransform{NumBuckets: 16},
+	})
+	singleProjection, err := newInclusiveProjection(schema, singleSourceSpec, true)(filter)
+	p.Require().NoError(err)
+	singleEvaluator, err := newManifestEvaluator(singleSourceSpec, schema, singleProjection, true)
+	p.Require().NoError(err)
+
+	// Find a bucket summary that the ordinary one-source projection excludes.
+	// Reusing that summary with the malformed historical spec proves that the
+	// malformed field no longer produces the unsafe unary projection.
+	var excludedManifest iceberg.ManifestFile
+	for bucket := int32(0); bucket < 16; bucket++ {
+		bound, err := iceberg.Int32Literal(bucket).MarshalBinary()
+		p.Require().NoError(err)
+		manifest := iceberg.NewManifestBuilder(2, "manifest.avro", 0, 1, 1).
+			Partitions([]iceberg.FieldSummary{{
+				ContainsNull: false,
+				LowerBound:   &bound,
+				UpperBound:   &bound,
+			}}).Build()
+		matches, err := singleEvaluator(manifest)
+		p.Require().NoError(err)
+		if !matches {
+			excludedManifest = manifest
+			break
+		}
+	}
+	p.Require().NotNil(excludedManifest, "a non-matching bucket should be excluded by the valid spec")
+
+	var malformedSpec iceberg.PartitionSpec
+	p.Require().NoError(json.Unmarshal([]byte(`{"spec-id":1,"fields":[{"source-ids":[2,1],"field-id":1000,"name":"data_bucket","transform":"bucket[16]"}]}`), &malformedSpec))
+	projected, err := newInclusiveProjection(schema, malformedSpec, true)(filter)
+	p.Require().NoError(err)
+	p.Equal(iceberg.AlwaysTrue{}, projected)
+
+	malformedEvaluator, err := newManifestEvaluator(malformedSpec, schema, projected, true)
+	p.Require().NoError(err)
+	matches, err := malformedEvaluator(excludedManifest)
+	p.Require().NoError(err)
+	p.True(matches, "a malformed historical transform must not prune a manifest")
+
+	mixedSpec := iceberg.NewPartitionSpecID(1,
+		malformedSpec.Field(0),
+		iceberg.PartitionField{
+			SourceIDs: []int{2}, FieldID: 1001, Name: "safe_bucket",
+			Transform: iceberg.BucketTransform{NumBuckets: 16},
+		},
+	)
+	mixedProjection, err := newInclusiveProjection(schema, mixedSpec, true)(filter)
+	p.Require().NoError(err)
+	p.True(iceberg.EqualTo(iceberg.Reference("safe_bucket"), int32(14)).Equals(mixedProjection),
+		"valid fields should remain available for pruning")
 }
 
 func (p *ProjectionTestSuite) TestProjectEmptySpec() {

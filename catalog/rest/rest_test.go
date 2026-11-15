@@ -1552,6 +1552,61 @@ func (r *RestCatalogSuite) TestCreateTableRejectsMultiSourceBuiltInPartitionFiel
 	r.False(serverHit, "create POST must not be sent with a built-in transform that has multiple sources")
 }
 
+func (r *RestCatalogSuite) TestCreateTableStagedInvalidAddSpecDoesNotCreateStagedTable() {
+	var createCalled bool
+	r.mux.HandleFunc("/v1/namespaces/db/tables", func(w http.ResponseWriter, req *http.Request) {
+		if req.Method == http.MethodPost {
+			createCalled = true
+		}
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{ID: 2, Name: "other_id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+	)
+	badSpec := iceberg.NewPartitionSpecID(1, iceberg.PartitionField{
+		SourceIDs: []int{1, 2},
+		FieldID:   1000,
+		Name:      "id_bucket",
+		Transform: iceberg.BucketTransform{NumBuckets: 16},
+	})
+
+	_, err = cat.CreateTable(context.Background(), table.Identifier{"db", "test_table"}, schema,
+		catalog.WithStagedUpdates(table.NewAddPartitionSpecUpdate(&badSpec, false)))
+	r.ErrorIs(err, iceberg.ErrInvalidPartitionSpec)
+	r.False(createCalled, "the initial create POST must not run when staged updates cannot be encoded")
+}
+
+func (r *RestCatalogSuite) TestCreateTableAllowsMultiSourceUnknownTransform() {
+	var createCalled bool
+	r.mux.HandleFunc("/v1/namespaces/fokko/tables", func(w http.ResponseWriter, req *http.Request) {
+		if req.Method != http.MethodPost {
+			return
+		}
+		createCalled = true
+		_, _ = w.Write([]byte(createTableRestExample))
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+	transform, err := iceberg.ParseTransform("custom_two_arg")
+	r.Require().NoError(err)
+	spec := iceberg.NewPartitionSpecID(1, iceberg.PartitionField{
+		SourceIDs: []int{1, 2},
+		FieldID:   1000,
+		Name:      "combined",
+		Transform: transform,
+	})
+
+	_, err = cat.CreateTable(context.Background(), catalog.ToIdentifier("fokko", "fokko2"), tableSchemaSimple,
+		catalog.WithPartitionSpec(&spec))
+	r.Require().NoError(err)
+	r.True(createCalled, "unknown multi-source transforms should still reach the REST server")
+}
+
 // TestServerVendedReporterImplIgnored pins that a metrics-reporter-impl vended by
 // the server via /v1/config cannot select — or, with an unregistered name, break
 // — the client's reporter. The client configured none, so the op must succeed and
