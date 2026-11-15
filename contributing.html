@@ -284,6 +284,7 @@ make integration-external-rest
 <pre><code class="language-bash">REST_CATALOG_URI=http://localhost:8181 REST_CATALOG_CREDENTIAL= REST_CATALOG_SCOPE= REST_CATALOG_WAREHOUSE= \
   make integration-external-rest
 </code></pre>
+<p>The nested namespace tests are off by default. Set <code>REST_CATALOG_NESTED_NAMESPACES=true</code> to run them against a catalog that lists only direct children and refuses to drop a namespace with children; CI sets it for Polaris.</p>
 
                     </main>
 
