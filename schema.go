@@ -138,7 +138,7 @@ func (s *Schema) ValidateIdentifierFields() error {
 			return fmt.Errorf("%w: identifier field %q must be required", ErrInvalidSchema, field.Name)
 		}
 		switch field.Type.(type) {
-		case Float32Type, Float64Type:
+		case Float32Type, Float64Type, *Float32Type, *Float64Type:
 			return fmt.Errorf("%w: identifier field %q cannot be float or double", ErrInvalidSchema, field.Name)
 		}
 
