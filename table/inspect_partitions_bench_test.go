@@ -63,17 +63,17 @@ func benchmarkInspectPartitionAggregation(
 	b.ReportAllocs()
 	b.ReportMetric(float64(len(files)), "files/op")
 	for b.Loop() {
-		tree := newInspectPartitionAggregateTree()
+		tree := newPartitionAggregateTree()
 		aggregateCount := 0
 		for _, file := range files {
-			var aggregate *inspectPartitionAggregate
+			var aggregate *partitionAggregate
 			if materialize {
-				partition := inspectCoercePartition(file.Partition(), partitionType)
+				partition := coercePartition(file.Partition(), partitionType)
 				record := newPartitionRecord(partition, partitionType)
 				aggregate = tree.lookup(record)
 				if aggregate == nil {
-					aggregate = &inspectPartitionAggregate{
-						partition:   cloneInspectPartition(partition),
+					aggregate = &partitionAggregate{
+						partition:   clonePartition(partition),
 						orderingKey: inspectPartitionKey(partition),
 					}
 					tree.insert(record, aggregate)
@@ -83,10 +83,10 @@ func benchmarkInspectPartitionAggregation(
 				partitionValues := dataFilePartition(file)
 				aggregate = tree.lookupPartition(partitionValues, partitionType)
 				if aggregate == nil {
-					partition := inspectCoercePartition(partitionValues, partitionType)
+					partition := coercePartition(partitionValues, partitionType)
 					record := newPartitionRecord(partition, partitionType)
-					aggregate = &inspectPartitionAggregate{
-						partition:   cloneInspectPartition(partition),
+					aggregate = &partitionAggregate{
+						partition:   clonePartition(partition),
 						orderingKey: inspectPartitionKey(partition),
 					}
 					tree.insert(record, aggregate)
@@ -166,7 +166,7 @@ func BenchmarkInspectPartitionBinaryLookup(b *testing.B) {
 	}
 	partitionType := iceberg.NewStructType(fields...)
 
-	tree := newInspectPartitionAggregateTree()
+	tree := newPartitionAggregateTree()
 	partitions := make([]map[int]any, partitionCount)
 	for i := range partitions {
 		record := make(partitionRecord, fieldCount)
@@ -176,7 +176,7 @@ func BenchmarkInspectPartitionBinaryLookup(b *testing.B) {
 			record[j] = value
 			partition[field.ID] = value
 		}
-		tree.insert(record, &inspectPartitionAggregate{})
+		tree.insert(record, &partitionAggregate{})
 		partitions[i] = partition
 	}
 
