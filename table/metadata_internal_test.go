@@ -673,7 +673,7 @@ func TestMetadataRequiredFields(t *testing.T) {
 func TestMetadataV3ParsesUnknownTransforms(t *testing.T) {
 	j := strings.NewReplacer(
 		`{"name": "x", "transform": "identity", "source-id": 1, "field-id": 1000}`,
-		`{"name": "x", "transform": "custom_transform[42]", "source-id": 1, "field-id": 1000}`,
+		`{"name": "x", "transform": "custom_transform[42]", "source-ids": [1, 2], "field-id": 1000}`,
 		`{"transform": "bucket[4]", "source-id": 3, "direction": "desc", "null-order": "nulls-last"}`,
 		`{"transform": "custom_sort[7]", "source-id": 3, "direction": "desc", "null-order": "nulls-last"}`,
 	).Replace(ExampleTableMetadataV3)
@@ -686,6 +686,7 @@ func TestMetadataV3ParsesUnknownTransforms(t *testing.T) {
 	_, ok := pf.Transform.(iceberg.UnknownTransform)
 	assert.True(t, ok, "unknown partition transform should load")
 	assert.Equal(t, "custom_transform[42]", pf.Transform.String())
+	assert.Equal(t, []int{1, 2}, pf.SourceIDs)
 
 	sf := meta.SortOrder().Field(1)
 	_, ok = sf.Transform.(iceberg.UnknownTransform)
@@ -697,7 +698,26 @@ func TestMetadataV3ParsesUnknownTransforms(t *testing.T) {
 	out, err := json.Marshal(meta)
 	require.NoError(t, err)
 	assert.Contains(t, string(out), "custom_transform[42]")
+	assert.Contains(t, string(out), `"source-ids":[1,2]`)
 	assert.Contains(t, string(out), "custom_sort[7]")
+
+	reparsed, err := ParseMetadataBytes(out)
+	require.NoError(t, err)
+	assert.Equal(t, []int{1, 2}, reparsed.PartitionSpec().Field(0).SourceIDs)
+}
+
+func TestMetadataV3RejectsMultipleSourcesForBuiltInTransform(t *testing.T) {
+	data := strings.Replace(
+		ExampleTableMetadataV3,
+		`{"name": "x", "transform": "identity", "source-id": 1, "field-id": 1000}`,
+		`{"name": "x", "transform": "bucket[16]", "source-ids": [1, 2], "field-id": 1000}`,
+		1,
+	)
+	require.NotEqual(t, ExampleTableMetadataV3, data)
+
+	_, err := ParseMetadataBytes([]byte(data))
+	require.ErrorIs(t, err, iceberg.ErrInvalidPartitionSpec)
+	assert.ErrorContains(t, err, "requires exactly one source ID, got 2")
 }
 
 func TestMetadataEqualsIncludesStatistics(t *testing.T) {
