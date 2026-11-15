@@ -249,6 +249,7 @@ type OrphanCleanupPlan struct {
 	orphanFiles         []OrphanFile
 	totalSizeBytes      int64
 	cutoff              time.Time
+	tableUUID           string
 	metadataLocation    string
 }
 
@@ -394,6 +395,13 @@ func ExecuteOrphanCleanup(ctx context.Context, tbl *table.Table, plan OrphanClea
 	if plan.metadataLocation == "" {
 		return OrphanCleanupResult{}, fmt.Errorf("%w: plan has no metadata location", ErrStaleOrphanCleanupPlan)
 	}
+	if plan.tableUUID == "" {
+		return OrphanCleanupResult{}, fmt.Errorf("%w: plan has no table UUID", ErrStaleOrphanCleanupPlan)
+	}
+	if currentUUID := refreshed.Metadata().TableUUID().String(); currentUUID != plan.tableUUID {
+		return OrphanCleanupResult{}, fmt.Errorf("%w: table UUID changed from %q to %q",
+			ErrStaleOrphanCleanupPlan, plan.tableUUID, currentUUID)
+	}
 	if refreshed.MetadataLocation() != plan.metadataLocation {
 		return OrphanCleanupResult{}, fmt.Errorf("%w: metadata location changed from %q to %q",
 			ErrStaleOrphanCleanupPlan, plan.metadataLocation, refreshed.MetadataLocation())
@@ -470,6 +478,7 @@ func planOrphanFiles(ctx context.Context, tbl *table.Table, cfg *orphanCleanupCo
 		return OrphanCleanupPlan{}, err
 	}
 	plan.cutoff = cutoff
+	plan.tableUUID = tbl.Metadata().TableUUID().String()
 	plan.metadataLocation = tbl.MetadataLocation()
 
 	return plan, nil

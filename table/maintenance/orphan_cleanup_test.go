@@ -259,6 +259,66 @@ func TestExecuteOrphanCleanupRejectsStalePlanWhenFileBecomesLive(t *testing.T) {
 	require.NoError(t, file.Close())
 }
 
+func TestExecuteOrphanCleanupRejectsPlanForDifferentTable(t *testing.T) {
+	ctx := context.Background()
+	fs := iceio.NewMemFS()
+	location := "mem://stale-plan/same-location"
+	metadataLocation := location + "/metadata/v1.metadata.json"
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+	)
+	firstMeta, err := table.NewMetadata(schema, iceberg.UnpartitionedSpec, table.UnsortedSortOrder, location,
+		iceberg.Properties{table.PropertyFormatVersion: "2"})
+	require.NoError(t, err)
+	fsF := testFSF(fs)
+	firstCatalog := &orphanCleanupTestCatalog{metadata: firstMeta, location: metadataLocation, fsF: fsF}
+	firstTable := table.New(table.Identifier{"db", "first"}, firstMeta, metadataLocation, fsF, firstCatalog)
+
+	dataPath := location + "/data/shared.parquet"
+	require.NoError(t, fs.WriteFile(ctx, dataPath, []byte("data")))
+	plan, err := PlanOrphanFiles(ctx, firstTable, WithCleanupFilesOlderThan(0))
+	require.NoError(t, err)
+	require.Equal(t, []string{dataPath}, plan.Files())
+
+	secondMeta, err := table.NewMetadata(schema, iceberg.UnpartitionedSpec, table.UnsortedSortOrder, location,
+		iceberg.Properties{table.PropertyFormatVersion: "2"})
+	require.NoError(t, err)
+	require.NotEqual(t, firstMeta.TableUUID(), secondMeta.TableUUID())
+	secondCatalog := &orphanCleanupTestCatalog{metadata: secondMeta, location: metadataLocation, fsF: fsF}
+	secondTable := table.New(table.Identifier{"db", "second"}, secondMeta, metadataLocation, fsF, secondCatalog)
+
+	_, err = ExecuteOrphanCleanup(ctx, secondTable, plan)
+	require.ErrorIs(t, err, ErrStaleOrphanCleanupPlan)
+
+	file, err := fs.Open(ctx, dataPath)
+	require.NoError(t, err, "a plan from another table must not delete this file")
+	require.NoError(t, file.Close())
+}
+
+func TestExecuteOrphanCleanupRequiresCatalogForNonEmptyPlan(t *testing.T) {
+	ctx := context.Background()
+	fs := iceio.NewMemFS()
+	location := "mem://stale-plan/offline/table"
+	metadataLocation := location + "/metadata/v1.metadata.json"
+	meta, err := table.NewMetadata(iceberg.NewSchema(0), iceberg.UnpartitionedSpec,
+		table.UnsortedSortOrder, location, nil)
+	require.NoError(t, err)
+	tbl := table.New(table.Identifier{"db", "offline"}, meta, metadataLocation, testFSF(fs), nil)
+
+	dataPath := location + "/data/orphan.parquet"
+	require.NoError(t, fs.WriteFile(ctx, dataPath, []byte("data")))
+	plan, err := PlanOrphanFiles(ctx, tbl, WithCleanupFilesOlderThan(0))
+	require.NoError(t, err)
+	require.Equal(t, []string{dataPath}, plan.Files())
+
+	_, err = ExecuteOrphanCleanup(ctx, tbl, plan)
+	require.ErrorIs(t, err, table.ErrInvalidOperation)
+
+	file, err := fs.Open(ctx, dataPath)
+	require.NoError(t, err, "execution must fail before deleting files without a catalog")
+	require.NoError(t, file.Close())
+}
+
 func TestExecuteOrphanCleanupRejectsPlanningOptions(t *testing.T) {
 	tests := []struct {
 		name string
