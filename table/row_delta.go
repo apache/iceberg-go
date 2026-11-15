@@ -48,6 +48,8 @@ import (
 //   - Position deletes: referenced data files must still be reachable
 //     from the current branch head (validateDataFilesExist), unless
 //     this delta or an operation staged before it in the transaction adds them.
+//   - Data additions: on retries, reject paths added by concurrent snapshots
+//     so replay cannot create a second live reference to the same file.
 //   - Equality deletes under write.delete.isolation-level=serializable
 //     (the default): concurrent data files in the same partition(s) as
 //     the equality deletes are rejected. For partitioned tables an
@@ -152,7 +154,8 @@ func (rd *RowDelta) RemoveDeletes(files ...iceberg.DataFile) *RowDelta {
 // current snapshot, if the delta would leave two live deletion vectors
 // on one data file (a replacement added while the superseded live DV
 // is not removed, or two added replacements for one data file), if an
-// added data file path appears more than once, if a position delete
+// added data file path appears more than once in this delta or is added
+// concurrently before a retry, if a position delete
 // references a data file that an operation staged earlier in the
 // transaction removed (ErrDataFilesMissing), or if the table format
 // version does not support delete files.
@@ -675,6 +678,9 @@ func (rd *RowDelta) validate(cc *conflictContext, referenced []string) error {
 	if cc == nil {
 		return nil
 	}
+	if err := rd.validateNoConcurrentDuplicateDataPaths(cc); err != nil {
+		return err
+	}
 
 	// Enforce the v3 single-live-DV invariant against concurrently committed
 	// snapshots. findReplacedLiveDVs caught DVs already live in the base at
@@ -712,6 +718,78 @@ func (rd *RowDelta) validate(cc *conflictContext, referenced []string) error {
 		}
 		if conflictErr != nil {
 			return conflictErr
+		}
+	}
+
+	return nil
+}
+
+// validateNoConcurrentDuplicateDataPaths rejects data paths this RowDelta adds
+// when a concurrent snapshot added the same path and it remains live on the
+// refreshed branch head. Snapshots and their changed manifest entries are
+// examined newest first, so a later concurrent deletion resolves the path
+// without reporting a conflict. This avoids scanning data files inherited from
+// the transaction's base snapshot.
+func (rd *RowDelta) validateNoConcurrentDuplicateDataPaths(cc *conflictContext) error {
+	if len(rd.dataFiles) == 0 || len(cc.concurrent) == 0 {
+		return nil
+	}
+
+	unresolved := make(map[string]struct{}, len(rd.dataFiles))
+	for _, f := range rd.dataFiles {
+		unresolved[f.FilePath()] = struct{}{}
+	}
+
+	for _, snap := range cc.concurrent {
+		if len(unresolved) == 0 {
+			break
+		}
+
+		manifests, err := cc.manifestsFor(snap)
+		if err != nil {
+			return fmt.Errorf("loading manifests for concurrent snapshot %d: %w", snap.SnapshotID, err)
+		}
+
+		// Resolve each candidate path against the newest snapshot that changed
+		// it. Prefer ADDED if a malformed snapshot contains both statuses for
+		// the same path, failing closed on an ambiguous live-file state.
+		changes := make(map[string]iceberg.ManifestEntryStatus)
+		for _, mf := range manifests {
+			if mf.ManifestContent() != iceberg.ManifestContentData || mf.SnapshotID() != snap.SnapshotID ||
+				(mf.AddedDataFiles() == 0 && mf.DeletedDataFiles() == 0) {
+				continue
+			}
+
+			for entry, err := range mf.Entries(cc.ctx, cc.manifestReadIO(), false) {
+				if err != nil {
+					return fmt.Errorf("reading entries from manifest %s: %w", mf.FilePath(), err)
+				}
+				if entry.SnapshotID() != snap.SnapshotID {
+					continue
+				}
+
+				path := entry.DataFile().FilePath()
+				if _, ok := unresolved[path]; !ok {
+					continue
+				}
+
+				switch entry.Status() {
+				case iceberg.EntryStatusADDED:
+					changes[path] = iceberg.EntryStatusADDED
+				case iceberg.EntryStatusDELETED:
+					if _, added := changes[path]; !added {
+						changes[path] = iceberg.EntryStatusDELETED
+					}
+				}
+			}
+		}
+
+		for path, status := range changes {
+			delete(unresolved, path)
+			if status == iceberg.EntryStatusADDED {
+				return fmt.Errorf("%w: snapshot %d added data file %q already added by RowDelta",
+					ErrConflictingDataFiles, snap.SnapshotID, path)
+			}
 		}
 	}
 
