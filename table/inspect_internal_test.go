@@ -1244,7 +1244,7 @@ func TestInspectAllManifestsPreservesSnapshotReferences(t *testing.T) {
 }
 
 func TestInspectAllManifestsStreamsRecordBatches(t *testing.T) {
-	const manifestCount = inspectRecordBatchSize + 1
+	const manifestCount = recordBatchSize + 1
 
 	manifests := make([]iceberg.ManifestFile, manifestCount)
 	for idx := range manifests {
@@ -1266,7 +1266,7 @@ func TestInspectAllManifestsStreamsRecordBatches(t *testing.T) {
 		batchSizes = append(batchSizes, rr.RecordBatch().NumRows())
 	}
 	require.NoError(t, rr.Err())
-	require.Equal(t, []int64{inspectRecordBatchSize, 1}, batchSizes)
+	require.Equal(t, []int64{recordBatchSize, 1}, batchSizes)
 }
 
 func TestInspectAllManifestsAllocator(t *testing.T) {
@@ -1276,7 +1276,7 @@ func TestInspectAllManifestsAllocator(t *testing.T) {
 		next          bool
 	}{
 		{name: "before first batch", manifestCount: 1},
-		{name: "after first batch", manifestCount: inspectRecordBatchSize + 1, next: true},
+		{name: "after first batch", manifestCount: recordBatchSize + 1, next: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			checked := memory.NewCheckedAllocator(memory.DefaultAllocator)
@@ -1871,7 +1871,7 @@ func TestInspectAllEntriesIncludesDeleteManifests(t *testing.T) {
 func TestInspectAllEntriesStreamsBatches(t *testing.T) {
 	spec := *iceberg.UnpartitionedSpec
 	tbl := inspectDataFilesTable(t, spec,
-		inspectDataFileEntries(t, spec, inspectRecordBatchSize+1))
+		inspectDataFileEntries(t, spec, recordBatchSize+1))
 
 	rr, err := tbl.Inspect().AllEntries(context.Background())
 	require.NoError(t, err)
@@ -1882,7 +1882,7 @@ func TestInspectAllEntriesStreamsBatches(t *testing.T) {
 		batchRows = append(batchRows, int(rr.RecordBatch().NumRows()))
 	}
 	require.NoError(t, rr.Err())
-	require.Equal(t, []int{inspectRecordBatchSize, 1}, batchRows)
+	require.Equal(t, []int{recordBatchSize, 1}, batchRows)
 }
 
 func TestInspectAllEntriesEmptyTableEarlyRelease(t *testing.T) {
@@ -2335,8 +2335,8 @@ func TestInspectDataFilesStreamsBatchesAndSkipsDeleted(t *testing.T) {
 	txn, memIO := createTestTransactionWithMemIO(t, spec)
 	schema := simpleSchema()
 
-	entries := make([]iceberg.ManifestEntry, 0, inspectRecordBatchSize+2)
-	for index := range inspectRecordBatchSize + 1 {
+	entries := make([]iceberg.ManifestEntry, 0, recordBatchSize+2)
+	for index := range recordBatchSize + 1 {
 		file := newTestDataFile(t, spec,
 			"mem://default/table-location/data/live-"+strconv.Itoa(index)+".parquet", nil)
 		sequenceNumber := int64(1)
@@ -2389,8 +2389,8 @@ func TestInspectDataFilesStreamsBatchesAndSkipsDeleted(t *testing.T) {
 		}
 	}
 	require.NoError(t, rr.Err())
-	require.Equal(t, []int{inspectRecordBatchSize, 1}, batchRows)
-	require.Len(t, paths, inspectRecordBatchSize+1)
+	require.Equal(t, []int{recordBatchSize, 1}, batchRows)
+	require.Len(t, paths, recordBatchSize+1)
 	require.NotContains(t, paths, deletedPath)
 }
 
@@ -2464,7 +2464,7 @@ func TestInspectDataFilesAllocator(t *testing.T) {
 			t.Cleanup(func() { checked.AssertSize(t, 0) })
 
 			spec := *iceberg.UnpartitionedSpec
-			tbl := inspectDataFilesTable(t, spec, inspectDataFileEntries(t, spec, inspectRecordBatchSize+1))
+			tbl := inspectDataFilesTable(t, spec, inspectDataFileEntries(t, spec, recordBatchSize+1))
 			rr, err := tbl.Inspect(WithInspectAllocator(checked)).DataFiles(context.Background())
 			require.NoError(t, err)
 
@@ -2538,118 +2538,6 @@ func TestAppendContentFileRecordUsesPartitionFieldIDs(t *testing.T) {
 	require.EqualValues(t, 7, partition.Field(1).(*array.Int32).Value(0))
 }
 
-func TestInspectPartitionTypeUsesAllActiveSpecs(t *testing.T) {
-	schema := iceberg.NewSchema(0,
-		iceberg.NestedField{ID: 1, Name: "region", Type: iceberg.PrimitiveTypes.String, Required: true},
-		iceberg.NestedField{ID: 2, Name: "category", Type: iceberg.PrimitiveTypes.String, Required: true},
-	)
-	oldSpec := iceberg.NewPartitionSpecID(0, iceberg.PartitionField{
-		SourceIDs: []int{1}, FieldID: 1000, Name: "region", Transform: iceberg.IdentityTransform{},
-	})
-	newSpec := iceberg.NewPartitionSpecID(1, iceberg.PartitionField{
-		SourceIDs: []int{2}, FieldID: 1001, Name: "category", Transform: iceberg.IdentityTransform{},
-	})
-	lastPartitionID := 1001
-	meta := &metadataV2{commonMetadata: commonMetadata{
-		FormatVersion:   2,
-		UUID:            uuid.New(),
-		LastColumnId:    2,
-		SchemaList:      []*iceberg.Schema{schema},
-		CurrentSchemaID: 0,
-		Specs:           []iceberg.PartitionSpec{oldSpec, newSpec},
-		DefaultSpecID:   1,
-		LastPartitionID: &lastPartitionID,
-		SnapshotRefs:    map[string]SnapshotRef{},
-	}}
-
-	partitionType, err := inspectPartitionType(meta)
-	require.NoError(t, err)
-	require.Equal(t, []int{1000, 1001}, []int{
-		partitionType.Field(0).ID,
-		partitionType.Field(1).ID,
-	})
-	require.Equal(t, []string{"region", "category"}, []string{
-		partitionType.Field(0).Name,
-		partitionType.Field(1).Name,
-	})
-}
-
-func TestInspectPartitionTypeRejectsIncompatibleFieldReuse(t *testing.T) {
-	schema := iceberg.NewSchema(0,
-		iceberg.NestedField{ID: 1, Name: "first", Type: iceberg.PrimitiveTypes.Int32, Required: true},
-		iceberg.NestedField{ID: 2, Name: "second", Type: iceberg.PrimitiveTypes.Int32, Required: true},
-	)
-	metadataFor := func(specs []iceberg.PartitionSpec) Metadata {
-		lastPartitionID := 1000
-
-		return &metadataV2{commonMetadata: commonMetadata{
-			FormatVersion:   2,
-			UUID:            uuid.New(),
-			LastColumnId:    2,
-			SchemaList:      []*iceberg.Schema{schema},
-			CurrentSchemaID: 0,
-			Specs:           specs,
-			DefaultSpecID:   specs[len(specs)-1].ID(),
-			LastPartitionID: &lastPartitionID,
-		}}
-	}
-	field := func(specID, sourceID int, transform iceberg.Transform) iceberg.PartitionSpec {
-		return iceberg.NewPartitionSpecID(specID, iceberg.PartitionField{
-			SourceIDs: []int{sourceID}, FieldID: 1000, Name: "part", Transform: transform,
-		})
-	}
-
-	tests := []struct {
-		name  string
-		specs []iceberg.PartitionSpec
-		valid bool
-	}{
-		{
-			name:  "void transition is compatible",
-			specs: []iceberg.PartitionSpec{field(0, 1, iceberg.IdentityTransform{}), field(1, 1, iceberg.VoidTransform{})},
-			valid: true,
-		},
-		{
-			name:  "pointer void transition is compatible",
-			specs: []iceberg.PartitionSpec{field(0, 1, iceberg.IdentityTransform{}), field(1, 1, &iceberg.VoidTransform{})},
-			valid: true,
-		},
-		{
-			name:  "different source ids",
-			specs: []iceberg.PartitionSpec{field(0, 1, iceberg.IdentityTransform{}), field(1, 2, iceberg.IdentityTransform{})},
-		},
-		{
-			name:  "different transforms",
-			specs: []iceberg.PartitionSpec{field(0, 1, iceberg.IdentityTransform{}), field(1, 1, iceberg.BucketTransform{NumBuckets: 16})},
-		},
-		{
-			name: "void cannot hide incompatible history",
-			specs: []iceberg.PartitionSpec{
-				field(0, 1, iceberg.BucketTransform{NumBuckets: 16}),
-				field(1, 1, iceberg.IdentityTransform{}),
-				field(2, 1, iceberg.VoidTransform{}),
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			_, err := inspectPartitionType(metadataFor(tt.specs))
-			if tt.valid {
-				require.NoError(t, err)
-
-				return
-			}
-			require.ErrorIs(t, err, iceberg.ErrInvalidPartitionSpec)
-		})
-	}
-
-	unknown, err := iceberg.ParseTransform("future_transform")
-	require.NoError(t, err)
-	_, err = inspectPartitionType(metadataFor([]iceberg.PartitionSpec{field(0, 1, unknown)}))
-	require.ErrorIs(t, err, iceberg.ErrInvalidPartitionSpec)
-}
-
 func TestPartitionsSchema(t *testing.T) {
 	partitionType := iceberg.NewStructType(
 		iceberg.NestedField{ID: 1000, Name: "bucket", Type: iceberg.PrimitiveTypes.Int32, Required: true},
@@ -2672,81 +2560,6 @@ func TestPartitionsSchema(t *testing.T) {
 		"position_delete_record_count", "position_delete_file_count", "equality_delete_record_count",
 		"equality_delete_file_count", "last_updated_at", "last_updated_snapshot_id",
 	}, testFieldNames(unpartitioned))
-}
-
-func TestInspectPartitionAggregateTreeHandlesBinaryAndNaNValues(t *testing.T) {
-	tree := newInspectPartitionAggregateTree()
-	aggregate := &inspectPartitionAggregate{specID: 1}
-	record := partitionRecord{[]byte{1, 2, 3}, math.NaN()}
-	tree.insert(record, aggregate)
-
-	require.Same(t, aggregate, tree.lookup(partitionRecord{[]byte{1, 2, 3}, math.NaN()}))
-	require.Nil(t, tree.lookup(partitionRecord{[]byte{1, 2, 4}, math.NaN()}))
-}
-
-func TestInspectPartitionAggregateTreeDistinguishesFloatWidthsAndSignedZero(t *testing.T) {
-	tree := newInspectPartitionAggregateTree()
-	float32Aggregate := &inspectPartitionAggregate{specID: 1}
-	float32Record := partitionRecord{math.Float32frombits(0xffc00001)}
-	tree.insert(float32Record, float32Aggregate)
-
-	require.Same(t, float32Aggregate, tree.lookup(partitionRecord{math.Float32frombits(0x7fc00002)}))
-	require.Nil(t, tree.lookup(partitionRecord{math.Float64frombits(0x7ff8000000000001)}))
-
-	negativeZeroAggregate := &inspectPartitionAggregate{specID: 2}
-	tree.insert(partitionRecord{math.Copysign(0, -1)}, negativeZeroAggregate)
-	require.Same(t, negativeZeroAggregate, tree.lookup(partitionRecord{math.Copysign(0, -1)}))
-	require.Nil(t, tree.lookup(partitionRecord{float64(0)}))
-}
-
-func TestInspectPartitionAggregateTreeLookupPartition(t *testing.T) {
-	partitionType := iceberg.NewStructType(
-		iceberg.NestedField{ID: 1000, Name: "id", Type: iceberg.PrimitiveTypes.Int32},
-		iceberg.NestedField{ID: 1001, Name: "payload", Type: iceberg.PrimitiveTypes.Binary},
-		iceberg.NestedField{ID: 1002, Name: "score", Type: iceberg.PrimitiveTypes.Float64},
-	)
-	partition := map[int]any{
-		1000: int32(7),
-		1001: []byte{1, 2, 3},
-		1002: math.NaN(),
-	}
-	record := newPartitionRecord(inspectCoercePartition(partition, partitionType), partitionType)
-	aggregate := &inspectPartitionAggregate{specID: 1}
-	tree := newInspectPartitionAggregateTree()
-	tree.insert(record, aggregate)
-
-	require.Same(t, aggregate, tree.lookupPartition(partition, partitionType))
-	require.Nil(t, tree.lookupPartition(map[int]any{
-		1000: int32(7),
-		1001: []byte{1, 2, 4},
-		1002: math.NaN(),
-	}, partitionType))
-
-	// A file written with an older partition spec does not have the field
-	// added by a later spec. Both lookup paths must key the missing field as nil.
-	evolvedPartition := map[int]any{
-		1000: int32(7),
-		1002: math.NaN(),
-	}
-	evolvedRecord := newPartitionRecord(inspectCoercePartition(evolvedPartition, partitionType), partitionType)
-	evolvedAggregate := &inspectPartitionAggregate{specID: 2}
-	tree.insert(evolvedRecord, evolvedAggregate)
-
-	require.Same(t, evolvedAggregate, tree.lookupPartition(evolvedPartition, partitionType))
-	require.Same(t, evolvedAggregate, tree.lookup(evolvedRecord))
-}
-
-func TestCloneInspectPartitionClonesBinaryValues(t *testing.T) {
-	value := []byte{1, 2, 3}
-	cloned := cloneInspectPartition(map[int]any{1000: value})
-
-	value[0] = 4
-	require.Equal(t, []byte{1, 2, 3}, cloned[1000])
-
-	clonedValue := cloned[1000].([]byte)
-	clonedValue[1] = 5
-
-	require.Equal(t, []byte{4, 2, 3}, value)
 }
 
 func TestInspectPartitionsAggregatesDataAndDeletes(t *testing.T) {
@@ -3218,7 +3031,7 @@ func TestInspectPositionDeletesDefersLaterManifestReads(t *testing.T) {
 	dataPath := "mem://position-deletes/table/data/data.parquet"
 	var deleteRows bytes.Buffer
 	deleteRows.WriteByte('[')
-	for pos := range inspectRecordBatchSize {
+	for pos := range recordBatchSize {
 		if pos > 0 {
 			deleteRows.WriteByte(',')
 		}
@@ -3234,7 +3047,7 @@ func TestInspectPositionDeletesDefersLaterManifestReads(t *testing.T) {
 		*iceberg.UnpartitionedSpec, tableSchema, snapshotID, iceberg.ManifestContentDeletes,
 		[]iceberg.ManifestEntry{iceberg.NewManifestEntry(
 			iceberg.EntryStatusADDED, &snapshotID, &sequenceNumber, &sequenceNumber,
-			newPosDeleteFile(t, deletePath, inspectRecordBatchSize, 128),
+			newPosDeleteFile(t, deletePath, recordBatchSize, 128),
 		)},
 	)
 	missingManifest := iceberg.NewManifestBuilder(
@@ -3249,7 +3062,7 @@ func TestInspectPositionDeletesDefersLaterManifestReads(t *testing.T) {
 	require.NoError(t, err)
 	defer rr.Release()
 	require.True(t, rr.Next(), "reader error: %v", rr.Err())
-	require.EqualValues(t, inspectRecordBatchSize, rr.RecordBatch().NumRows())
+	require.EqualValues(t, recordBatchSize, rr.RecordBatch().NumRows())
 }
 
 func TestAppendParquetPositionDeleteRowsRejectsNullRow(t *testing.T) {
@@ -4236,39 +4049,6 @@ func testFieldNames(sc *iceberg.Schema) []string {
 	}
 
 	return names
-}
-
-func TestInspectValueScalarDecimal(t *testing.T) {
-	typ := iceberg.MustDecimalTypeOf(10, 2)
-	arrowType := &arrow.Decimal128Type{Precision: 10, Scale: 2}
-	value := iceberg.DecimalLiteral{Val: decimal128.FromI64(123), Scale: 2}
-
-	got, err := inspectValueScalar(value, typ, arrowType)
-	require.NoError(t, err)
-	require.Equal(t, value.Val, got.(*scalar.Decimal128).Value)
-}
-
-func TestInspectValueScalarRejectsMismatchedPartitionValues(t *testing.T) {
-	tests := []struct {
-		name      string
-		value     any
-		typ       iceberg.Type
-		arrowType arrow.DataType
-		want      string
-	}{
-		{name: "date", value: int64(1), typ: iceberg.PrimitiveTypes.Date, arrowType: arrow.FixedWidthTypes.Date32, want: "unsupported date"},
-		{name: "time", value: int64(1), typ: iceberg.PrimitiveTypes.Time, arrowType: arrow.FixedWidthTypes.Time64us, want: "unsupported time"},
-		{name: "timestamp", value: int64(1), typ: iceberg.PrimitiveTypes.Timestamp, arrowType: arrow.FixedWidthTypes.Timestamp_us, want: "unsupported timestamp"},
-		{name: "timestamp nanos", value: int64(1), typ: iceberg.PrimitiveTypes.TimestampNs, arrowType: arrow.FixedWidthTypes.Timestamp_ns, want: "unsupported nanosecond timestamp"},
-		{name: "UUID", value: []byte("not-a-UUID"), typ: iceberg.PrimitiveTypes.UUID, arrowType: &arrow.FixedSizeBinaryType{ByteWidth: 16}, want: "unsupported UUID"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			_, err := inspectValueScalar(tt.value, tt.typ, tt.arrowType)
-			require.ErrorContains(t, err, tt.want)
-		})
-	}
 }
 
 func TestInspectInt32ValueRejectsOverflow(t *testing.T) {
