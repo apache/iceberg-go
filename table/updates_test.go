@@ -1478,6 +1478,15 @@ func TestAddPartitionSpecUpdateUnmarshalRejectsMultipleSourcesForBuiltInTransfor
 	err := json.Unmarshal(data, &updates)
 	require.ErrorIs(t, err, iceberg.ErrInvalidPartitionSpec)
 	assert.ErrorContains(t, err, "requires exactly one source ID, got 2")
+
+	spec := iceberg.NewPartitionSpecID(1, iceberg.PartitionField{
+		SourceIDs: []int{1, 2},
+		FieldID:   1000,
+		Name:      "id_bucket",
+		Transform: iceberg.BucketTransform{NumBuckets: 16},
+	})
+	_, err = json.Marshal(NewAddPartitionSpecUpdate(&spec, false))
+	require.ErrorIs(t, err, iceberg.ErrInvalidPartitionSpec)
 }
 
 func TestAddPartitionSpecUpdate_UnmarshalUnresolvableSourceID(t *testing.T) {

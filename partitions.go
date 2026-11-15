@@ -100,10 +100,6 @@ func validatePartitionFieldSourceCount(transform Transform, sourceIDs []int) err
 }
 
 func (p PartitionField) MarshalJSON() ([]byte, error) {
-	if err := validatePartitionFieldSourceCount(p.Transform, p.SourceIDs); err != nil {
-		return nil, err
-	}
-
 	if len(p.SourceIDs) == 1 && p.SourceIDs[0] == 0 {
 		if _, isVoid := p.Transform.(VoidTransform); isVoid {
 			return json.Marshal(struct {
@@ -225,8 +221,15 @@ func (p *PartitionField) unmarshal(b []byte, binding specBinding) error {
 		// which carry no source column to validate.
 		next.SourceIDs = []int{0}
 	}
-	if err := validatePartitionFieldSourceCount(next.Transform, next.SourceIDs); err != nil {
-		return err
+	// Unbound specs are new request payloads (create-table and add-spec), so
+	// reject invalid built-in transform arity before they reach the server or
+	// metadata builder. Bound specs may be historical metadata: keep reading
+	// those fields so an old malformed spec does not make the whole table
+	// unreadable.
+	if binding == unboundSpec {
+		if err := validatePartitionFieldSourceCount(next.Transform, next.SourceIDs); err != nil {
+			return err
+		}
 	}
 	if hasSourceID || hasSourceIDs {
 		for _, sourceID := range next.SourceIDs {
@@ -298,6 +301,19 @@ type UnboundPartitionSpec struct {
 
 func (u *UnboundPartitionSpec) UnmarshalJSON(b []byte) error {
 	return u.unmarshal(b, unboundSpec)
+}
+
+// MarshalJSON validates an unbound spec before writing it as a new request
+// payload. PartitionSpec JSON remains lenient so historical metadata can be
+// read and serialized even when it contains an invalid built-in field.
+func (u UnboundPartitionSpec) MarshalJSON() ([]byte, error) {
+	for _, field := range u.fields {
+		if err := validatePartitionFieldSourceCount(field.Transform, field.SourceIDs); err != nil {
+			return nil, err
+		}
+	}
+
+	return u.PartitionSpec.MarshalJSON()
 }
 
 type PartitionOption func(*PartitionSpec) error

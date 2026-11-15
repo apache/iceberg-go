@@ -706,7 +706,7 @@ func TestMetadataV3ParsesUnknownTransforms(t *testing.T) {
 	assert.Equal(t, []int{1, 2}, reparsed.PartitionSpec().Field(0).SourceIDs)
 }
 
-func TestMetadataV3RejectsMultipleSourcesForBuiltInTransform(t *testing.T) {
+func TestMetadataV3RoundTripsMultipleSourcesForBuiltInTransform(t *testing.T) {
 	data := strings.Replace(
 		ExampleTableMetadataV3,
 		`{"name": "x", "transform": "identity", "source-id": 1, "field-id": 1000}`,
@@ -715,9 +715,17 @@ func TestMetadataV3RejectsMultipleSourcesForBuiltInTransform(t *testing.T) {
 	)
 	require.NotEqual(t, ExampleTableMetadataV3, data)
 
-	_, err := ParseMetadataBytes([]byte(data))
-	require.ErrorIs(t, err, iceberg.ErrInvalidPartitionSpec)
-	assert.ErrorContains(t, err, "requires exactly one source ID, got 2")
+	meta, err := ParseMetadataBytes([]byte(data))
+	require.NoError(t, err)
+	assert.Equal(t, []int{1, 2}, meta.PartitionSpec().Field(0).SourceIDs)
+
+	encoded, err := json.Marshal(meta)
+	require.NoError(t, err)
+	assert.Contains(t, string(encoded), `"source-ids":[1,2]`)
+
+	reparsed, err := ParseMetadataBytes(encoded)
+	require.NoError(t, err)
+	assert.Equal(t, []int{1, 2}, reparsed.PartitionSpec().Field(0).SourceIDs)
 }
 
 func TestMetadataEqualsIncludesStatistics(t *testing.T) {

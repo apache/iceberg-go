@@ -899,7 +899,7 @@ func TestPartitionFieldUnmarshalJSON(t *testing.T) {
 	})
 }
 
-func TestPartitionFieldJSONRejectsMultipleSourcesForBuiltInTransforms(t *testing.T) {
+func TestUnboundPartitionSpecJSONRejectsMultipleSourcesForBuiltInTransforms(t *testing.T) {
 	tests := []struct {
 		name      string
 		transform string
@@ -919,8 +919,17 @@ func TestPartitionFieldJSONRejectsMultipleSourcesForBuiltInTransforms(t *testing
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			jsonData := fmt.Sprintf(`{"source-ids":[1,2],"field-id":1000,"name":"part","transform":%q}`, tt.transform)
-			var decoded iceberg.PartitionField
-			err := json.Unmarshal([]byte(jsonData), &decoded)
+			var decodedField iceberg.PartitionField
+			err := json.Unmarshal([]byte(jsonData), &decodedField)
+			require.NoError(t, err, "bound fields remain readable for metadata compatibility")
+			assert.Equal(t, []int{1, 2}, decodedField.SourceIDs)
+			encodedField, err := json.Marshal(decodedField)
+			require.NoError(t, err, "bound fields remain writable for metadata compatibility")
+			assert.Contains(t, string(encodedField), `"source-ids":[1,2]`)
+
+			fieldJSON := `{"spec-id":1,"fields":[` + jsonData + `]}`
+			var decoded iceberg.UnboundPartitionSpec
+			err = json.Unmarshal([]byte(fieldJSON), &decoded)
 			require.ErrorIs(t, err, iceberg.ErrInvalidPartitionSpec)
 			assert.ErrorContains(t, err, "requires exactly one source ID, got 2")
 
@@ -932,7 +941,9 @@ func TestPartitionFieldJSONRejectsMultipleSourcesForBuiltInTransforms(t *testing
 			}
 			for _, transform := range []iceberg.Transform{tt.value, tt.pointer} {
 				field.Transform = transform
-				_, err = json.Marshal(field)
+				_, err = json.Marshal(iceberg.UnboundPartitionSpec{
+					PartitionSpec: iceberg.NewPartitionSpecID(1, field),
+				})
 				require.ErrorIs(t, err, iceberg.ErrInvalidPartitionSpec)
 				assert.ErrorContains(t, err, "requires exactly one source ID, got 2")
 			}
@@ -940,14 +951,46 @@ func TestPartitionFieldJSONRejectsMultipleSourcesForBuiltInTransforms(t *testing
 	}
 }
 
-func TestPartitionSpecJSONRejectsMultipleSourcesForBuiltInTransform(t *testing.T) {
+func TestUnboundPartitionSpecJSONAcceptsSingleSourceIDsForBuiltInTransform(t *testing.T) {
+	data := []byte(`{"spec-id":1,"fields":[{"source-ids":[1],"field-id":1000,"name":"part","transform":"bucket[16]"}]}`)
+
+	var spec iceberg.UnboundPartitionSpec
+	require.NoError(t, json.Unmarshal(data, &spec))
+	assert.Equal(t, []int{1}, spec.Field(0).SourceIDs)
+
+	encoded, err := json.Marshal(spec)
+	require.NoError(t, err)
+	assert.Contains(t, string(encoded), `"source-id":1`)
+	assert.NotContains(t, string(encoded), `"source-ids"`)
+}
+
+func TestUnboundPartitionSpecJSONRoundTripsMultiSourceUnknownTransform(t *testing.T) {
+	data := []byte(`{"spec-id":1,"fields":[{"source-ids":[1,2],"field-id":1000,"name":"combined","transform":"custom_two_arg"}]}`)
+
+	var spec iceberg.UnboundPartitionSpec
+	require.NoError(t, json.Unmarshal(data, &spec))
+	assert.Equal(t, []int{1, 2}, spec.Field(0).SourceIDs)
+
+	encoded, err := json.Marshal(spec)
+	require.NoError(t, err)
+	assert.Contains(t, string(encoded), `"source-ids":[1,2]`)
+}
+
+func TestPartitionSpecJSONRoundTripsMultipleSourcesForBuiltInTransform(t *testing.T) {
 	fieldJSON := `{"source-ids":[1,2],"field-id":1000,"name":"part","transform":"bucket[16]"}`
 	specJSON := `{"spec-id":1,"fields":[` + fieldJSON + `]}`
 
 	var decoded iceberg.PartitionSpec
-	err := json.Unmarshal([]byte(specJSON), &decoded)
-	require.ErrorIs(t, err, iceberg.ErrInvalidPartitionSpec)
-	assert.ErrorContains(t, err, "requires exactly one source ID, got 2")
+	require.NoError(t, json.Unmarshal([]byte(specJSON), &decoded))
+	assert.Equal(t, []int{1, 2}, decoded.Field(0).SourceIDs)
+
+	encoded, err := json.Marshal(decoded)
+	require.NoError(t, err)
+	assert.Contains(t, string(encoded), `"source-ids":[1,2]`)
+
+	var roundTripped iceberg.PartitionSpec
+	require.NoError(t, json.Unmarshal(encoded, &roundTripped))
+	assert.True(t, decoded.Equals(roundTripped))
 
 	spec := iceberg.NewPartitionSpecID(1, iceberg.PartitionField{
 		SourceIDs: []int{1, 2},
@@ -956,8 +999,7 @@ func TestPartitionSpecJSONRejectsMultipleSourcesForBuiltInTransform(t *testing.T
 		Transform: iceberg.BucketTransform{NumBuckets: 16},
 	})
 	_, err = json.Marshal(spec)
-	require.ErrorIs(t, err, iceberg.ErrInvalidPartitionSpec)
-	assert.ErrorContains(t, err, "requires exactly one source ID, got 2")
+	require.NoError(t, err, "ordinary spec serialization must preserve historical metadata")
 }
 
 func TestPartitionSpecJSONRoundTripsMultiSourceUnknownTransform(t *testing.T) {

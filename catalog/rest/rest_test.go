@@ -1548,6 +1548,7 @@ func (r *RestCatalogSuite) TestCreateTableRejectsMultiSourceBuiltInPartitionFiel
 	)
 
 	r.ErrorIs(err, iceberg.ErrInvalidPartitionSpec)
+	r.ErrorIs(err, iceberg.ErrInvalidArgument)
 	r.False(serverHit, "create POST must not be sent with a built-in transform that has multiple sources")
 }
 
