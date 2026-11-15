@@ -581,47 +581,68 @@ func TestRowDeltaCommitSingleShot(t *testing.T) {
 	})
 }
 
-// Why: a removal another row delta in the same transaction already made
-// was reported as "do not belong to the table", although the DV is in the
-// table the transaction started from.
-// Condition: two row deltas staged on one transaction both remove the
-// same live DV.
-// Assertion: the second Commit names the earlier removal instead.
-func TestRowDeltaRemoveDeletesAlreadyRemovedInTransaction(t *testing.T) {
-	tbl := newRowDeltaCommitTestTableVersion(t, 3)
-	location := tbl.Location()
+// Why: a DV removal that cannot be resolved on the staged snapshot was
+// always reported as "do not belong to the table", even when an earlier
+// row delta in the same transaction had removed the DV.
+// Condition: after an earlier row delta in the transaction removes a DV,
+// a second row delta removes that DV, a DV that was never committed, or
+// a DV removed before the transaction, on main and on a branch the
+// transaction creates.
+// Assertion: only the DV removed earlier in the transaction is reported
+// as already removed; the others still do not belong to the table.
+func TestRowDeltaRemoveDeletesMissingFromStagedSnapshot(t *testing.T) {
+	const (
+		removedEarlier = "already removed it"
+		notInTable     = "do not belong to the table"
+	)
 
-	arrowSc, err := table.SchemaToArrowSchema(tbl.Schema(), nil, false, false)
-	require.NoError(t, err)
+	for _, branch := range []string{table.MainBranch, "feature"} {
+		t.Run(branch, func(t *testing.T) {
+			tbl := newRowDeltaCommitTestTableVersion(t, 3)
+			location := tbl.Location()
+			dataPath := location + "/data/data-001.parquet"
+			tbl = seedRowDeltaDataFile(t, tbl, dataPath, 1, 2, 3)
 
-	dataPath := location + "/data/data-001.parquet"
-	writeParquetFile(t, dataPath, arrowSc, `[
-		{"id": 1, "data": "alpha"},
-		{"id": 2, "data": "beta"},
-		{"id": 3, "data": "gamma"}
-	]`)
+			dv0 := writeDV(t, location, "dv-000.puffin", dataPath, []int64{0})
+			tx := tbl.NewTransaction()
+			require.NoError(t, tx.NewRowDelta(nil).AddDeletes(dv0).Commit(t.Context()))
+			tbl, err := tx.Commit(t.Context())
+			require.NoError(t, err)
 
-	tx := tbl.NewTransaction()
-	require.NoError(t, tx.AddDataFilesByPath(t.Context(), []string{dataPath}, nil, false))
-	tbl, err = tx.Commit(t.Context())
-	require.NoError(t, err)
+			dv1 := writeDV(t, location, "dv-001.puffin", dataPath, []int64{0, 1})
+			tx = tbl.NewTransaction()
+			require.NoError(t, tx.NewRowDelta(nil).AddDeletes(dv1).RemoveDeletes(dv0).Commit(t.Context()))
+			tbl, err = tx.Commit(t.Context())
+			require.NoError(t, err)
 
-	dv1 := writeDV(t, location, "dv-001.puffin", dataPath, []int64{1})
-	tx2 := tbl.NewTransaction()
-	require.NoError(t, tx2.NewRowDelta(nil).AddDeletes(dv1).Commit(t.Context()))
-	tbl, err = tx2.Commit(t.Context())
-	require.NoError(t, err)
+			dv2 := writeDV(t, location, "dv-002.puffin", dataPath, []int64{0, 1, 2})
+			dv3 := writeDV(t, location, "dv-003.puffin", dataPath, []int64{0, 1, 2})
+			neverCommitted := writeDV(t, location, "dv-never.puffin", dataPath, []int64{2})
 
-	dv2 := writeDV(t, location, "dv-002.puffin", dataPath, []int64{1, 2})
-	dv3 := writeDV(t, location, "dv-003.puffin", dataPath, []int64{0, 1, 2})
-	tx3 := tbl.NewTransaction()
+			tests := []struct {
+				name    string
+				remove  iceberg.DataFile
+				want    string
+				notWant string
+			}{
+				{"removed earlier in the transaction", dv1, removedEarlier, notInTable},
+				{"never committed", neverCommitted, notInTable, removedEarlier},
+				{"removed before the transaction", dv0, notInTable, removedEarlier},
+			}
+			for _, tt := range tests {
+				t.Run(tt.name, func(t *testing.T) {
+					tx, err := tbl.NewTransactionOnBranch(branch)
+					require.NoError(t, err)
+					require.NoError(t, tx.NewRowDelta(nil).AddDeletes(dv2).RemoveDeletes(dv1).Commit(t.Context()))
 
-	require.NoError(t, tx3.NewRowDelta(nil).AddDeletes(dv2).RemoveDeletes(dv1).Commit(t.Context()))
-
-	err = tx3.NewRowDelta(nil).AddDeletes(dv3).RemoveDeletes(dv1).Commit(t.Context())
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "already removed it")
-	assert.NotContains(t, err.Error(), "do not belong to the table")
+					err = tx.NewRowDelta(nil).AddDeletes(dv3).RemoveDeletes(tt.remove).Commit(t.Context())
+					require.Error(t, err)
+					assert.Contains(t, err.Error(), tt.want)
+					assert.NotContains(t, err.Error(), tt.notWant)
+				})
+			}
+		})
+	}
 }
 
 // writeParquetFile writes Arrow records to a Parquet file on local disk.

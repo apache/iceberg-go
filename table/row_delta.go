@@ -18,7 +18,6 @@
 package table
 
 import (
-	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -538,7 +537,7 @@ func (rd *RowDelta) findReplacedLiveDVs(ctx context.Context, fs iceio.IO, meta *
 // A removed file that does not resolve to a live delete entry is an
 // error: the producer would otherwise silently skip the removal and
 // the commit would strand two live DVs on one data file. When the file
-// is live on the branch head the transaction started from, the error
+// is live on the snapshot the transaction started from, the error
 // says an operation staged earlier in the transaction removed it. Two removals
 // resolving to live entries that reference the same data file are also
 // an error — the producer keys DV removals by referenced data file, so
@@ -643,21 +642,24 @@ func (rd *RowDelta) resolveRemovedDeletes(ctx context.Context, fs iceio.IO, meta
 }
 
 // removedEarlierInTransaction reports whether path is a live delete entry
-// on the branch head the transaction started from but not on staged, the
+// on the snapshot the transaction started from but not on staged, the
 // snapshot this delta plans against: an operation staged earlier in the
-// transaction removed it. resolveRemovedDeletes calls it only for a removal
-// it cannot resolve, so successful commits never pay for the extra scan.
+// transaction removed it. The start snapshot is resolved with
+// planningSnapshot, as staged is, so a branch the transaction creates
+// starts from the main branch head. resolveRemovedDeletes calls it only
+// for a removal it cannot resolve, so successful commits never pay for
+// the extra scan.
 func (rd *RowDelta) removedEarlierInTransaction(ctx context.Context, fs iceio.IO, staged *Snapshot, path string) (bool, error) {
-	id := rd.txn.baseRefSnapshotID(cmp.Or(rd.txn.branch, MainBranch))
-	if id == nil || *id == staged.SnapshotID {
-		return false, nil
+	startMeta, err := MetadataBuilderFromBase(rd.txn.tbl.metadata, rd.txn.tbl.metadataLocation)
+	if err != nil {
+		return false, err
 	}
-	base := rd.txn.tbl.metadata.SnapshotByID(*id)
-	if base == nil {
+	start := rd.txn.planningSnapshot(startMeta)
+	if start == nil || start.SnapshotID == staged.SnapshotID {
 		return false, nil
 	}
 
-	for entry, err := range base.entries(ctx, fs, iceberg.ManifestContentDeletes, true) {
+	for entry, err := range start.entries(ctx, fs, iceberg.ManifestContentDeletes, true) {
 		if err != nil {
 			return false, err
 		}
