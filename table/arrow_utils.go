@@ -1341,6 +1341,11 @@ func (a *arrowProjectionVisitor) Struct(st iceberg.StructType, structArr arrow.A
 			constant, hasConstant := a.partitionConstants[field.ID]
 			switch {
 			case hasConstant && constant != nil:
+				// Widen a value written before the field was promoted. A value
+				// the conversion does not cover is used as the manifest gave it.
+				if converted, err := identityPartitionValue(constant, field.Type); err == nil {
+					constant = converted
+				}
 				arr = defaultToArray(constant, field.Type, dt, structArr.Len(), alloc)
 			case hasConstant:
 				arr = array.MakeArrayOfNull(alloc, dt, structArr.Len())
