@@ -161,9 +161,10 @@ func (rd *RowDelta) RemoveDeletes(files ...iceberg.DataFile) *RowDelta {
 // delete files.
 // Deletes require v2 or later, DVs require v3 or later.
 //
-// For duplicates within one RowDelta, this is stricter than Java's
-// BaseRowDelta: Java keeps the first file with a given spec ID and path,
-// while this implementation returns an error.
+// The spec says writers need not check uniqueness at commit time, but duplicate
+// live entries leave snapshot behavior undefined. Java's BaseRowDelta keeps the
+// first file with the same spec ID and path; this implementation returns an
+// error.
 //
 // With removals present the staged commit is non-replayable: an
 // optimistic-concurrency conflict fails the transaction's Commit with
