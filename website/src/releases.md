@@ -42,6 +42,7 @@ Per-release notes (highlights, breaking changes, contributors) are published on 
 
 ### Unreleased compatibility notes
 
+- **`RowDelta.Commit` can be called once per builder.** A second `Commit` on the same `RowDelta` now returns an error wrapping `table.ErrInvalidOperation` and stages nothing, even if the first call failed, as `RewriteFiles.Commit` does. Previously, calling `Commit` again after a failed first call could succeed, and calling it again after a successful one staged the builder's files a second time. Create a new builder with `Transaction.NewRowDelta` for each commit.
 - **Data-file replacements now reject concurrent deletes.** Commits staged through `ReplaceDataFiles`, `ReplaceDataFilesByPath`, `ReplaceFiles`, or rewrite operations can return `table.ErrConflictingDeleteFiles` when a concurrent position delete targets a replaced file or any concurrent equality delete is added. Compaction on tables with streaming equality deletes may see additional conflicts.
 - **Orphan cleanup now rejects `gc.enabled=false`.** `DeleteOrphanFiles`, `PlanOrphanFiles`, `ExecuteOrphanCleanup`, and dry runs now return an error before filesystem access. The `iceberg clean-orphan-files` command is also affected.
 - **Partition specs reject source types a transform cannot handle.** Creating or updating a spec with an incompatible source, such as `day(string)`, now fails. Writes to existing incompatible specs return `ErrInvalidTransform` instead of writing null partition values.
