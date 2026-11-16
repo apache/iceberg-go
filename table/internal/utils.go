@@ -650,6 +650,18 @@ func TruncateUpperBoundBinary(val []byte, trunc int) []byte {
 }
 
 func MapExec[T, S any](ctx context.Context, nWorkers int, slice iter.Seq[T], fn func(T) (S, error)) iter.Seq2[S, error] {
+	return mapExec(ctx, nWorkers, slice, fn, nil, false)
+}
+
+// MapExecWithDiscard calls discard for queued inputs that no worker consumed.
+// Inputs passed to fn belong to fn, including when fn returns an error.
+// Completed results are delivered even after cancellation so callers can clean up.
+// Callers must consume the iterator to the end to receive every completed result.
+func MapExecWithDiscard[T, S any](ctx context.Context, nWorkers int, slice iter.Seq[T], fn func(T) (S, error), discard func(T)) iter.Seq2[S, error] {
+	return mapExec(ctx, nWorkers, slice, fn, discard, true)
+}
+
+func mapExec[T, S any](ctx context.Context, nWorkers int, slice iter.Seq[T], fn func(T) (S, error), discard func(T), keepResults bool) iter.Seq2[S, error] {
 	if nWorkers <= 0 {
 		nWorkers = runtime.GOMAXPROCS(0)
 	}
@@ -665,10 +677,19 @@ func MapExec[T, S any](ctx context.Context, nWorkers int, slice iter.Seq[T], fn 
 				if err != nil {
 					return err
 				}
-				select {
-				case out <- result:
-				case <-ctx.Done():
-					return context.Cause(ctx)
+				if keepResults {
+					// The consumer drains out even when it stops early. Keep every
+					// completed result available for cleanup after cancellation.
+					out <- result
+					if ctx.Err() != nil {
+						return context.Cause(ctx)
+					}
+				} else {
+					select {
+					case out <- result:
+					case <-ctx.Done():
+						return context.Cause(ctx)
+					}
 				}
 			}
 
@@ -681,6 +702,11 @@ func MapExec[T, S any](ctx context.Context, nWorkers int, slice iter.Seq[T], fn 
 		defer func() {
 			close(ch)
 			err = g.Wait()
+			if discard != nil {
+				for v := range ch {
+					discard(v)
+				}
+			}
 			close(out)
 		}()
 

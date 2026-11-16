@@ -1,0 +1,148 @@
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
+//
+//   http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package table
+
+import (
+	"context"
+	"errors"
+	"testing"
+
+	"github.com/stretchr/testify/require"
+)
+
+func TestCherryPickSnapshotRejectsMissingSnapshot(t *testing.T) {
+	txn := newTransactionWithSnapshotRefs(t)
+	err := txn.CherryPickSnapshot(t.Context(), 99999, nil)
+	require.ErrorIs(t, err, ErrSnapshotNotFound)
+	require.NotContains(t, err.Error(), "snapshot-loading-mode=refs")
+}
+
+func TestCherryPickSnapshotRejectsNonAppendOperation(t *testing.T) {
+	for _, op := range []Operation{OpDelete, OpOverwrite, OpReplace} {
+		t.Run(string(op), func(t *testing.T) {
+			txn := newTransactionWithSnapshotRefs(t)
+			// The source is a direct child of main in the shared fixture,
+			// which Java allows to fast-forward for any operation. Move main
+			// onto a divergent lineage to exercise unsupported replay.
+			source := txn.meta.snapshotList[1]
+			require.NoError(t, txn.meta.AddSnapshot(&Snapshot{
+				SnapshotID:       30,
+				ParentSnapshotID: new(int64(10)),
+				SequenceNumber:   3,
+				ManifestList:     "mem://default/table-location/metadata/manifest-30.avro",
+				Summary:          &Summary{Operation: OpAppend},
+				TimestampMs:      source.TimestampMs + 1,
+			}))
+			require.NoError(t, txn.meta.SetSnapshotRef(MainBranch, 30, BranchRef))
+			source.Summary.Operation = op
+			err := txn.CherryPickSnapshot(t.Context(), 20, nil)
+			require.ErrorIs(t, err, ErrInvalidOperation)
+		})
+	}
+}
+
+// REST snapshot-loading-mode=refs can provide both ref heads while omitting
+// the snapshots between them. An incomplete walk cannot prove that the
+// source snapshot or its WAP ID was never published on the target branch.
+func TestCherryPickSnapshotRejectsIncompleteTargetAncestry(t *testing.T) {
+	txn := newTransactionWithSnapshotRefs(t)
+	txn.tbl.snapshotHistoryRefsOnly = true
+	source := txn.meta.snapshotList[1]
+
+	missingParent := int64(999)
+	require.NoError(t, txn.meta.AddSnapshot(&Snapshot{
+		SnapshotID:       30,
+		ParentSnapshotID: &missingParent,
+		SequenceNumber:   3,
+		ManifestList:     "mem://default/table-location/metadata/manifest-30.avro",
+		Summary:          &Summary{Operation: OpAppend},
+		TimestampMs:      source.TimestampMs + 1,
+	}))
+	require.NoError(t, txn.meta.SetSnapshotRef(MainBranch, 30, BranchRef))
+
+	err := txn.CherryPickSnapshot(t.Context(), source.SnapshotID, nil)
+	require.ErrorIs(t, err, ErrInvalidOperation)
+	require.ErrorContains(t, err, "snapshot-loading-mode=refs")
+	require.Empty(t, txn.pinnedRefs, "rejected cherry-pick must not stage ref fences")
+}
+
+// Expiration legitimately truncates the oldest lineage even when all available
+// snapshots were loaded. Unlike REST refs mode, this is not a reason to reject.
+func TestCherryPickSnapshotAllowsExpiredTargetAncestry(t *testing.T) {
+	seeded := newTransactionWithSnapshotRefs(t)
+	// Snapshot 10 is retained, but its parent has expired. Snapshot 20 is
+	// still a direct child and can be fast-forwarded even if its operation
+	// is not an append.
+	missingParent := int64(999)
+	seeded.meta.snapshotList[0].ParentSnapshotID = &missingParent
+	seeded.meta.snapshotList[1].Summary.Operation = OpDelete
+
+	meta, err := seeded.meta.Build()
+	require.NoError(t, err)
+	tbl := New(Identifier{"db", "table"}, meta, "metadata.json", seeded.tbl.fsF, nil)
+	txn := tbl.NewTransaction()
+	require.NoError(t, txn.CherryPickSnapshot(t.Context(), 20, nil))
+	require.Equal(t, int64(20), txn.meta.refs[MainBranch].SnapshotID)
+	require.Contains(t, txn.pinnedRefs, MainBranch)
+}
+
+func TestCherryPickSnapshotChecksContextBeforeManifestIO(t *testing.T) {
+	txn := newTransactionWithSnapshotRefs(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	err := txn.CherryPickSnapshot(ctx, 20, nil)
+	require.True(t, errors.Is(err, context.Canceled))
+}
+
+// A fast-forwarded ref points directly at the source. Creating that ref does
+// not fork from main, so main must not be pinned by this operation.
+func TestCherryPickSnapshotFastForwardToMissingBranchDoesNotPinMain(t *testing.T) {
+	txn := newTransactionWithSnapshotRefs(t)
+	txn.branch = "new-target"
+
+	require.NoError(t, txn.CherryPickSnapshot(t.Context(), 20, nil))
+	require.Contains(t, txn.pinnedRefs, "new-target")
+	require.NotContains(t, txn.pinnedRefs, MainBranch)
+	require.Equal(t, int64(20), txn.meta.refs["new-target"].SnapshotID)
+}
+
+func TestCherryPickSnapshotFastForwardPreservesBranchRetention(t *testing.T) {
+	seeded := newTransactionWithSnapshotRefs(t)
+	ref := seeded.meta.refs[MainBranch]
+	minSnapshots := 3
+	maxSnapshotAge := int64(100_000)
+	maxRefAge := int64(200_000)
+	ref.MinSnapshotsToKeep = &minSnapshots
+	ref.MaxSnapshotAgeMs = &maxSnapshotAge
+	ref.MaxRefAgeMs = &maxRefAge
+	seeded.meta.refs[MainBranch] = ref
+
+	// The branch and its retention settings must exist in the base table,
+	// not only in the staged builder, before pinning its snapshot ID.
+	meta, err := seeded.meta.Build()
+	require.NoError(t, err)
+	tbl := New(Identifier{"db", "table"}, meta, "metadata.json", seeded.tbl.fsF, nil)
+	txn := tbl.NewTransaction()
+
+	require.NoError(t, txn.CherryPickSnapshot(t.Context(), 20, nil))
+	got := txn.meta.refs[MainBranch]
+	require.Equal(t, int64(20), got.SnapshotID)
+	require.Equal(t, minSnapshots, *got.MinSnapshotsToKeep)
+	require.Equal(t, maxSnapshotAge, *got.MaxSnapshotAgeMs)
+	require.Equal(t, maxRefAge, *got.MaxRefAgeMs)
+}

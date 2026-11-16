@@ -105,6 +105,10 @@ func formatDefaultValue(value any) any {
 // metadata directly and does not call this check. We intentionally validate
 // both default fields here, including write-default for pre-v3 schemas.
 func checkSchemaCompatibility(sc *iceberg.Schema, formatVersion int) error {
+	if err := sc.ValidateIdentifierFields(); err != nil {
+		return fmt.Errorf("invalid identifier fields: %w", err)
+	}
+
 	const defaultValuesMinFormatVersion = 3
 	problems := make([]IncompatibleField, 0)
 
@@ -217,6 +221,45 @@ func validateNoReservedFieldIDs(sc *iceberg.Schema) error {
 
 		return fmt.Errorf("%w: field '%s' uses reserved metadata column ID %d",
 			iceberg.ErrInvalidSchema, name, field.ID)
+	}
+
+	return nil
+}
+
+// validateUniqueFieldIDs returns an error if two fields share an ID. Unlike
+// NewSchema, it also checks 0 and negative IDs, because reassignIDs looks up
+// partition and sort columns by ID (#2393). A single field with ID 0 is fine.
+func validateUniqueFieldIDs(sc *iceberg.Schema) error {
+	return checkUniqueFieldIDs(make(map[int]string), sc.Fields())
+}
+
+func checkUniqueFieldIDs(seen map[int]string, fields []iceberg.NestedField) error {
+	for _, f := range fields {
+		if prev, ok := seen[f.ID]; ok {
+			return fmt.Errorf("%w: multiple fields for id %d: %s and %s",
+				iceberg.ErrInvalidSchema, f.ID, prev, f.Name)
+		}
+		seen[f.ID] = f.Name
+
+		var children []iceberg.NestedField
+		switch t := f.Type.(type) {
+		case *iceberg.StructType:
+			if t != nil {
+				children = t.Fields()
+			}
+		case *iceberg.ListType:
+			if t != nil {
+				children = []iceberg.NestedField{t.ElementField()}
+			}
+		case *iceberg.MapType:
+			if t != nil {
+				children = []iceberg.NestedField{t.KeyField(), t.ValueField()}
+			}
+		}
+
+		if err := checkUniqueFieldIDs(seen, children); err != nil {
+			return err
+		}
 	}
 
 	return nil
@@ -434,8 +477,9 @@ func validateComplexDefaultValue(field iceberg.NestedField, name string, value a
 	var valid bool
 	switch field.Type.(type) {
 	case *iceberg.StructType:
-		typeName, expectedShape = "struct", "JSON object"
-		_, valid = value.(map[string]any)
+		typeName, expectedShape = "struct", "empty JSON object"
+		obj, ok := value.(map[string]any)
+		valid = ok && len(obj) == 0
 	case *iceberg.ListType:
 		typeName, expectedShape = "list", "JSON array"
 		_, valid = value.([]any)

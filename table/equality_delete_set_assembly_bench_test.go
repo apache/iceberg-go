@@ -122,9 +122,10 @@ func buildEqualityDeleteSetsPerTaskWithCopies(
 			deleteSet, exists := groups[groupKey]
 			if !exists {
 				deleteSet = &equalityDeleteSet{
-					keys:     make(set[string]),
-					fieldIDs: fileSet.fieldIDs,
-					colNames: fileSet.colNames,
+					keys:       make(set[string]),
+					fieldIDs:   fileSet.fieldIDs,
+					colNames:   fileSet.colNames,
+					fieldTypes: fileSet.fieldTypes,
 				}
 				groups[groupKey] = deleteSet
 			}
@@ -183,9 +184,10 @@ func equalityDeleteAssemblyBenchmarkInput(
 				keys[fmt.Sprintf("key-%d-%d", fileID, keyIndex)] = struct{}{}
 			}
 			perFile[path] = newEqualityDeleteFileSet(fileID, &equalityDeleteSet{
-				keys:     keys,
-				fieldIDs: []int{1},
-				colNames: []string{"id"},
+				keys:       keys,
+				fieldIDs:   []int{1},
+				colNames:   []string{"id"},
+				fieldTypes: []iceberg.Type{iceberg.PrimitiveTypes.Int64},
 			})
 			fileID++
 		}

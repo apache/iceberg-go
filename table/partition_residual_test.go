@@ -98,10 +98,10 @@ func TestPartitionResidualEvaluatorNormalizesDecodedLiteralValues(t *testing.T) 
 }
 
 func TestPartitionResidualEvaluatorHandlesNestedIdentityFields(t *testing.T) {
-	nested := &iceberg.StructType{FieldList: []iceberg.NestedField{
-		{ID: 2, Name: "tenant_id", Type: iceberg.PrimitiveTypes.String},
-		{ID: 3, Name: "amount", Type: iceberg.PrimitiveTypes.Int64},
-	}}
+	nested := iceberg.NewStructType(
+		iceberg.NestedField{ID: 2, Name: "tenant_id", Type: iceberg.PrimitiveTypes.String},
+		iceberg.NestedField{ID: 3, Name: "amount", Type: iceberg.PrimitiveTypes.Int64},
+	)
 	schema := iceberg.NewSchema(1, iceberg.NestedField{
 		ID: 1, Name: "details", Type: nested,
 	})

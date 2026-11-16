@@ -57,12 +57,20 @@ func TestMetadataPreservesUnknownStatisticsBlobType(t *testing.T) {
 }
 
 func TestBlobMetadataRejectsNullAndEmptyType(t *testing.T) {
-	for _, value := range []string{"null", `""`} {
-		t.Run(value, func(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		value   string
+		wantErr string
+	}{
+		{name: "null", value: "null", wantErr: `required statistics field "type"`},
+		{name: "empty", value: `""`, wantErr: "invalid blob type"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
 			var blob BlobMetadata
-			err := json.Unmarshal([]byte(`{"type":`+value+`}`), &blob)
+			data := `{"type":` + tt.value + `,"snapshot-id":1,"sequence-number":2,"fields":[]}`
+			err := json.Unmarshal([]byte(data), &blob)
 			require.Error(t, err)
-			assert.Contains(t, err.Error(), "invalid blob type")
+			assert.Contains(t, err.Error(), tt.wantErr)
 		})
 	}
 }

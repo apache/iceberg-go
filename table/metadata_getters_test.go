@@ -211,27 +211,22 @@ func BenchmarkCloneSchemaWithNestedDefaults(b *testing.B) {
 }
 
 func nestedSchemaWithMutableDefaults() *iceberg.Schema {
-	listElement := &iceberg.StructType{FieldList: []iceberg.NestedField{{
+	listElement := iceberg.NewStructType(iceberg.NestedField{
 		ID: 5, Name: "element", Type: iceberg.PrimitiveTypes.String,
 		InitialDefault: []any{map[string]any{"bytes": []byte{7, 8}}},
-	}}}
-	mapValue := &iceberg.StructType{FieldList: []iceberg.NestedField{{
+	})
+	mapValue := iceberg.NewStructType(iceberg.NestedField{
 		ID: 9, Name: "value", Type: iceberg.PrimitiveTypes.String,
 		WriteDefault: map[string]any{"values": []any{iceberg.FixedLiteral{10, 11}}},
-	}}}
-	payload := &iceberg.StructType{FieldList: []iceberg.NestedField{
-		{
+	})
+	payload := iceberg.NewStructType(
+		iceberg.NestedField{
 			ID: 2, Name: "binary", Type: iceberg.PrimitiveTypes.Binary,
 			InitialDefault: []byte{1, 2, 3}, WriteDefault: iceberg.BinaryLiteral{4, 5, 6},
 		},
-		{ID: 3, Name: "list", Type: &iceberg.ListType{
-			ElementID: 4, Element: listElement, ElementRequired: true,
-		}},
-		{ID: 6, Name: "map", Type: &iceberg.MapType{
-			KeyID: 7, KeyType: iceberg.PrimitiveTypes.String,
-			ValueID: 8, ValueType: mapValue, ValueRequired: false,
-		}},
-	}}
+		iceberg.NestedField{ID: 3, Name: "list", Type: iceberg.NewListType(4, listElement, true)},
+		iceberg.NestedField{ID: 6, Name: "map", Type: iceberg.NewMapType(7, iceberg.PrimitiveTypes.String, 8, mapValue, false)},
+	)
 
 	return iceberg.NewSchemaWithIdentifiers(1, []int{1}, iceberg.NestedField{
 		ID: 1, Name: "payload", Type: payload,

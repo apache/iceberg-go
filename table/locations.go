@@ -133,6 +133,7 @@ type objectStoreLocationProvider struct {
 	*simpleLocationProvider
 
 	includePartitionPaths bool
+	context               string
 }
 
 func computeHash(dataFileName string) string {
@@ -157,23 +158,71 @@ func computeHash(dataFileName string) string {
 }
 
 // NewDataLocation places the entropy hash right under the data path, like the
-// Java implementation. The partition directories are kept, and hashed with the
-// file name, only when partitioned paths are enabled.
+// Java implementation. External data paths also include the database/table
+// context, so two tables sharing a storage prefix do not share file locations.
 func (p *objectStoreLocationProvider) NewDataLocation(dataFileName, partitionPath string) string {
 	if !p.includePartitionPaths {
-		return joinLocationPath(p.dataPath, computeHash(dataFileName)+"-"+dataFileName)
+		hash := computeHash(dataFileName)
+		if p.context != "" {
+			return joinLocationPath(p.dataPath, hash, p.context, dataFileName)
+		}
+
+		return joinLocationPath(p.dataPath, hash+"-"+dataFileName)
 	}
 
 	if partitionPath != "" {
 		dataFileName = partitionPath + "/" + dataFileName
 	}
 
+	if p.context != "" {
+		return joinLocationPath(p.dataPath, computeHash(dataFileName), p.context, dataFileName)
+	}
+
 	return joinLocationPath(p.dataPath, computeHash(dataFileName), dataFileName)
 }
 
+// objectStorePathContext matches the database/table suffix Java adds when
+// write.data.path is outside the table location. Skip URI scheme and authority
+// without interpreting percent escapes, queries, or fragments in path names.
+func objectStorePathContext(tableLoc string) string {
+	location := strings.TrimRight(tableLoc, "/")
+	if scheme := strings.Index(location, "://"); scheme >= 0 {
+		_, path, ok := strings.Cut(location[scheme+3:], "/")
+		if !ok {
+			return ""
+		}
+		location = path
+	}
+
+	location = strings.Trim(location, "/")
+	lastSlash := strings.LastIndexByte(location, '/')
+	if lastSlash < 0 {
+		return location
+	}
+
+	parent := location[:lastSlash]
+	parentSlash := strings.LastIndexByte(parent, '/')
+
+	return parent[parentSlash+1:] + "/" + location[lastSlash+1:]
+}
+
+func locationIsWithinTable(location, tableLoc string) bool {
+	location = strings.TrimRight(location, "/")
+	tableLoc = strings.TrimRight(tableLoc, "/")
+
+	return location == tableLoc || strings.HasPrefix(location, tableLoc+"/")
+}
+
 func newObjectStoreLocationProvider(tableLoc string, tableProps iceberg.Properties) *objectStoreLocationProvider {
+	simple := newSimpleLocationProvider(tableLoc, tableProps)
+	var context string
+	if !locationIsWithinTable(simple.dataPath, tableLoc) {
+		context = objectStorePathContext(tableLoc)
+	}
+
 	return &objectStoreLocationProvider{
-		simpleLocationProvider: newSimpleLocationProvider(tableLoc, tableProps),
+		simpleLocationProvider: simple,
+		context:                context,
 		includePartitionPaths: tableProps.GetBool(WriteObjectStorePartitionedPathsKey,
 			WriteObjectStorePartitionedPathsDefault),
 	}

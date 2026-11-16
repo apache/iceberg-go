@@ -27,8 +27,11 @@ const (
 	S3ProxyURI        = "s3.proxy-uri"
 	// S3ConnectTimeout accepts seconds as a number, such as "60" or "60.0",
 	// or a Go duration string, such as "5s".
-	S3ConnectTimeout         = "s3.connect-timeout"
-	S3SignerURI              = "s3.signer.uri"
+	S3ConnectTimeout = "s3.connect-timeout"
+	// S3SignerURI is the legacy signing service base URI. REST catalogs default
+	// to the table-scoped signing endpoint when no legacy endpoint is provided.
+	S3SignerURI = "s3.signer.uri"
+	// S3RemoteSigningEnabled enables remote signing without local AWS credentials.
 	S3RemoteSigningEnabled   = "s3.remote-signing-enabled"
 	S3ForceVirtualAddressing = "s3.force-virtual-addressing"
 	S3ClientRegion           = "client.region"

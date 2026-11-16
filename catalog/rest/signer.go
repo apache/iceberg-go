@@ -101,8 +101,8 @@ func lookupSigner(name string) (SignerFactory, bool) {
 //   - An explicit WithSigner is used verbatim (the caller fully built it), so it
 //     bypasses the sigv4-enabled / signing-region / signing-name settings and any
 //     server-provided overrides.
-//   - Otherwise, when SigV4 is enabled (WithSigV4 / WithSigV4RegionSvc or the
-//     rest.sigv4-enabled property), a WithSignerFactory (e.g. sigv4.WithAWSConfig)
+//   - Otherwise, when SigV4 is enabled (WithSigV4 / WithSigV4RegionSvc, the
+//     rest.sigv4-enabled property or rest.auth.type=sigv4), a WithSignerFactory (e.g. sigv4.WithAWSConfig)
 //     builds the signer if one was supplied, else the registered "sigv4" backend
 //     does. Both receive the resolved region/service, which by this point already
 //     include any /v1/config overrides fetchConfig folded into opts.
@@ -111,7 +111,7 @@ func resolveSigner(ctx context.Context, opts *options) (RequestSigner, error) {
 		return opts.signer, nil
 	}
 
-	if !opts.enableSigv4 {
+	if !opts.enableSigv4 && !opts.authTypeSigV4 {
 		return nil, nil
 	}
 
@@ -120,8 +120,8 @@ func resolveSigner(ctx context.Context, opts *options) (RequestSigner, error) {
 		var ok bool
 		if factory, ok = lookupSigner(SignerNameSigV4); !ok {
 			return nil, fmt.Errorf(
-				"rest: SigV4 signing was requested (%s) but no signer backend is registered; add a blank import: import _ %q",
-				keyRestSigV4, "github.com/apache/iceberg-go/catalog/rest/sigv4")
+				"rest: SigV4 signing was requested (%s or %s=%s) but no signer backend is registered; add a blank import: import _ %q",
+				keyRestSigV4, keyAuthType, AuthTypeSigV4, "github.com/apache/iceberg-go/catalog/rest/sigv4")
 		}
 	}
 

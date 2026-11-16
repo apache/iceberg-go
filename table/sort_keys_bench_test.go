@@ -110,7 +110,7 @@ func benchmarkSortKeysSchema(fieldCount int, nested bool) *iceberg.Schema {
 				}
 				nextID++
 			}
-			field.Type = &iceberg.StructType{FieldList: children}
+			field.Type = iceberg.NewStructType(children...)
 		}
 		fields[i] = field
 	}

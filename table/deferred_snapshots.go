@@ -217,6 +217,7 @@ type deferredSnapshotFields struct {
 	SchemaID          *int            `json:"schema-id,omitempty"`
 	FirstRowID        *int64          `json:"first-row-id,omitempty"`
 	AddedRows         *int64          `json:"added-rows,omitempty"`
+	KeyID             *string         `json:"key-id,omitempty"`
 }
 
 func (s deferredSnapshotFields) validateHeavyFields() error {

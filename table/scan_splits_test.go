@@ -510,7 +510,7 @@ func TestPrepareToReadClosesReaderOnSchemaError(t *testing.T) {
 					scanner := &arrowScan{fs: fs, cacheFileReadPlan: cache}
 					invariants := &arrowScanInvariants{projectedIDs: map[int]struct{}{1: {}}}
 					for attempt := 1; attempt <= 2; attempt++ {
-						_, _, reader, err := scanner.prepareToRead(context.Background(), file.Build(), invariants)
+						_, _, reader, err := scanner.prepareToRead(context.Background(), file.Build(), invariants, nil)
 						require.Error(t, err)
 						if withIDs {
 							require.ErrorContains(t, err, "unsupported arrow type")

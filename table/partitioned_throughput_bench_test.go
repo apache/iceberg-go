@@ -200,11 +200,7 @@ func BenchmarkPartitionedWriteThroughput_ListPrimitive(b *testing.B) {
 		iceberg.NestedField{ID: 4, Name: "status_code", Type: iceberg.PrimitiveTypes.Int32, Required: true},
 		iceberg.NestedField{ID: 5, Name: "bytes_sent", Type: iceberg.PrimitiveTypes.Int64, Required: true},
 		iceberg.NestedField{ID: 6, Name: "user_agent", Type: iceberg.PrimitiveTypes.String, Required: true},
-		iceberg.NestedField{ID: 7, Name: "tags", Type: &iceberg.ListType{
-			ElementID:       8,
-			Element:         iceberg.PrimitiveTypes.String,
-			ElementRequired: true,
-		}, Required: false},
+		iceberg.NestedField{ID: 7, Name: "tags", Type: iceberg.NewListType(8, iceberg.PrimitiveTypes.String, true), Required: false},
 	)
 
 	// Define Arrow schema
@@ -278,23 +274,13 @@ func BenchmarkPartitionedWriteThroughput_ListStruct(b *testing.B) {
 	mem := memory.DefaultAllocator
 
 	// Resource struct type: {type: string, id: list<string>}
-	resourceStruct := &iceberg.StructType{
-		FieldList: []iceberg.NestedField{
-			{ID: 8, Name: "type", Type: iceberg.PrimitiveTypes.String, Required: true},
-			{ID: 9, Name: "id", Type: &iceberg.ListType{
-				ElementID:       10,
-				Element:         iceberg.PrimitiveTypes.String,
-				ElementRequired: true,
-			}, Required: true},
-		},
-	}
+	resourceStruct := iceberg.NewStructType(
+		iceberg.NestedField{ID: 8, Name: "type", Type: iceberg.PrimitiveTypes.String, Required: true},
+		iceberg.NestedField{ID: 9, Name: "id", Type: iceberg.NewListType(10, iceberg.PrimitiveTypes.String, true), Required: true},
+	)
 
 	// List of resources: list<struct<type: string, id: list<string>>>
-	resourcesListType := &iceberg.ListType{
-		ElementID:       11,
-		Element:         resourceStruct,
-		ElementRequired: true,
-	}
+	resourcesListType := iceberg.NewListType(11, resourceStruct, true)
 
 	// Define Iceberg schema with complex nested types
 	icebergSchema := iceberg.NewSchema(0,
@@ -404,13 +390,7 @@ func BenchmarkPartitionedWriteThroughput_MapPrimitive(b *testing.B) {
 		iceberg.NestedField{ID: 4, Name: "status_code", Type: iceberg.PrimitiveTypes.Int32, Required: true},
 		iceberg.NestedField{ID: 5, Name: "bytes_sent", Type: iceberg.PrimitiveTypes.Int64, Required: true},
 		iceberg.NestedField{ID: 6, Name: "user_agent", Type: iceberg.PrimitiveTypes.String, Required: true},
-		iceberg.NestedField{ID: 7, Name: "tags", Type: &iceberg.MapType{
-			KeyID:         8,
-			KeyType:       iceberg.PrimitiveTypes.String,
-			ValueID:       9,
-			ValueType:     iceberg.PrimitiveTypes.String,
-			ValueRequired: false,
-		}, Required: false},
+		iceberg.NestedField{ID: 7, Name: "tags", Type: iceberg.NewMapType(8, iceberg.PrimitiveTypes.String, 9, iceberg.PrimitiveTypes.String, false), Required: false},
 	)
 
 	// Define Arrow schema

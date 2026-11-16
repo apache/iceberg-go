@@ -59,7 +59,7 @@ type inspectContentFileBuilder struct {
 	filePath           *array.StringBuilder
 	fileFormat         *array.StringBuilder
 	specID             *array.Int32Builder
-	partition          *inspectPartitionBuilder
+	partition          *partitionStructBuilder
 	recordCount        *array.Int64Builder
 	fileSize           *array.Int64Builder
 	columnSizes        *array.MapBuilder
@@ -105,11 +105,11 @@ func newInspectContentFileBuilderFromFields(
 	builder func(int) array.Builder,
 	partitionType *iceberg.StructType,
 ) (inspectContentFileBuilder, error) {
-	lookup, err := newInspectBuilderLookup("content-file", fields, builder)
+	lookup, err := newBuilderLookup("content-file", fields, builder)
 	if err != nil {
 		return inspectContentFileBuilder{}, err
 	}
-	if err := validateInspectBuilderLookup("content-file", lookup, inspectContentFileFieldIDs(partitionType)); err != nil {
+	if err := validateBuilderLookup("content-file", lookup, inspectContentFileFieldIDs(partitionType)); err != nil {
 		return inspectContentFileBuilder{}, err
 	}
 
@@ -126,12 +126,12 @@ func newInspectContentFileBuilderFromFields(
 	if out.specID, err = inspectBuilderAs[*array.Int32Builder](lookup, inspectContentFieldIDSpecID, "spec_id"); err != nil {
 		return out, err
 	}
-	if partitionType != nil && len(partitionType.FieldList) > 0 {
+	if partitionType != nil && partitionType.NumFields() > 0 {
 		partitionBuilder, bindErr := inspectBuilderAs[*array.StructBuilder](lookup, inspectContentFieldIDPartition, "partition")
 		if bindErr != nil {
 			return out, bindErr
 		}
-		if out.partition, err = newInspectPartitionBuilder(partitionBuilder, partitionType); err != nil {
+		if out.partition, err = newPartitionStructBuilder(partitionBuilder, partitionType); err != nil {
 			return out, err
 		}
 	}
@@ -262,45 +262,11 @@ func inspectContentFileFieldIDs(partitionType *iceberg.StructType) map[int]struc
 		inspectContentFieldIDContentOffset:      {},
 		inspectContentFieldIDContentSize:        {},
 	}
-	if partitionType != nil && len(partitionType.FieldList) > 0 {
+	if partitionType != nil && partitionType.NumFields() > 0 {
 		ids[inspectContentFieldIDPartition] = struct{}{}
 	}
 
 	return ids
-}
-
-func newInspectBuilderLookup(scope string, fields []arrow.Field, builder func(int) array.Builder) (map[int]array.Builder, error) {
-	lookup := make(map[int]array.Builder, len(fields))
-	for idx, field := range fields {
-		id := getFieldID(field)
-		if id == nil {
-			return nil, fmt.Errorf("%s field %q is missing a valid field ID", scope, field.Name)
-		}
-		if _, exists := lookup[*id]; exists {
-			return nil, fmt.Errorf("%s schema contains duplicate field ID %d", scope, *id)
-		}
-		lookup[*id] = builder(idx)
-	}
-
-	return lookup, nil
-}
-
-func validateInspectBuilderLookup(scope string, lookup map[int]array.Builder, expected map[int]struct{}) error {
-	if len(lookup) != len(expected) {
-		return fmt.Errorf("%s schema has %d fields, want %d", scope, len(lookup), len(expected))
-	}
-	for id := range lookup {
-		if _, ok := expected[id]; !ok {
-			return fmt.Errorf("%s schema contains unexpected field ID %d", scope, id)
-		}
-	}
-	for id := range expected {
-		if _, ok := lookup[id]; !ok {
-			return fmt.Errorf("%s schema is missing field ID %d", scope, id)
-		}
-	}
-
-	return nil
 }
 
 func inspectBuilderAs[T any](lookup map[int]array.Builder, id int, name string) (T, error) {

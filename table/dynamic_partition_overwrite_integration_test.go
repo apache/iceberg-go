@@ -18,6 +18,7 @@
 package table_test
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -67,6 +68,43 @@ func newDynamicOverwriteTableWithSchema(t *testing.T, schema *iceberg.Schema, sp
 	return table.New(branchPlanningIdent, meta, metaLoc, branchPlanningFS, cat), cat
 }
 
+func newDynamicOverwriteTableWithUnpartitionedHistory(t *testing.T, formatVersion string) *table.Table {
+	t.Helper()
+
+	tbl, _ := newDynamicOverwriteTableWithFormat(t, *iceberg.UnpartitionedSpec, formatVersion)
+	evolve := tbl.NewTransaction()
+	require.NoError(t, evolve.UpdateSpec(true).AddIdentity("id").Commit())
+	tbl, err := evolve.Commit(t.Context())
+	require.NoError(t, err)
+
+	return tbl
+}
+
+func appendGlobalEqualityDelete(t *testing.T, tbl *table.Table, id int64) *table.Table {
+	t.Helper()
+
+	deletePath := tbl.Location() + "/data/global-equality-delete.parquet"
+	require.NoError(t, os.MkdirAll(filepath.Dir(deletePath), 0o755))
+	deleteSchema, err := table.SchemaToArrowSchema(
+		iceberg.NewSchema(0, iceberg.NestedField{
+			ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true,
+		}), nil, true, false)
+	require.NoError(t, err)
+	writeParquetFile(t, deletePath, deleteSchema, fmt.Sprintf("[{\"id\":%d}]", id))
+	deleteBuilder, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec, iceberg.EntryContentEqDeletes,
+		deletePath, iceberg.ParquetFile, nil, nil, nil, 1, 256)
+	require.NoError(t, err)
+	deleteFile := deleteBuilder.EqualityFieldIDs([]int{1}).Build()
+
+	peer := tbl.NewTransaction()
+	require.NoError(t, peer.NewRowDelta(nil).AddDeletes(deleteFile).Commit(t.Context()))
+	updated, err := peer.Commit(t.Context())
+	require.NoError(t, err)
+
+	return updated
+}
+
 func TestDynamicPartitionOverwriteArrowAndConcurrentCommit(t *testing.T) {
 	base, cat := newDynamicOverwriteTable(t)
 	tbl := appendRowsOnRef(t, base, table.MainBranch, 1, 2)
@@ -89,6 +127,80 @@ func TestDynamicPartitionOverwriteArrowAndConcurrentCommit(t *testing.T) {
 	assert.Equal(t, attemptsBefore+1, cat.attempts.Load(),
 		"touched partition conflict should fail before another catalog submission")
 	assert.ElementsMatch(t, []int64{1, 1, 2, 3}, idsOnRef(t, updated, table.MainBranch))
+}
+
+func TestDynamicPartitionOverwriteRejectsOldSpecGlobalEqualityDelete(t *testing.T) {
+	for _, formatVersion := range []string{"2", "3"} {
+		t.Run("v"+formatVersion, func(t *testing.T) {
+			tbl := newDynamicOverwriteTableWithUnpartitionedHistory(t, formatVersion)
+			tbl = appendRowsOnRef(t, tbl, table.MainBranch, 7)
+			currentSpec := tbl.Spec()
+			require.Equal(t, 1, currentSpec.ID())
+			oldSpec := tbl.Metadata().PartitionSpecByID(0)
+			require.NotNil(t, oldSpec)
+			require.True(t, oldSpec.IsUnpartitioned())
+
+			leader := tbl.NewTransaction()
+			replacement := idRecordReader(t, tbl, 7)
+			require.NoError(t, leader.DynamicPartitionOverwrite(t.Context(), replacement, nil))
+			replacement.Release()
+
+			peer := appendGlobalEqualityDelete(t, tbl, 7)
+			assert.Empty(t, idsOnRef(t, peer, table.MainBranch))
+
+			_, err := leader.Commit(t.Context())
+			require.ErrorIs(t, err, table.ErrConflictingDeleteFiles)
+		})
+	}
+}
+
+func TestDynamicPartitionOverwriteAllowsOldSpecGlobalDeleteOutsideTouchedPartition(t *testing.T) {
+	for _, formatVersion := range []string{"2", "3"} {
+		t.Run("v"+formatVersion, func(t *testing.T) {
+			tbl := newDynamicOverwriteTableWithUnpartitionedHistory(t, formatVersion)
+			tbl = appendRowsOnRef(t, tbl, table.MainBranch, 7)
+
+			leader := tbl.NewTransaction()
+			replacement := idRecordReader(t, tbl, 8)
+			require.NoError(t, leader.DynamicPartitionOverwrite(t.Context(), replacement, nil))
+			replacement.Release()
+
+			peer := appendGlobalEqualityDelete(t, tbl, 7)
+			assert.Empty(t, idsOnRef(t, peer, table.MainBranch))
+
+			committed, err := leader.Commit(t.Context())
+			require.NoError(t, err)
+			assert.ElementsMatch(t, []int64{8}, idsOnRef(t, committed, table.MainBranch))
+		})
+	}
+}
+
+func TestDynamicPartitionOverwriteAllowsRemovalOfOldSpecGlobalDelete(t *testing.T) {
+	for _, formatVersion := range []string{"2", "3"} {
+		t.Run("v"+formatVersion, func(t *testing.T) {
+			tbl := newDynamicOverwriteTableWithUnpartitionedHistory(t, formatVersion)
+			tbl = appendRowsOnRef(t, tbl, table.MainBranch, 7)
+			tbl = appendGlobalEqualityDelete(t, tbl, 9)
+
+			leader := tbl.NewTransaction()
+			replacement := idRecordReader(t, tbl, 7)
+			require.NoError(t, leader.DynamicPartitionOverwrite(t.Context(), replacement, nil))
+			replacement.Release()
+
+			builder, err := iceberg.NewDataFileBuilder(*iceberg.UnpartitionedSpec, iceberg.EntryContentEqDeletes,
+				tbl.Location()+"/data/global-equality-delete.parquet", iceberg.ParquetFile, nil, nil, nil, 1, 256)
+			require.NoError(t, err)
+			peer := tbl.NewTransaction()
+			require.NoError(t, peer.ReplaceFiles(t.Context(), nil, nil,
+				[]iceberg.DataFile{builder.EqualityFieldIDs([]int{1}).Build()}, nil))
+			_, err = peer.Commit(t.Context())
+			require.NoError(t, err)
+
+			committed, err := leader.Commit(t.Context())
+			require.NoError(t, err)
+			assert.Equal(t, []int64{7}, idsOnRef(t, committed, table.MainBranch))
+		})
+	}
 }
 
 // An append staged in the same transaction must be visible to dynamic

@@ -171,9 +171,9 @@ func newPlanningParityTable(t *testing.T) (table.Metadata, *iceio.MemFS) {
 		iceberg.NestedField{ID: 8, Name: "uuid", Type: iceberg.PrimitiveTypes.UUID},
 		iceberg.NestedField{ID: 9, Name: "blob", Type: iceberg.PrimitiveTypes.Binary},
 		iceberg.NestedField{ID: 10, Name: "fixed", Type: iceberg.MustFixedTypeOf(3)},
-		iceberg.NestedField{ID: 11, Name: "nested", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
-			{ID: 16, Name: "text", Type: iceberg.PrimitiveTypes.String},
-		}}},
+		iceberg.NestedField{ID: 11, Name: "nested", Type: iceberg.NewStructType(
+			iceberg.NestedField{ID: 16, Name: "text", Type: iceberg.PrimitiveTypes.String},
+		)},
 		iceberg.NestedField{ID: 12, Name: "flag", Type: iceberg.PrimitiveTypes.Bool},
 		iceberg.NestedField{ID: 13, Name: "score", Type: iceberg.PrimitiveTypes.Float64},
 		iceberg.NestedField{ID: 14, Name: "ratio", Type: iceberg.PrimitiveTypes.Float32},

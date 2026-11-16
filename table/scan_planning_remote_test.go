@@ -68,59 +68,47 @@ func TestRemotePlanningSelectedFieldsExpandsWildcardNestedProjection(t *testing.
 		iceberg.NestedField{
 			ID:   2,
 			Name: "address",
-			Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
-				{ID: 3, Name: "city", Type: iceberg.PrimitiveTypes.String},
-				{ID: 4, Name: "zip", Type: iceberg.PrimitiveTypes.String},
-			}},
+			Type: iceberg.NewStructType(
+				iceberg.NestedField{ID: 3, Name: "city", Type: iceberg.PrimitiveTypes.String},
+				iceberg.NestedField{ID: 4, Name: "zip", Type: iceberg.PrimitiveTypes.String},
+			),
 		},
 		iceberg.NestedField{
 			ID:   5,
 			Name: "list_struct",
-			Type: &iceberg.ListType{
-				ElementID: 6,
-				Element: &iceberg.StructType{FieldList: []iceberg.NestedField{
-					{ID: 7, Name: "a", Type: iceberg.PrimitiveTypes.String},
-					{ID: 8, Name: "b", Type: iceberg.PrimitiveTypes.Int32},
-				}},
-			},
+			Type: iceberg.NewListType(6, iceberg.NewStructType(
+				iceberg.NestedField{ID: 7, Name: "a", Type: iceberg.PrimitiveTypes.String},
+				iceberg.NestedField{ID: 8, Name: "b", Type: iceberg.PrimitiveTypes.Int32},
+			), false),
 		},
 		iceberg.NestedField{
 			ID:   9,
 			Name: "map_struct",
-			Type: &iceberg.MapType{
-				KeyID: 10, KeyType: iceberg.PrimitiveTypes.String,
-				ValueID: 11, ValueType: &iceberg.StructType{FieldList: []iceberg.NestedField{
-					{ID: 12, Name: "a", Type: iceberg.PrimitiveTypes.String},
-					{ID: 13, Name: "b", Type: iceberg.PrimitiveTypes.Int32},
-				}},
-			},
+			Type: iceberg.NewMapType(10, iceberg.PrimitiveTypes.String, 11, iceberg.NewStructType(
+				iceberg.NestedField{ID: 12, Name: "a", Type: iceberg.PrimitiveTypes.String},
+				iceberg.NestedField{ID: 13, Name: "b", Type: iceberg.PrimitiveTypes.Int32},
+			), false),
 		},
 		iceberg.NestedField{
 			ID:   14,
 			Name: "list_primitive",
-			Type: &iceberg.ListType{ElementID: 15, Element: iceberg.PrimitiveTypes.String},
+			Type: iceberg.NewListType(15, iceberg.PrimitiveTypes.String, false),
 		},
 		iceberg.NestedField{
 			ID:   16,
 			Name: "map_primitive",
-			Type: &iceberg.MapType{
-				KeyID: 17, KeyType: iceberg.PrimitiveTypes.String,
-				ValueID: 18, ValueType: iceberg.PrimitiveTypes.Int32,
-			},
+			Type: iceberg.NewMapType(17, iceberg.PrimitiveTypes.String, 18, iceberg.PrimitiveTypes.Int32, false),
 		},
 		iceberg.NestedField{
 			ID:   19,
 			Name: "map_struct_key",
-			Type: &iceberg.MapType{
-				KeyID: 20, KeyType: &iceberg.StructType{FieldList: []iceberg.NestedField{
-					{ID: 21, Name: "a", Type: iceberg.PrimitiveTypes.String},
-					{ID: 22, Name: "b", Type: iceberg.PrimitiveTypes.Int32},
-				}},
-				ValueID: 23, ValueType: &iceberg.StructType{FieldList: []iceberg.NestedField{
-					{ID: 24, Name: "a", Type: iceberg.PrimitiveTypes.String},
-					{ID: 25, Name: "b", Type: iceberg.PrimitiveTypes.Int32},
-				}},
-			},
+			Type: iceberg.NewMapType(20, iceberg.NewStructType(
+				iceberg.NestedField{ID: 21, Name: "a", Type: iceberg.PrimitiveTypes.String},
+				iceberg.NestedField{ID: 22, Name: "b", Type: iceberg.PrimitiveTypes.Int32},
+			), 23, iceberg.NewStructType(
+				iceberg.NestedField{ID: 24, Name: "a", Type: iceberg.PrimitiveTypes.String},
+				iceberg.NestedField{ID: 25, Name: "b", Type: iceberg.PrimitiveTypes.Int32},
+			), false),
 		},
 	)
 

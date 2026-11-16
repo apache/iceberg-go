@@ -25,6 +25,10 @@ import "math"
 // _partition, ...). Java: TypeUtil.MAX_STRUCT_FIELD_ID (Integer.MAX_VALUE - 200).
 const MaxStructFieldID = math.MaxInt32 - 200
 
+// RowPositionFieldID is the field ID for _pos, the ordinal position of a row
+// in its source data file. It is reserved as Integer.MAX_VALUE - 2.
+const RowPositionFieldID = 2147483645
+
 // IsReservedFieldID reports whether fieldID falls in the range the spec reserves
 // for metadata columns. User schemas must not assign IDs in this range; table
 // schema field IDs must not exceed MaxStructFieldID.

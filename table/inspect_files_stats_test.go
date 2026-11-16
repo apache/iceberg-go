@@ -90,9 +90,9 @@ func (f *borrowedInspectDataFile) DataFilePartitionRef(_ internal.DataFileRef) m
 
 func TestInspectContentFileBuilderUsesBorrowedDataFileMetadata(t *testing.T) {
 	file := &borrowedInspectDataFile{DataFile: testDataFileWithStats(t)}
-	partitionType := &iceberg.StructType{FieldList: []iceberg.NestedField{
-		{ID: 1000, Name: "part", Type: iceberg.PrimitiveTypes.String},
-	}}
+	partitionType := iceberg.NewStructType(
+		iceberg.NestedField{ID: 1000, Name: "part", Type: iceberg.PrimitiveTypes.String},
+	)
 
 	withInspectContentFileRecord(t, partitionType, file, func(record arrow.RecordBatch) {
 		require.EqualValues(t, 1, record.NumRows())
@@ -128,9 +128,9 @@ func TestInspectContentFileBuilderUsesBorrowedDataFileMetadata(t *testing.T) {
 
 func TestInspectContentFileBuilderFallsBackToPublicDataFileMetadata(t *testing.T) {
 	file := &publicStatsDataFile{DataFile: testDataFileWithStats(t)}
-	partitionType := &iceberg.StructType{FieldList: []iceberg.NestedField{
-		{ID: 1000, Name: "part", Type: iceberg.PrimitiveTypes.String},
-	}}
+	partitionType := iceberg.NewStructType(
+		iceberg.NestedField{ID: 1000, Name: "part", Type: iceberg.PrimitiveTypes.String},
+	)
 
 	withInspectContentFileRecord(t, partitionType, file, func(record arrow.RecordBatch) {
 		require.EqualValues(t, 1, record.NumRows())

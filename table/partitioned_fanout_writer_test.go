@@ -1476,11 +1476,9 @@ func (s *FanoutWriterTestSuite) TestPartitionExtractionPlanSourceFieldPaths() {
 		// "payload" is a struct column; the partition source field ("event_time",
 		// iceberg field ID 2) lives inside it rather than at the top level.
 		icebergSchema := iceberg.NewSchema(0,
-			iceberg.NestedField{ID: 1, Name: "payload", Type: &iceberg.StructType{
-				FieldList: []iceberg.NestedField{
-					{ID: 2, Name: "event_time", Type: iceberg.PrimitiveTypes.Int32},
-				},
-			}},
+			iceberg.NestedField{ID: 1, Name: "payload", Type: iceberg.NewStructType(
+				iceberg.NestedField{ID: 2, Name: "event_time", Type: iceberg.PrimitiveTypes.Int32},
+			)},
 		)
 		spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
 			SourceIDs: []int{2}, FieldID: 1000, Transform: iceberg.IdentityTransform{}, Name: "event_time",
@@ -1561,11 +1559,9 @@ func (s *FanoutWriterTestSuite) TestPartitionExtractionPlanSourceFieldPaths() {
 		icebergSchema := iceberg.NewSchema(0,
 			iceberg.NestedField{ID: 1, Name: "region", Type: iceberg.PrimitiveTypes.String},
 			iceberg.NestedField{ID: 2, Name: "user.name", Type: iceberg.PrimitiveTypes.String},
-			iceberg.NestedField{ID: 3, Name: "payload", Type: &iceberg.StructType{
-				FieldList: []iceberg.NestedField{
-					{ID: 4, Name: "event_time", Type: iceberg.PrimitiveTypes.Int32},
-				},
-			}},
+			iceberg.NestedField{ID: 3, Name: "payload", Type: iceberg.NewStructType(
+				iceberg.NestedField{ID: 4, Name: "event_time", Type: iceberg.PrimitiveTypes.Int32},
+			)},
 		)
 		spec := iceberg.NewPartitionSpec(
 			iceberg.PartitionField{SourceIDs: []int{1}, FieldID: 1000, Transform: iceberg.IdentityTransform{}, Name: "region"},
@@ -1632,19 +1628,13 @@ func (s *FanoutWriterTestSuite) TestPartitionExtractionPlanSourceFieldPaths() {
 
 	s.Run("three levels of nesting", func() {
 		icebergSchema := iceberg.NewSchema(0,
-			iceberg.NestedField{ID: 1, Name: "a", Type: &iceberg.StructType{
-				FieldList: []iceberg.NestedField{
-					{ID: 2, Name: "b", Type: &iceberg.StructType{
-						FieldList: []iceberg.NestedField{
-							{ID: 3, Name: "c", Type: &iceberg.StructType{
-								FieldList: []iceberg.NestedField{
-									{ID: 4, Name: "event_time", Type: iceberg.PrimitiveTypes.Int32},
-								},
-							}},
-						},
-					}},
-				},
-			}},
+			iceberg.NestedField{ID: 1, Name: "a", Type: iceberg.NewStructType(
+				iceberg.NestedField{ID: 2, Name: "b", Type: iceberg.NewStructType(
+					iceberg.NestedField{ID: 3, Name: "c", Type: iceberg.NewStructType(
+						iceberg.NestedField{ID: 4, Name: "event_time", Type: iceberg.PrimitiveTypes.Int32},
+					)},
+				)},
+			)},
 		)
 		spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
 			SourceIDs: []int{4}, FieldID: 1000, Transform: iceberg.IdentityTransform{}, Name: "event_time",
@@ -1701,11 +1691,9 @@ func (s *FanoutWriterTestSuite) TestPartitionExtractionPlanSourceFieldPaths() {
 
 	s.Run("literal dot in nested field name", func() {
 		icebergSchema := iceberg.NewSchema(0,
-			iceberg.NestedField{ID: 1, Name: "payload", Type: &iceberg.StructType{
-				FieldList: []iceberg.NestedField{
-					{ID: 2, Name: "user.name", Type: iceberg.PrimitiveTypes.String},
-				},
-			}},
+			iceberg.NestedField{ID: 1, Name: "payload", Type: iceberg.NewStructType(
+				iceberg.NestedField{ID: 2, Name: "user.name", Type: iceberg.PrimitiveTypes.String},
+			)},
 		)
 		spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
 			SourceIDs: []int{2}, FieldID: 1000, Transform: iceberg.IdentityTransform{}, Name: "user.name",
@@ -1746,15 +1734,11 @@ func (s *FanoutWriterTestSuite) TestPartitionExtractionPlanSourceFieldPaths() {
 
 	s.Run("mistyped intermediate struct errors", func() {
 		icebergSchema := iceberg.NewSchema(0,
-			iceberg.NestedField{ID: 1, Name: "a", Type: &iceberg.StructType{
-				FieldList: []iceberg.NestedField{
-					{ID: 2, Name: "b", Type: &iceberg.StructType{
-						FieldList: []iceberg.NestedField{
-							{ID: 3, Name: "event_time", Type: iceberg.PrimitiveTypes.Int32},
-						},
-					}},
-				},
-			}},
+			iceberg.NestedField{ID: 1, Name: "a", Type: iceberg.NewStructType(
+				iceberg.NestedField{ID: 2, Name: "b", Type: iceberg.NewStructType(
+					iceberg.NestedField{ID: 3, Name: "event_time", Type: iceberg.PrimitiveTypes.Int32},
+				)},
+			)},
 		)
 		spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
 			SourceIDs: []int{3}, FieldID: 1000, Transform: iceberg.IdentityTransform{}, Name: "event_time",
@@ -2196,7 +2180,7 @@ func (s *FanoutWriterTestSuite) TestPartitionTransformBindingFallsBackForInvalid
 	s.Nil(partitions[0].partitionRec.Get(0))
 }
 
-func (s *FanoutWriterTestSuite) TestPartitionTransformBindingFallsBackForUnsupportedSource() {
+func (s *FanoutWriterTestSuite) TestPartitionTransformBindingRejectsUnsupportedSource() {
 	arrSchema := arrow.NewSchema([]arrow.Field{{Name: "part", Type: arrow.FixedWidthTypes.Boolean}}, nil)
 	record := s.createCustomTestRecord(arrSchema, [][]any{{true}})
 	defer record.Release()
@@ -2210,9 +2194,50 @@ func (s *FanoutWriterTestSuite) TestPartitionTransformBindingFallsBackForUnsuppo
 	})
 
 	partitions, err := getRecordPartitions(spec, icebergSchema, record)
-	s.Require().NoError(err)
-	s.Require().Len(partitions, 1)
-	s.Nil(partitions[0].partitionRec.Get(0))
+	s.Require().ErrorIs(err, iceberg.ErrInvalidTransform)
+	s.ErrorContains(err, "invalid source type boolean for transform bucket[16]")
+	s.Nil(partitions)
+}
+
+func (s *FanoutWriterTestSuite) TestPartitionTransformBindingRejectsMultipleSources() {
+	arrSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "first", Type: arrow.BinaryTypes.String},
+		{Name: "second", Type: arrow.BinaryTypes.String},
+	}, nil)
+	record := s.createCustomTestRecord(arrSchema, [][]any{{"a", "b"}})
+	defer record.Release()
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "first", Type: iceberg.PrimitiveTypes.String},
+		iceberg.NestedField{ID: 2, Name: "second", Type: iceberg.PrimitiveTypes.String},
+	)
+	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{1, 2}, FieldID: 1000, Name: "first", Transform: iceberg.IdentityTransform{},
+	})
+
+	_, err := getRecordPartitions(spec, schema, record)
+	s.Require().ErrorIs(err, iceberg.ErrInvalidTransform)
+	s.ErrorContains(err, "multiple source fields")
+}
+
+type pointerSourceTransform struct{ iceberg.IdentityTransform }
+
+func (pointerSourceTransform) CanTransform(source iceberg.Type) bool {
+	_, ok := source.(*iceberg.StringType)
+
+	return ok
+}
+
+func (s *FanoutWriterTestSuite) TestPartitionTransformBindingAcceptsPointerSource() {
+	arrSchema := arrow.NewSchema([]arrow.Field{{Name: "source", Type: arrow.BinaryTypes.String}}, nil)
+	schema := iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "source", Type: &iceberg.StringType{}})
+	for _, transform := range []iceberg.Transform{iceberg.BucketTransform{NumBuckets: 8}, pointerSourceTransform{}} {
+		spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+			SourceIDs: []int{1}, FieldID: 1000, Name: "partition", Transform: transform,
+		})
+
+		_, err := newPartitionExtractionPlan(spec, schema, arrSchema)
+		s.Require().NoError(err)
+	}
 }
 
 func (s *FanoutWriterTestSuite) TestVoidTransform() {

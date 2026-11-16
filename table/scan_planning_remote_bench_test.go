@@ -58,10 +58,10 @@ func remoteWildcardProjectionBenchmarkSchema(fieldCount int) *iceberg.Schema {
 			fields[i] = iceberg.NestedField{
 				ID:   nextID,
 				Name: name,
-				Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
-					{ID: nextID + 1, Name: "city", Type: iceberg.PrimitiveTypes.String, InitialDefault: "default-city"},
-					{ID: nextID + 2, Name: "zip", Type: iceberg.PrimitiveTypes.Int32, WriteDefault: int32(0)},
-				}},
+				Type: iceberg.NewStructType(
+					iceberg.NestedField{ID: nextID + 1, Name: "city", Type: iceberg.PrimitiveTypes.String, InitialDefault: "default-city"},
+					iceberg.NestedField{ID: nextID + 2, Name: "zip", Type: iceberg.PrimitiveTypes.Int32, WriteDefault: int32(0)},
+				),
 				InitialDefault: map[string]any{
 					"city": "default-city",
 					"zip":  int32(0),
@@ -72,13 +72,10 @@ func remoteWildcardProjectionBenchmarkSchema(fieldCount int) *iceberg.Schema {
 			fields[i] = iceberg.NestedField{
 				ID:   nextID,
 				Name: name,
-				Type: &iceberg.ListType{
-					ElementID: nextID + 1,
-					Element: &iceberg.StructType{FieldList: []iceberg.NestedField{
-						{ID: nextID + 2, Name: "city", Type: iceberg.PrimitiveTypes.String, InitialDefault: "default-city"},
-						{ID: nextID + 3, Name: "zip", Type: iceberg.PrimitiveTypes.Int32, WriteDefault: int32(0)},
-					}},
-				},
+				Type: iceberg.NewListType(nextID+1, iceberg.NewStructType(
+					iceberg.NestedField{ID: nextID + 2, Name: "city", Type: iceberg.PrimitiveTypes.String, InitialDefault: "default-city"},
+					iceberg.NestedField{ID: nextID + 3, Name: "zip", Type: iceberg.PrimitiveTypes.Int32, WriteDefault: int32(0)},
+				), false),
 				InitialDefault: []any{map[string]any{
 					"city": "default-city",
 					"zip":  int32(0),
@@ -89,15 +86,10 @@ func remoteWildcardProjectionBenchmarkSchema(fieldCount int) *iceberg.Schema {
 			fields[i] = iceberg.NestedField{
 				ID:   nextID,
 				Name: name,
-				Type: &iceberg.MapType{
-					KeyID:   nextID + 1,
-					KeyType: iceberg.PrimitiveTypes.String,
-					ValueID: nextID + 2,
-					ValueType: &iceberg.StructType{FieldList: []iceberg.NestedField{
-						{ID: nextID + 3, Name: "city", Type: iceberg.PrimitiveTypes.String, InitialDefault: "default-city"},
-						{ID: nextID + 4, Name: "zip", Type: iceberg.PrimitiveTypes.Int32, WriteDefault: int32(0)},
-					}},
-				},
+				Type: iceberg.NewMapType(nextID+1, iceberg.PrimitiveTypes.String, nextID+2, iceberg.NewStructType(
+					iceberg.NestedField{ID: nextID + 3, Name: "city", Type: iceberg.PrimitiveTypes.String, InitialDefault: "default-city"},
+					iceberg.NestedField{ID: nextID + 4, Name: "zip", Type: iceberg.PrimitiveTypes.Int32, WriteDefault: int32(0)},
+				), false),
 				InitialDefault: map[string]any{
 					"default-key": map[string]any{
 						"city": "default-city",

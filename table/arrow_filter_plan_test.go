@@ -93,18 +93,10 @@ func TestCompiledFileFilterPlansSeparatePhysicalTypes(t *testing.T) {
 
 func TestPhysicalSchemaKeyIncludesNestedFieldIDs(t *testing.T) {
 	firstSchema := iceberg.NewSchema(1, iceberg.NestedField{
-		ID: 1, Name: "items", Type: &iceberg.ListType{
-			ElementID:       2,
-			Element:         iceberg.PrimitiveTypes.Int64,
-			ElementRequired: false,
-		},
+		ID: 1, Name: "items", Type: iceberg.NewListType(2, iceberg.PrimitiveTypes.Int64, false),
 	})
 	secondSchema := iceberg.NewSchema(2, iceberg.NestedField{
-		ID: 1, Name: "items", Type: &iceberg.ListType{
-			ElementID:       3,
-			Element:         iceberg.PrimitiveTypes.Int64,
-			ElementRequired: false,
-		},
+		ID: 1, Name: "items", Type: iceberg.NewListType(3, iceberg.PrimitiveTypes.Int64, false),
 	})
 
 	firstKey, err := physicalSchemaKey(firstSchema)
@@ -204,9 +196,9 @@ func TestCompiledFileFilterPlansDisablePruningForMissingInitialDefault(t *testin
 
 func TestPhysicalSchemaKeyIgnoresMetadata(t *testing.T) {
 	fields := []iceberg.NestedField{{
-		ID: 1, Name: "root", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
-			{ID: 2, Name: "value", Type: iceberg.PrimitiveTypes.Int64, Required: true},
-		}},
+		ID: 1, Name: "root", Type: iceberg.NewStructType(
+			iceberg.NestedField{ID: 2, Name: "value", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		),
 	}}
 	original := iceberg.NewSchema(1, fields...)
 	key, err := physicalSchemaKey(original)
@@ -230,17 +222,12 @@ func TestPhysicalSchemaKeyIgnoresMetadata(t *testing.T) {
 
 func TestPhysicalSchemaKeyDistinguishesNestedLayouts(t *testing.T) {
 	schema := iceberg.NewSchema(1, iceberg.NestedField{
-		ID: 1, Name: "root", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
-			{ID: 2, Name: "items", Type: &iceberg.ListType{
-				ElementID: 3, Element: iceberg.PrimitiveTypes.Int64,
-			}},
-			{ID: 4, Name: "lookup", Type: &iceberg.MapType{
-				KeyID: 5, KeyType: iceberg.PrimitiveTypes.String,
-				ValueID: 6, ValueType: iceberg.MustDecimalTypeOf(10, 2),
-			}},
-			{ID: 7, Name: "fixed", Type: iceberg.MustFixedTypeOf(8)},
-			{ID: 8, Name: "variant", Type: iceberg.VariantType{}},
-		}},
+		ID: 1, Name: "root", Type: iceberg.NewStructType(
+			iceberg.NestedField{ID: 2, Name: "items", Type: iceberg.NewListType(3, iceberg.PrimitiveTypes.Int64, false)},
+			iceberg.NestedField{ID: 4, Name: "lookup", Type: iceberg.NewMapType(5, iceberg.PrimitiveTypes.String, 6, iceberg.MustDecimalTypeOf(10, 2), false)},
+			iceberg.NestedField{ID: 7, Name: "fixed", Type: iceberg.MustFixedTypeOf(8)},
+			iceberg.NestedField{ID: 8, Name: "variant", Type: iceberg.VariantType{}},
+		),
 	})
 	original, err := physicalSchemaKey(schema)
 	require.NoError(t, err)
@@ -293,10 +280,10 @@ func TestPhysicalSchemaKeyInvalidSchema(t *testing.T) {
 		{"nil_struct", (*iceberg.StructType)(nil)},
 		{"nil_list", (*iceberg.ListType)(nil)},
 		{"nil_map", (*iceberg.MapType)(nil)},
-		{"nil_struct_field", &iceberg.StructType{FieldList: []iceberg.NestedField{{ID: 2, Name: "child"}}}},
-		{"nil_list_element", &iceberg.ListType{ElementID: 2}},
-		{"nil_map_key", &iceberg.MapType{KeyID: 2, ValueID: 3, ValueType: iceberg.PrimitiveTypes.String}},
-		{"nil_map_value", &iceberg.MapType{KeyID: 2, KeyType: iceberg.PrimitiveTypes.String, ValueID: 3}},
+		{"nil_struct_field", iceberg.NewStructType(iceberg.NestedField{ID: 2, Name: "child"})},
+		{"nil_list_element", iceberg.NewListType(2, nil, false)},
+		{"nil_map_key", iceberg.NewMapType(2, nil, 3, iceberg.PrimitiveTypes.String, false)},
+		{"nil_map_value", iceberg.NewMapType(2, iceberg.PrimitiveTypes.String, 3, nil, false)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			key, err := physicalSchemaKey(iceberg.NewSchema(1, iceberg.NestedField{ID: 1, Name: "invalid", Type: tc.typ}))

@@ -42,8 +42,10 @@ func GetFile(ctx context.Context, fs iceio.IO, dataFile iceberg.DataFile, isPosD
 			fs:   fs,
 			file: dataFile,
 		}, nil
+	case iceberg.AvroFile:
+		return &AvroFileSource{fs: fs, file: dataFile}, nil
 	default:
-		return nil, fmt.Errorf("%w: only parquet format is implemented, got %s",
+		return nil, fmt.Errorf("%w: unsupported data file format %s",
 			iceberg.ErrNotImplemented, dataFile.FileFormat())
 	}
 }
@@ -115,7 +117,10 @@ func FormatFromFileName(fileName string) FileFormat {
 }
 
 type WriteFileInfo struct {
-	FileSchema       *iceberg.Schema
+	FileSchema *iceberg.Schema
+	// PropertySchema retains the table's original field names when FileSchema
+	// has been sanitized for a file format. Field IDs are shared by both.
+	PropertySchema   *iceberg.Schema
 	Spec             iceberg.PartitionSpec
 	FileName         string
 	StatsCols        map[int]StatisticsCollector

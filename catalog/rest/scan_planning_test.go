@@ -1907,7 +1907,9 @@ func TestPlanFilesSurfacesVendedCredentials(t *testing.T) {
 
 	wrapped, ok := result.IO.(*planIOWithCleanup)
 	require.True(t, ok)
-	planIO, ok := wrapped.io.(*planScopedIO)
+	signingIO, ok := wrapped.io.(*remoteSigningPlanIO)
+	require.True(t, ok)
+	planIO, ok := signingIO.PlanIO.(*planScopedIO)
 	require.True(t, ok)
 	assert.Equal(t, "https://table.local", planIO.refresher.props["s3.endpoint"])
 	assert.Equal(t, "table-static", planIO.refresher.props["s3.access-key-id"])

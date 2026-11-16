@@ -578,22 +578,18 @@ func TestTranslateColumnNamesRejectsWrappedInitialDefault(t *testing.T) {
 
 func TestTranslateColumnNamesNestedInitialDefaultDoesNotAssumeParentPresent(t *testing.T) {
 	currentSchema := iceberg.NewSchema(1, iceberg.NestedField{
-		ID: 1, Name: "location", Type: &iceberg.StructType{
-			FieldList: []iceberg.NestedField{
-				{ID: 2, Name: "city", Type: iceberg.PrimitiveTypes.String},
-				{
-					ID: 3, Name: "country", Type: iceberg.PrimitiveTypes.String,
-					InitialDefault: "US",
-				},
+		ID: 1, Name: "location", Type: iceberg.NewStructType(
+			iceberg.NestedField{ID: 2, Name: "city", Type: iceberg.PrimitiveTypes.String},
+			iceberg.NestedField{
+				ID: 3, Name: "country", Type: iceberg.PrimitiveTypes.String,
+				InitialDefault: "US",
 			},
-		},
+		),
 	})
 	fileSchema := iceberg.NewSchema(0, iceberg.NestedField{
-		ID: 1, Name: "location", Type: &iceberg.StructType{
-			FieldList: []iceberg.NestedField{
-				{ID: 2, Name: "city", Type: iceberg.PrimitiveTypes.String},
-			},
-		},
+		ID: 1, Name: "location", Type: iceberg.NewStructType(
+			iceberg.NestedField{ID: 2, Name: "city", Type: iceberg.PrimitiveTypes.String},
+		),
 	})
 
 	for _, expr := range []struct {
@@ -843,37 +839,25 @@ var testSchema = iceberg.NewSchema(1,
 	},
 	iceberg.NestedField{
 		ID: 16, Name: "s1",
-		Type: &iceberg.StructType{
-			FieldList: []iceberg.NestedField{{
-				ID: 17, Name: "s2", Required: true,
-				Type: &iceberg.StructType{
-					FieldList: []iceberg.NestedField{{
-						ID: 18, Name: "s3", Required: true,
-						Type: &iceberg.StructType{
-							FieldList: []iceberg.NestedField{{
-								ID: 19, Name: "s4", Required: true,
-								Type: &iceberg.StructType{
-									FieldList: []iceberg.NestedField{{
-										ID: 20, Name: "i", Required: true,
-										Type: iceberg.PrimitiveTypes.Int32,
-									}},
-								},
-							}},
-						},
-					}},
-				},
-			}},
-		},
+		Type: iceberg.NewStructType(iceberg.NestedField{
+			ID: 17, Name: "s2", Required: true,
+			Type: iceberg.NewStructType(iceberg.NestedField{
+				ID: 18, Name: "s3", Required: true,
+				Type: iceberg.NewStructType(iceberg.NestedField{
+					ID: 19, Name: "s4", Required: true,
+					Type: iceberg.NewStructType(iceberg.NestedField{
+						ID: 20, Name: "i", Required: true,
+						Type: iceberg.PrimitiveTypes.Int32,
+					}),
+				}),
+			}),
+		}),
 	},
-	iceberg.NestedField{ID: 21, Name: "s5", Type: &iceberg.StructType{
-		FieldList: []iceberg.NestedField{{
-			ID: 22, Name: "s6", Required: true, Type: &iceberg.StructType{
-				FieldList: []iceberg.NestedField{{
-					ID: 23, Name: "f", Required: true, Type: iceberg.PrimitiveTypes.Float32,
-				}},
-			},
-		}},
-	}},
+	iceberg.NestedField{ID: 21, Name: "s5", Type: iceberg.NewStructType(iceberg.NestedField{
+		ID: 22, Name: "s6", Required: true, Type: iceberg.NewStructType(iceberg.NestedField{
+			ID: 23, Name: "f", Required: true, Type: iceberg.PrimitiveTypes.Float32,
+		}),
+	})},
 	iceberg.NestedField{ID: 24, Name: "s", Type: iceberg.PrimitiveTypes.String})
 
 func TestExprEvaluator(t *testing.T) {
@@ -1358,5 +1342,32 @@ func TestSanitizeExpression(t *testing.T) {
 		got, err := iceberg.SanitizeExpression(c)
 		require.NoError(t, err)
 		assert.True(t, got.Equals(c))
+	}
+}
+
+func TestEvaluatorSignedZeroPredicates(t *testing.T) {
+	for _, typ := range []iceberg.Type{iceberg.PrimitiveTypes.Float32, iceberg.PrimitiveTypes.Float64} {
+		schema := iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "x", Type: typ})
+		var values []iceberg.Literal
+		var rows []iceberg.StructLike
+		if typ.Equals(iceberg.PrimitiveTypes.Float32) {
+			values = []iceberg.Literal{iceberg.Float32Literal(0), iceberg.Float32Literal(math.Float32frombits(1 << 31))}
+			rows = []iceberg.StructLike{rowOf(float32(0)), rowOf(math.Float32frombits(1 << 31))}
+		} else {
+			values = []iceberg.Literal{iceberg.Float64Literal(0), iceberg.Float64Literal(math.Copysign(0, -1))}
+			rows = []iceberg.StructLike{rowOf(float64(0)), rowOf(math.Copysign(0, -1))}
+		}
+		for _, literal := range values {
+			for _, op := range []iceberg.Operation{iceberg.OpEQ, iceberg.OpNEQ, iceberg.OpLT, iceberg.OpLTEQ, iceberg.OpGT, iceberg.OpGTEQ} {
+				evaluator, err := iceberg.ExpressionEvaluator(schema, iceberg.LiteralPredicate(op, iceberg.Reference("x"), literal), true)
+				require.NoError(t, err)
+				for _, row := range rows {
+					matches, err := evaluator(row)
+					require.NoError(t, err)
+					expected := op == iceberg.OpEQ || op == iceberg.OpLTEQ || op == iceberg.OpGTEQ
+					require.Equal(t, expected, matches, "%s %s", typ, op)
+				}
+			}
+		}
 	}
 }

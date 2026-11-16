@@ -105,24 +105,17 @@ func TestCompatibilityPrimitiveTypes(t *testing.T) {
 			}
 		}
 
-		structSchema := schemaOf(required(1, "struct_field", &iceberg.StructType{
-			FieldList: []iceberg.NestedField{required(2, "from", from)},
-		}))
+		structSchema := schemaOf(required(1, "struct_field", iceberg.NewStructType(required(2, "from", from))))
 		errs := writeErrors(t, structSchema, fromSchema)
 		require.Len(t, errs, 1)
 		assert.Contains(t, errs[0], "cannot be read as a struct")
 
-		listSchema := schemaOf(required(1, "list_field", &iceberg.ListType{
-			ElementID: 2, Element: from, ElementRequired: true,
-		}))
+		listSchema := schemaOf(required(1, "list_field", iceberg.NewListType(2, from, true)))
 		errs = writeErrors(t, listSchema, fromSchema)
 		require.Len(t, errs, 1)
 		assert.Contains(t, errs[0], "cannot be read as a list")
 
-		mapSchema := schemaOf(required(1, "map_field", &iceberg.MapType{
-			KeyID: 2, KeyType: iceberg.PrimitiveTypes.String,
-			ValueID: 3, ValueType: from, ValueRequired: true,
-		}))
+		mapSchema := schemaOf(required(1, "map_field", iceberg.NewMapType(2, iceberg.PrimitiveTypes.String, 3, from, true)))
 		errs = writeErrors(t, mapSchema, fromSchema)
 		require.Len(t, errs, 1)
 		assert.Contains(t, errs[0], "cannot be read as a map")
@@ -161,12 +154,9 @@ func TestCompatibilityVariantToVariant(t *testing.T) {
 
 func TestCompatibilityIncompatibleTypesToVariant(t *testing.T) {
 	from := []iceberg.Type{
-		&iceberg.StructType{FieldList: []iceberg.NestedField{required(1, "from", iceberg.PrimitiveTypes.Int32)}},
-		&iceberg.MapType{
-			KeyID: 1, KeyType: iceberg.PrimitiveTypes.String,
-			ValueID: 2, ValueType: iceberg.PrimitiveTypes.Int32, ValueRequired: true,
-		},
-		&iceberg.ListType{ElementID: 1, Element: iceberg.PrimitiveTypes.String, ElementRequired: true},
+		iceberg.NewStructType(required(1, "from", iceberg.PrimitiveTypes.Int32)),
+		iceberg.NewMapType(1, iceberg.PrimitiveTypes.String, 2, iceberg.PrimitiveTypes.Int32, true),
+		iceberg.NewListType(1, iceberg.PrimitiveTypes.String, true),
 	}
 	for _, p := range compatPrimitives(t) {
 		from = append(from, p)
@@ -200,7 +190,7 @@ func TestCompatibilityMissingSchemaField(t *testing.T) {
 }
 
 func nestedStruct(fields ...iceberg.NestedField) *iceberg.StructType {
-	return &iceberg.StructType{FieldList: fields}
+	return iceberg.NewStructType(fields...)
 }
 
 func TestCompatibilityRequiredStructField(t *testing.T) {
@@ -258,14 +248,8 @@ func TestCompatibilityMultipleErrors(t *testing.T) {
 }
 
 func TestCompatibilityRequiredMapValue(t *testing.T) {
-	write := schemaOf(required(0, "map_field", &iceberg.MapType{
-		KeyID: 1, KeyType: iceberg.PrimitiveTypes.String,
-		ValueID: 2, ValueType: iceberg.PrimitiveTypes.Int32,
-	}))
-	read := schemaOf(required(0, "map_field", &iceberg.MapType{
-		KeyID: 1, KeyType: iceberg.PrimitiveTypes.String,
-		ValueID: 2, ValueType: iceberg.PrimitiveTypes.Int32, ValueRequired: true,
-	}))
+	write := schemaOf(required(0, "map_field", iceberg.NewMapType(1, iceberg.PrimitiveTypes.String, 2, iceberg.PrimitiveTypes.Int32, false)))
+	read := schemaOf(required(0, "map_field", iceberg.NewMapType(1, iceberg.PrimitiveTypes.String, 2, iceberg.PrimitiveTypes.Int32, true)))
 
 	errs := writeErrors(t, read, write)
 	require.Len(t, errs, 1)
@@ -273,14 +257,8 @@ func TestCompatibilityRequiredMapValue(t *testing.T) {
 }
 
 func TestCompatibilityIncompatibleMapKey(t *testing.T) {
-	write := schemaOf(required(0, "map_field", &iceberg.MapType{
-		KeyID: 1, KeyType: iceberg.PrimitiveTypes.Int32,
-		ValueID: 2, ValueType: iceberg.PrimitiveTypes.String,
-	}))
-	read := schemaOf(required(0, "map_field", &iceberg.MapType{
-		KeyID: 1, KeyType: iceberg.PrimitiveTypes.Float64,
-		ValueID: 2, ValueType: iceberg.PrimitiveTypes.String,
-	}))
+	write := schemaOf(required(0, "map_field", iceberg.NewMapType(1, iceberg.PrimitiveTypes.Int32, 2, iceberg.PrimitiveTypes.String, false)))
+	read := schemaOf(required(0, "map_field", iceberg.NewMapType(1, iceberg.PrimitiveTypes.Float64, 2, iceberg.PrimitiveTypes.String, false)))
 
 	errs := writeErrors(t, read, write)
 	require.Len(t, errs, 1)
@@ -288,14 +266,8 @@ func TestCompatibilityIncompatibleMapKey(t *testing.T) {
 }
 
 func TestCompatibilityIncompatibleMapValue(t *testing.T) {
-	write := schemaOf(required(0, "map_field", &iceberg.MapType{
-		KeyID: 1, KeyType: iceberg.PrimitiveTypes.String,
-		ValueID: 2, ValueType: iceberg.PrimitiveTypes.Int32,
-	}))
-	read := schemaOf(required(0, "map_field", &iceberg.MapType{
-		KeyID: 1, KeyType: iceberg.PrimitiveTypes.String,
-		ValueID: 2, ValueType: iceberg.PrimitiveTypes.Float64,
-	}))
+	write := schemaOf(required(0, "map_field", iceberg.NewMapType(1, iceberg.PrimitiveTypes.String, 2, iceberg.PrimitiveTypes.Int32, false)))
+	read := schemaOf(required(0, "map_field", iceberg.NewMapType(1, iceberg.PrimitiveTypes.String, 2, iceberg.PrimitiveTypes.Float64, false)))
 
 	errs := writeErrors(t, read, write)
 	require.Len(t, errs, 1)
@@ -303,10 +275,7 @@ func TestCompatibilityIncompatibleMapValue(t *testing.T) {
 }
 
 func TestCompatibilityIncompatibleMapAndPrimitive(t *testing.T) {
-	write := schemaOf(required(0, "map_field", &iceberg.MapType{
-		KeyID: 1, KeyType: iceberg.PrimitiveTypes.String,
-		ValueID: 2, ValueType: iceberg.PrimitiveTypes.Int32,
-	}))
+	write := schemaOf(required(0, "map_field", iceberg.NewMapType(1, iceberg.PrimitiveTypes.String, 2, iceberg.PrimitiveTypes.Int32, false)))
 	read := schemaOf(required(0, "map_field", iceberg.PrimitiveTypes.String))
 
 	errs := writeErrors(t, read, write)
@@ -315,8 +284,8 @@ func TestCompatibilityIncompatibleMapAndPrimitive(t *testing.T) {
 }
 
 func TestCompatibilityRequiredListElement(t *testing.T) {
-	write := schemaOf(required(0, "list_field", &iceberg.ListType{ElementID: 1, Element: iceberg.PrimitiveTypes.Int32}))
-	read := schemaOf(required(0, "list_field", &iceberg.ListType{ElementID: 1, Element: iceberg.PrimitiveTypes.Int32, ElementRequired: true}))
+	write := schemaOf(required(0, "list_field", iceberg.NewListType(1, iceberg.PrimitiveTypes.Int32, false)))
+	read := schemaOf(required(0, "list_field", iceberg.NewListType(1, iceberg.PrimitiveTypes.Int32, true)))
 
 	errs := writeErrors(t, read, write)
 	require.Len(t, errs, 1)
@@ -324,8 +293,8 @@ func TestCompatibilityRequiredListElement(t *testing.T) {
 }
 
 func TestCompatibilityIncompatibleListElement(t *testing.T) {
-	write := schemaOf(required(0, "list_field", &iceberg.ListType{ElementID: 1, Element: iceberg.PrimitiveTypes.Int32}))
-	read := schemaOf(required(0, "list_field", &iceberg.ListType{ElementID: 1, Element: iceberg.PrimitiveTypes.String}))
+	write := schemaOf(required(0, "list_field", iceberg.NewListType(1, iceberg.PrimitiveTypes.Int32, false)))
+	read := schemaOf(required(0, "list_field", iceberg.NewListType(1, iceberg.PrimitiveTypes.String, false)))
 
 	errs := writeErrors(t, read, write)
 	require.Len(t, errs, 1)
@@ -333,7 +302,7 @@ func TestCompatibilityIncompatibleListElement(t *testing.T) {
 }
 
 func TestCompatibilityIncompatibleListAndPrimitive(t *testing.T) {
-	write := schemaOf(required(0, "list_field", &iceberg.ListType{ElementID: 1, Element: iceberg.PrimitiveTypes.Int32}))
+	write := schemaOf(required(0, "list_field", iceberg.NewListType(1, iceberg.PrimitiveTypes.Int32, false)))
 	read := schemaOf(required(0, "list_field", iceberg.PrimitiveTypes.String))
 
 	errs := writeErrors(t, read, write)
@@ -342,28 +311,16 @@ func TestCompatibilityIncompatibleListAndPrimitive(t *testing.T) {
 }
 
 func TestCompatibilityIncompatibleNestedListOfMap(t *testing.T) {
-	write := schemaOf(required(0, "list_field", &iceberg.ListType{ElementID: 1, Element: &iceberg.MapType{
-		KeyID: 2, KeyType: iceberg.PrimitiveTypes.String,
-		ValueID: 3, ValueType: iceberg.PrimitiveTypes.Int32,
-	}}))
-	read := schemaOf(required(0, "list_field", &iceberg.ListType{ElementID: 1, Element: &iceberg.MapType{
-		KeyID: 2, KeyType: iceberg.PrimitiveTypes.String,
-		ValueID: 3, ValueType: iceberg.PrimitiveTypes.String,
-	}}))
+	write := schemaOf(required(0, "list_field", iceberg.NewListType(1, iceberg.NewMapType(2, iceberg.PrimitiveTypes.String, 3, iceberg.PrimitiveTypes.Int32, false), false)))
+	read := schemaOf(required(0, "list_field", iceberg.NewListType(1, iceberg.NewMapType(2, iceberg.PrimitiveTypes.String, 3, iceberg.PrimitiveTypes.String, false), false)))
 
 	errs := writeErrors(t, read, write)
 	assert.Equal(t, []string{"list_field: int cannot be promoted to string"}, errs)
 }
 
 func TestCompatibilityIncompatibleMapOfStruct(t *testing.T) {
-	write := schemaOf(required(0, "map_field", &iceberg.MapType{
-		KeyID: 1, KeyType: iceberg.PrimitiveTypes.String,
-		ValueID: 2, ValueType: nestedStruct(required(3, "x", iceberg.PrimitiveTypes.Int32)),
-	}))
-	read := schemaOf(required(0, "map_field", &iceberg.MapType{
-		KeyID: 1, KeyType: iceberg.PrimitiveTypes.String,
-		ValueID: 2, ValueType: nestedStruct(required(3, "x", iceberg.PrimitiveTypes.Float64)),
-	}))
+	write := schemaOf(required(0, "map_field", iceberg.NewMapType(1, iceberg.PrimitiveTypes.String, 2, nestedStruct(required(3, "x", iceberg.PrimitiveTypes.Int32)), false)))
+	read := schemaOf(required(0, "map_field", iceberg.NewMapType(1, iceberg.PrimitiveTypes.String, 2, nestedStruct(required(3, "x", iceberg.PrimitiveTypes.Float64)), false)))
 
 	errs := writeErrors(t, read, write)
 	assert.Equal(t, []string{"map_field.x: int cannot be promoted to double"}, errs)
@@ -448,7 +405,7 @@ func TestReadCompatibilitySchemaEvolution(t *testing.T) {
 	current := schemaOf(
 		required(1, "id", iceberg.PrimitiveTypes.Int32),
 		optional(2, "name", iceberg.PrimitiveTypes.String),
-		optional(3, "tags", &iceberg.ListType{ElementID: 4, Element: iceberg.PrimitiveTypes.String}),
+		optional(3, "tags", iceberg.NewListType(4, iceberg.PrimitiveTypes.String, false)),
 	)
 
 	tests := []struct {
@@ -491,7 +448,7 @@ func TestReadCompatibilitySchemaEvolution(t *testing.T) {
 			name: "nested list element error is prefixed with the field name",
 			proposed: schemaOf(
 				required(1, "id", iceberg.PrimitiveTypes.Int32),
-				optional(3, "tags", &iceberg.ListType{ElementID: 4, Element: iceberg.PrimitiveTypes.Int32, ElementRequired: true}),
+				optional(3, "tags", iceberg.NewListType(4, iceberg.PrimitiveTypes.Int32, true)),
 			),
 			errs: []string{
 				"tags: elements should be required, but are optional",

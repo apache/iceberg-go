@@ -28,9 +28,8 @@ import (
 
 type MappedField struct {
 	Names []string `json:"names"`
-	// iceberg spec says this is optional, but I don't see any examples
-	// of this being left empty. Does pyiceberg need to be updated or should
-	// the spec not say field-id is optional?
+	// FieldID is nil for fields that exist only in imported files, as the
+	// spec allows. ApplyNameMapping gives such fields ID -1.
 	FieldID *int          `json:"field-id,omitempty"`
 	Fields  []MappedField `json:"fields,omitempty"`
 }
@@ -332,18 +331,20 @@ type indexedNameMappingAccessor struct {
 	fieldsByName map[*MappedField]map[string]*MappedField
 }
 
-func newIndexedNameMappingAccessor(root *MappedField) indexedNameMappingAccessor {
+func newIndexedNameMappingAccessor(root *MappedField) (indexedNameMappingAccessor, error) {
 	accessor := indexedNameMappingAccessor{
 		fieldsByName: make(map[*MappedField]map[string]*MappedField),
 	}
-	accessor.indexFields(root)
+	if err := accessor.indexFields(root); err != nil {
+		return indexedNameMappingAccessor{}, err
+	}
 
-	return accessor
+	return accessor, nil
 }
 
-func (n indexedNameMappingAccessor) indexFields(field *MappedField) {
+func (n indexedNameMappingAccessor) indexFields(field *MappedField) error {
 	if field == nil || len(field.Fields) == 0 {
-		return
+		return nil
 	}
 
 	fieldsByName := make(map[string]*MappedField, len(field.Fields))
@@ -352,13 +353,19 @@ func (n indexedNameMappingAccessor) indexFields(field *MappedField) {
 	for i := range field.Fields {
 		mappedField := &field.Fields[i]
 		for _, name := range mappedField.Names {
-			if _, exists := fieldsByName[name]; !exists {
-				fieldsByName[name] = mappedField
+			if existing, ok := fieldsByName[name]; ok && existing != mappedField {
+				return fmt.Errorf("%w: duplicate name mapping %q (field IDs %d and %d)",
+					ErrInvalidSchema, name, existing.ID(), mappedField.ID())
 			}
+			fieldsByName[name] = mappedField
 		}
 
-		n.indexFields(mappedField)
+		if err := n.indexFields(mappedField); err != nil {
+			return err
+		}
 	}
+
+	return nil
 }
 
 func (n indexedNameMappingAccessor) getField(partnerStruct *MappedField, fieldName string) *MappedField {
@@ -453,7 +460,7 @@ func (n *nameMapProjectVisitor) Field(field NestedField, fieldPartner *MappedFie
 	}
 
 	return NestedField{
-		ID:             *fieldPartner.FieldID,
+		ID:             fieldPartner.ID(),
 		Name:           field.Name,
 		Type:           fieldResult.Type,
 		Required:       field.Required,
@@ -529,7 +536,11 @@ func (n *nameMapProjectVisitor) Variant(v VariantType, variantPartner *MappedFie
 
 func ApplyNameMapping(schemaWithoutIDs *Schema, nameMapping NameMapping) (*Schema, error) {
 	partner := &MappedField{Fields: nameMapping}
-	accessor := newIndexedNameMappingAccessor(partner)
+	accessor, err := newIndexedNameMappingAccessor(partner)
+	if err != nil {
+		return nil, err
+	}
+
 	top, err := VisitSchemaWithPartner(schemaWithoutIDs,
 		partner,
 		&nameMapProjectVisitor{
@@ -541,8 +552,12 @@ func ApplyNameMapping(schemaWithoutIDs *Schema, nameMapping NameMapping) (*Schem
 		return nil, err
 	}
 
-	return NewSchema(schemaWithoutIDs.ID,
-		top.Type.(*StructType).FieldList...), nil
+	fields := top.Type.(*StructType).FieldList
+	if err := checkDuplicateFieldIDs(nil, fields); err != nil {
+		return nil, err
+	}
+
+	return NewSchema(schemaWithoutIDs.ID, fields...), nil
 }
 
 type createMapping struct{}

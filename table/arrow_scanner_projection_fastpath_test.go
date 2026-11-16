@@ -104,9 +104,9 @@ func TestCanReuseFlatProjection(t *testing.T) {
 		"missing fields may need defaults")
 
 	nested := iceberg.NewSchema(0, iceberg.NestedField{
-		ID: 1, Name: "struct", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
-			{ID: 2, Name: "value", Type: iceberg.PrimitiveTypes.Int64},
-		}},
+		ID: 1, Name: "struct", Type: iceberg.NewStructType(
+			iceberg.NestedField{ID: 2, Name: "value", Type: iceberg.PrimitiveTypes.Int64},
+		),
 	})
 	nestedArrow, err := SchemaToArrowSchema(nested, nil, false, false)
 	require.NoError(t, err)

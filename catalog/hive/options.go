@@ -52,8 +52,9 @@ const (
 	// Legacy Go keys remain accepted as aliases so existing configs keep working;
 	// when both forms are set, the Java key wins.
 	// Ref: https://iceberg.apache.org/docs/nightly/catalog-properties/#hive-metastore-configuration
-	LockCheckMinWaitMs = "iceberg.hive.lock-check-min-wait-ms"
-	LockCheckMaxWaitMs = "iceberg.hive.lock-check-max-wait-ms"
+	LockCheckMinWaitMs      = "iceberg.hive.lock-check-min-wait-ms"
+	LockCheckMaxWaitMs      = "iceberg.hive.lock-check-max-wait-ms"
+	LockHeartbeatIntervalMs = "iceberg.hive.lock-heartbeat-interval-ms"
 
 	// Legacy Go-specific aliases (Go duration strings, e.g. "100ms", "5s").
 	LockCheckMinWaitTime = "lock-check-min-wait-time"
@@ -63,9 +64,10 @@ const (
 	LockCheckRetries = "lock-check-retries"
 
 	// Default lock configuration values match the Java Hive catalog.
-	DefaultLockCheckMinWaitTime = 50 * time.Millisecond // Java: 50ms
-	DefaultLockCheckMaxWaitTime = 5 * time.Second       // Java: 5000ms
-	DefaultLockCheckRetries     = 4
+	DefaultLockCheckMinWaitTime  = 50 * time.Millisecond // Java: 50ms
+	DefaultLockCheckMaxWaitTime  = 5 * time.Second       // Java: 5000ms
+	DefaultLockCheckRetries      = 4
+	DefaultLockHeartbeatInterval = 4 * time.Minute
 
 	// lockCheckBackoffScale matches the Java MetastoreLock lock-check path, which
 	// passes 1.5 to Tasks.exponentialBackoff (not the Tasks default of 2.0).
@@ -79,18 +81,20 @@ type HiveOptions struct {
 	props     iceberg.Properties
 
 	// Lock configuration for atomic commits
-	LockMinWaitTime time.Duration
-	LockMaxWaitTime time.Duration
-	LockRetries     int
+	LockMinWaitTime       time.Duration
+	LockMaxWaitTime       time.Duration
+	LockRetries           int
+	LockHeartbeatInterval time.Duration
 }
 
 func NewHiveOptions() *HiveOptions {
 	return &HiveOptions{
-		Name:            "hive",
-		props:           iceberg.Properties{},
-		LockMinWaitTime: DefaultLockCheckMinWaitTime,
-		LockMaxWaitTime: DefaultLockCheckMaxWaitTime,
-		LockRetries:     DefaultLockCheckRetries,
+		Name:                  "hive",
+		props:                 iceberg.Properties{},
+		LockMinWaitTime:       DefaultLockCheckMinWaitTime,
+		LockMaxWaitTime:       DefaultLockCheckMaxWaitTime,
+		LockRetries:           DefaultLockCheckRetries,
+		LockHeartbeatInterval: DefaultLockHeartbeatInterval,
 	}
 }
 
@@ -127,6 +131,11 @@ func (o *HiveOptions) ApplyProperties(props iceberg.Properties) {
 			o.LockRetries = i
 		}
 	}
+	if val, ok := props[LockHeartbeatIntervalMs]; ok {
+		if d, ok := positiveMillis(val); ok {
+			o.LockHeartbeatInterval = d
+		}
+	}
 }
 
 // durationFromProps resolves a lock wait duration from properties. The Java
@@ -134,8 +143,8 @@ func (o *HiveOptions) ApplyProperties(props iceberg.Properties) {
 // duration-string alias is used.
 func durationFromProps(props iceberg.Properties, javaMsKey, legacyDurationKey string) (time.Duration, bool) {
 	if val, ok := props[javaMsKey]; ok {
-		if ms, err := strconv.ParseInt(val, 10, 64); err == nil && ms > 0 {
-			return time.Duration(ms) * time.Millisecond, true
+		if d, ok := positiveMillis(val); ok {
+			return d, true
 		}
 	}
 	if val, ok := props[legacyDurationKey]; ok {
@@ -145,6 +154,23 @@ func durationFromProps(props iceberg.Properties, javaMsKey, legacyDurationKey st
 	}
 
 	return 0, false
+}
+
+func positiveMillis(value string) (time.Duration, bool) {
+	ms, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || ms <= 0 || ms > int64((1<<63-1)/time.Millisecond) {
+		return 0, false
+	}
+
+	return time.Duration(ms) * time.Millisecond, true
+}
+
+func (o *HiveOptions) viewLockHeartbeatInterval() time.Duration {
+	if d, ok := positiveMillis(o.props[LockHeartbeatIntervalMs]); ok {
+		return d
+	}
+
+	return o.LockHeartbeatInterval
 }
 
 type Option func(*HiveOptions)

@@ -128,25 +128,25 @@ func TestToRequestedSchemaWriteFastPath(t *testing.T) {
 			name: "exact nested Arrow schema",
 			requested: iceberg.NewSchema(0,
 				iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64},
-				iceberg.NestedField{ID: 2, Name: "profile", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
-					{ID: 3, Name: "name", Type: iceberg.PrimitiveTypes.String},
-					{ID: 4, Name: "age", Type: iceberg.PrimitiveTypes.Int32},
-				}}},
+				iceberg.NestedField{ID: 2, Name: "profile", Type: iceberg.NewStructType(
+					iceberg.NestedField{ID: 3, Name: "name", Type: iceberg.PrimitiveTypes.String},
+					iceberg.NestedField{ID: 4, Name: "age", Type: iceberg.PrimitiveTypes.Int32},
+				)},
 			),
 			provided: iceberg.NewSchema(0,
 				iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64},
-				iceberg.NestedField{ID: 2, Name: "profile", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
-					{ID: 3, Name: "name", Type: iceberg.PrimitiveTypes.String},
-					{ID: 4, Name: "age", Type: iceberg.PrimitiveTypes.Int32},
-				}}},
+				iceberg.NestedField{ID: 2, Name: "profile", Type: iceberg.NewStructType(
+					iceberg.NestedField{ID: 3, Name: "name", Type: iceberg.PrimitiveTypes.String},
+					iceberg.NestedField{ID: 4, Name: "age", Type: iceberg.PrimitiveTypes.Int32},
+				)},
 			),
 			batch: func(t *testing.T, mem memory.Allocator) arrow.RecordBatch {
 				schema := projectionTestSchema(t, iceberg.NewSchema(0,
 					iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64},
-					iceberg.NestedField{ID: 2, Name: "profile", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
-						{ID: 3, Name: "name", Type: iceberg.PrimitiveTypes.String},
-						{ID: 4, Name: "age", Type: iceberg.PrimitiveTypes.Int32},
-					}}},
+					iceberg.NestedField{ID: 2, Name: "profile", Type: iceberg.NewStructType(
+						iceberg.NestedField{ID: 3, Name: "name", Type: iceberg.PrimitiveTypes.String},
+						iceberg.NestedField{ID: 4, Name: "age", Type: iceberg.PrimitiveTypes.Int32},
+					)},
 				))
 
 				return projectionTestRecord(t, mem, schema, []byte(`{"id": 1, "profile": {"name": "one", "age": 42}}`))
@@ -254,20 +254,14 @@ func TestToRequestedSchemaWriteFastPath(t *testing.T) {
 		{
 			name: "large list requires offset conversion",
 			requested: iceberg.NewSchema(0,
-				iceberg.NestedField{ID: 1, Name: "items", Type: &iceberg.ListType{
-					ElementID: 2, Element: iceberg.PrimitiveTypes.Int32, ElementRequired: true,
-				}},
+				iceberg.NestedField{ID: 1, Name: "items", Type: iceberg.NewListType(2, iceberg.PrimitiveTypes.Int32, true)},
 			),
 			provided: iceberg.NewSchema(0,
-				iceberg.NestedField{ID: 1, Name: "items", Type: &iceberg.ListType{
-					ElementID: 2, Element: iceberg.PrimitiveTypes.Int32, ElementRequired: true,
-				}},
+				iceberg.NestedField{ID: 1, Name: "items", Type: iceberg.NewListType(2, iceberg.PrimitiveTypes.Int32, true)},
 			),
 			batch: func(t *testing.T, mem memory.Allocator) arrow.RecordBatch {
 				target := projectionTestSchema(t, iceberg.NewSchema(0,
-					iceberg.NestedField{ID: 1, Name: "items", Type: &iceberg.ListType{
-						ElementID: 2, Element: iceberg.PrimitiveTypes.Int32, ElementRequired: true,
-					}},
+					iceberg.NestedField{ID: 1, Name: "items", Type: iceberg.NewListType(2, iceberg.PrimitiveTypes.Int32, true)},
 				))
 				listType := target.Field(0).Type.(*arrow.ListType)
 				schema := arrow.NewSchema([]arrow.Field{{
@@ -337,10 +331,10 @@ func TestToRequestedSchemaMatchesSchemaToArrowSchema(t *testing.T) {
 
 	requested := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64},
-		iceberg.NestedField{ID: 2, Name: "profile", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
-			{ID: 3, Name: "name", Type: iceberg.PrimitiveTypes.String},
-			{ID: 4, Name: "age", Type: iceberg.PrimitiveTypes.Int32},
-		}}},
+		iceberg.NestedField{ID: 2, Name: "profile", Type: iceberg.NewStructType(
+			iceberg.NestedField{ID: 3, Name: "name", Type: iceberg.PrimitiveTypes.String},
+			iceberg.NestedField{ID: 4, Name: "age", Type: iceberg.PrimitiveTypes.Int32},
+		)},
 	)
 	inputSchema := arrow.NewSchema([]arrow.Field{
 		{Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: true},

@@ -551,16 +551,16 @@ func TestCLIAcceptsMixedCaseCatalogType(t *testing.T) {
 			wantContains: "must provide driver",
 		},
 		{
-			name:         "dynamodb is recognized but not implemented",
+			name:         "dynamodb requires a warehouse",
 			args:         []string{"list", "--catalog", "dynamodb"},
 			wantErr:      true,
-			wantContains: "dynamodb catalog is not implemented",
+			wantContains: "DynamoDB catalog requires a warehouse",
 		},
 		{
-			name:         "dynamodb uppercase is recognized but not implemented",
+			name:         "dynamodb uppercase requires a warehouse",
 			args:         []string{"list", "--catalog", "DYNAMODB"},
 			wantErr:      true,
-			wantContains: "dynamodb catalog is not implemented",
+			wantContains: "DynamoDB catalog requires a warehouse",
 		},
 		{
 			name:             "unknown catalog type is still rejected",

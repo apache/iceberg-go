@@ -397,7 +397,7 @@ func TestInclusiveMetricsEvalRowGroupMetricsLifecycle(t *testing.T) {
 	assert.NotNil(t, eval.nullCounts)
 	assert.Nil(t, eval.lowerBounds)
 	assert.Nil(t, eval.upperBounds)
-	assert.False(t, eval.mayContainNull(1))
+	assert.True(t, eval.mayContainNull(1), "a missing null count must be treated as unknown")
 
 	keep, err := eval.TestRowGroup(withStats.RowGroup(0), []int{0, 1})
 	require.NoError(t, err)
@@ -410,7 +410,7 @@ func TestInclusiveMetricsEvalRowGroupMetricsLifecycle(t *testing.T) {
 	keep, err = eval.TestRowGroup(withoutStats.RowGroup(0), []int{0, 1})
 	require.NoError(t, err)
 	assert.Equal(t, firstKeep, keep)
-	assert.False(t, eval.mayContainNull(1))
+	assert.True(t, eval.mayContainNull(1), "a missing null count must be treated as unknown")
 	assert.NotNil(t, eval.valueCounts)
 	assert.NotNil(t, eval.nullCounts)
 	assert.NotNil(t, eval.lowerBounds)

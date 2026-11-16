@@ -118,15 +118,12 @@ func TestNewSchemaByteDefaultIsIsolatedFromCaller(t *testing.T) {
 }
 
 func TestNewSchemaNormalizesNestedByteDefaultsWithoutModifyingCaller(t *testing.T) {
-	inner := &iceberg.StructType{FieldList: []iceberg.NestedField{
-		{ID: 5, Name: "payload", Type: iceberg.PrimitiveTypes.Binary, InitialDefault: []byte{1, 2}},
-		{ID: 6, Name: "label", Type: iceberg.PrimitiveTypes.String, InitialDefault: "x"},
-	}}
-	list := &iceberg.ListType{ElementID: 4, Element: inner, ElementRequired: true}
-	mapType := &iceberg.MapType{
-		KeyID: 2, KeyType: iceberg.PrimitiveTypes.String,
-		ValueID: 3, ValueType: list, ValueRequired: true,
-	}
+	inner := iceberg.NewStructType(
+		iceberg.NestedField{ID: 5, Name: "payload", Type: iceberg.PrimitiveTypes.Binary, InitialDefault: []byte{1, 2}},
+		iceberg.NestedField{ID: 6, Name: "label", Type: iceberg.PrimitiveTypes.String, InitialDefault: "x"},
+	)
+	list := iceberg.NewListType(4, inner, true)
+	mapType := iceberg.NewMapType(2, iceberg.PrimitiveTypes.String, 3, list, true)
 	fields := []iceberg.NestedField{
 		{ID: 1, Name: "m", Type: mapType},
 		{ID: 7, Name: "top", Type: iceberg.PrimitiveTypes.Binary, WriteDefault: []byte{3}},
@@ -144,7 +141,7 @@ func TestNewSchemaNormalizesNestedByteDefaultsWithoutModifyingCaller(t *testing.
 	require.True(t, ok)
 	assert.Equal(t, "03", top.WriteDefault)
 
-	assert.Equal(t, []byte{1, 2}, inner.FieldList[0].InitialDefault)
+	assert.Equal(t, []byte{1, 2}, inner.Field(0).InitialDefault)
 	assert.Same(t, list, mapType.ValueType)
 	assert.Same(t, inner, list.Element)
 	assert.Equal(t, []byte{3}, fields[1].WriteDefault)

@@ -113,8 +113,8 @@ func TestLocationProviderLiteralCustomPaths(t *testing.T) {
 	for _, tt := range []struct{ objectStore, partitionPaths, data, partitioned, multiLevel string }{
 		{"false", "false", "s3://bucket/my data%20#?/a", "s3://bucket/my data%20#?/partition=a b%20#?/file.parquet", "s3://bucket/my data%20#?/a=1/b=2/file.parquet"},
 		{"false", "true", "s3://bucket/my data%20#?/a", "s3://bucket/my data%20#?/partition=a b%20#?/file.parquet", "s3://bucket/my data%20#?/a=1/b=2/file.parquet"},
-		{"true", "false", "s3://bucket/my data%20#?/0101/0110/1001/10110010-a", "s3://bucket/my data%20#?/0010/1111/0101/11011101-file.parquet", "s3://bucket/my data%20#?/0010/1111/0101/11011101-file.parquet"},
-		{"true", "true", "s3://bucket/my data%20#?/0101/0110/1001/10110010/a", "s3://bucket/my data%20#?/1011/0010/0000/11011010/partition=a b%20#?/file.parquet", "s3://bucket/my data%20#?/1110/0111/1101/10000010/a=1/b=2/file.parquet"},
+		{"true", "false", "s3://bucket/my data%20#?/0101/0110/1001/10110010/my table/a", "s3://bucket/my data%20#?/0010/1111/0101/11011101/my table/file.parquet", "s3://bucket/my data%20#?/0010/1111/0101/11011101/my table/file.parquet"},
+		{"true", "true", "s3://bucket/my data%20#?/0101/0110/1001/10110010/my table/a", "s3://bucket/my data%20#?/1011/0010/0000/11011010/my table/partition=a b%20#?/file.parquet", "s3://bucket/my data%20#?/1110/0111/1101/10000010/my table/a=1/b=2/file.parquet"},
 	} {
 		t.Run(tt.objectStore+"/"+tt.partitionPaths, func(t *testing.T) {
 			provider, err := table.LoadLocationProvider("s3://bucket/my table", iceberg.Properties{
@@ -207,4 +207,67 @@ func TestObjectStoreLocationProviderPartitionedPathsDisabled(t *testing.T) {
 	assert.Equal(t, "table_location/data/0010/1101/0110/01011111-c", provider.NewDataLocation("c", ""))
 	assert.Equal(t, "table_location/data/1001/0001/0100/01110011-d", provider.NewDataLocation("d", ""))
 	assert.Equal(t, "table_location/data/0110/1010/0011/11101000-test.parquet", provider.NewDataLocation("test.parquet", ""))
+}
+
+// External object-store locations are shared across tables. Java inserts the
+// table's database/name after the hash so equal filenames do not collide.
+func TestObjectStoreLocationProviderExternalTableContext(t *testing.T) {
+	for _, partitionedPaths := range []string{"true", "false"} {
+		t.Run(partitionedPaths, func(t *testing.T) {
+			props := iceberg.Properties{
+				table.ObjectStoreEnabledKey:               "true",
+				table.WriteObjectStorePartitionedPathsKey: partitionedPaths,
+				table.WriteDataPathKey:                    "s3://warehouse/shared",
+			}
+
+			orders, err := table.LoadLocationProvider("s3://warehouse/db/orders/", props)
+			require.NoError(t, err)
+			customers, err := table.LoadLocationProvider("s3://warehouse/db/customers", props)
+			require.NoError(t, err)
+
+			ordersPath := orders.NewDataLocation("a", "")
+			customersPath := customers.NewDataLocation("a", "")
+			assert.Equal(t, "s3://warehouse/shared/0101/0110/1001/10110010/db/orders/a", ordersPath)
+			assert.Equal(t, "s3://warehouse/shared/0101/0110/1001/10110010/db/customers/a", customersPath)
+			assert.NotEqual(t, ordersPath, customersPath)
+
+			partitioned := orders.NewDataLocation("a", "date=2026-11-10")
+			if partitionedPaths == "true" {
+				assert.True(t, strings.HasSuffix(partitioned, "/db/orders/date=2026-11-10/a"), partitioned)
+				assert.NotEqual(t, ordersPath, partitioned)
+			} else {
+				assert.Equal(t, ordersPath, partitioned)
+			}
+		})
+	}
+}
+
+func TestObjectStoreLocationProviderLocalExternalTableContext(t *testing.T) {
+	provider, err := table.LoadLocationProvider("/warehouse/db/orders", iceberg.Properties{
+		table.ObjectStoreEnabledKey: "true",
+		table.WriteDataPathKey:      "/warehouse/shared",
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, "/warehouse/shared/0101/0110/1001/10110010/db/orders/a",
+		provider.NewDataLocation("a", ""))
+}
+
+func TestObjectStoreLocationProviderExternalSiblingPaths(t *testing.T) {
+	props := iceberg.Properties{
+		table.ObjectStoreEnabledKey: "true",
+		table.WriteDataPathKey:      "s3://warehouse/db/orders-archive2/data",
+	}
+
+	orders, err := table.LoadLocationProvider("s3://warehouse/db/orders", props)
+	require.NoError(t, err)
+	archive, err := table.LoadLocationProvider("s3://warehouse/db/orders-archive", props)
+	require.NoError(t, err)
+
+	assert.Equal(t,
+		"s3://warehouse/db/orders-archive2/data/0101/0110/1001/10110010/db/orders/a",
+		orders.NewDataLocation("a", ""))
+	assert.Equal(t,
+		"s3://warehouse/db/orders-archive2/data/0101/0110/1001/10110010/db/orders-archive/a",
+		archive.NewDataLocation("a", ""))
 }

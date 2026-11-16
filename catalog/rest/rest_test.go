@@ -26,7 +26,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"runtime"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/apache/iceberg-go"
@@ -50,7 +52,7 @@ const (
 var (
 	TestHeaders = http.Header{
 		"X-Client-Version": {"0.14.1"},
-		"User-Agent":       {"GoIceberg/(unknown version)"},
+		"User-Agent":       {"iceberg-go/unknown (go " + strings.TrimPrefix(runtime.Version(), "go") + ")"},
 		"Authorization":    {"Bearer " + TestToken},
 	}
 	OAuthTestHeaders = http.Header{
@@ -3531,6 +3533,38 @@ func (r *RestCatalogSuite) TestCreateView200() {
 	r.True(expectedViewMD.Equals(createdView.Metadata()))
 }
 
+func (r *RestCatalogSuite) TestCreateViewDefaultsMissingNamespace() {
+	const namespace = "ns"
+	identifier := table.Identifier{namespace, "view"}
+	version, err := view.NewVersion(
+		99,
+		0,
+		[]view.Representation{view.NewRepresentation(view.Representation{SQL: exampleViewSQL, Dialect: "default"})},
+		nil,
+	)
+	r.Require().NoError(err)
+
+	r.mux.HandleFunc("/v1/namespaces/"+namespace+"/views", func(w http.ResponseWriter, req *http.Request) {
+		var payload createViewRequest
+		r.NoError(json.NewDecoder(req.Body).Decode(&payload))
+		r.Equal(1, payload.ViewVersion.VersionID)
+		r.Equal([]string{namespace}, payload.ViewVersion.DefaultNamespace)
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, err := w.Write([]byte(createViewRestExample))
+		r.NoError(err)
+	})
+
+	ctlg, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL)
+	r.Require().NoError(err)
+
+	_, err = ctlg.CreateView(context.Background(), identifier, version, iceberg.NewSchema(0))
+	r.Require().NoError(err)
+	r.Nil(version.DefaultNamespace)
+	r.Equal(int64(99), version.VersionID)
+}
+
 func (r *RestCatalogSuite) TestCreateViewRejectsNilVersion() {
 	ctlg, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL)
 	r.Require().NoError(err)
@@ -4741,6 +4775,12 @@ func TestEndpointNegotiation(t *testing.T) {
 	_, err = cat.CreateTable(context.Background(), table.Identifier{"ns", "tbl"}, tableSchemaSimple)
 	assert.ErrorIs(t, err, rest.ErrEndpointNotSupported)
 	assert.NotErrorIs(t, err, rest.ErrRESTError)
+	// It is also iceberg.ErrNotImplemented, as a 501 for the same op is, so
+	// catalogtest's "not supported" cases hold for a REST server that leaves an
+	// optional endpoint out.
+	assert.ErrorIs(t, err, iceberg.ErrNotImplemented)
+	_, err = cat.RenameTable(context.Background(), table.Identifier{"ns", "a"}, table.Identifier{"ns", "b"})
+	assert.ErrorIs(t, err, iceberg.ErrNotImplemented)
 
 	// An advertised op works.
 	nss, err := cat.ListNamespaces(context.Background(), nil)

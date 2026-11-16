@@ -50,6 +50,16 @@ const (
 // by the current snapshot. Parquet position-delete files and V3 deletion
 // vectors are exposed through the same schema.
 func (i InspectTable) PositionDeletes(ctx context.Context) (array.RecordReader, error) {
+	props := i.tbl.Metadata().Properties()
+	nameMapping := i.tbl.Metadata().NameMapping()
+	if err := validateNameMappingProperty(props, nameMapping); err != nil {
+		return nil, err
+	}
+	if err := tblutils.ValidateParquetReadProperties(props); err != nil {
+		return nil, err
+	}
+	ctx = tblutils.WithTableProperties(ctx, props)
+
 	partitionType, partitionIDs, err := positionDeletesPartitionType(i.tbl.Metadata())
 	if err != nil {
 		return nil, fmt.Errorf("inspect position deletes: %w", err)
@@ -67,7 +77,7 @@ func (i InspectTable) PositionDeletes(ctx context.Context) (array.RecordReader, 
 	ctx = compute.WithAllocator(ctx, i.alloc)
 
 	return i.positionDeleteRecordReader(
-		ctx, arrowSchema, fs, manifests, partitionType, partitionIDs, i.tbl.Metadata().FormatVersion()), nil
+		ctx, arrowSchema, fs, manifests, partitionType, partitionIDs, i.tbl.Metadata().FormatVersion(), nameMapping), nil
 }
 
 func (i InspectTable) currentPositionDeleteManifests(
@@ -94,7 +104,7 @@ type positionDeleteRecordAppender struct {
 	filePath         *array.StringBuilder
 	pos              *array.Int64Builder
 	row              *array.StructBuilder
-	partition        *inspectPartitionBuilder
+	partition        *partitionStructBuilder
 	specID           *array.Int32Builder
 	deleteFilePath   *array.StringBuilder
 	contentOffset    *array.Int64Builder
@@ -171,8 +181,8 @@ func newPositionDeleteRecordAppender(
 		formatVersion:    formatVersion,
 		projection:       projection,
 	}
-	if len(partitionType.FieldList) > 0 {
-		partitionBuilder, err := newInspectPartitionBuilder(
+	if partitionType.NumFields() > 0 {
+		partitionBuilder, err := newPartitionStructBuilder(
 			bldr.Field(nextField).(*array.StructBuilder), partitionType)
 		if err != nil {
 			return out, err
@@ -480,6 +490,7 @@ func (i InspectTable) positionDeleteRecordReader(
 	partitionType *iceberg.StructType,
 	partitionIDByOld map[int]int,
 	formatVersion int,
+	nameMapping iceberg.NameMapping,
 ) array.RecordReader {
 	return array.ReaderFromIter(arrowSchema, func(yield func(arrow.RecordBatch, error) bool) {
 		if err := ctx.Err(); err != nil {
@@ -496,7 +507,7 @@ func (i InspectTable) positionDeleteRecordReader(
 				ctx:             ctx,
 				formatVersion:   formatVersion,
 				tableSchema:     i.tbl.Metadata().CurrentSchema(),
-				nameMapping:     i.tbl.Metadata().NameMapping(),
+				nameMapping:     nameMapping,
 				tableProperties: i.tbl.Metadata().Properties(),
 			},
 		)
@@ -526,7 +537,7 @@ func (i InspectTable) positionDeleteRecordReader(
 				return false, err
 			}
 			rows++
-			if rows == inspectRecordBatchSize {
+			if rows == recordBatchSize {
 				return emit(), nil
 			}
 
@@ -793,7 +804,7 @@ func positionDeletesPartitionType(
 	metadata Metadata,
 ) (*iceberg.StructType, map[int]int, error) {
 	currentSchema := metadata.CurrentSchema()
-	base, err := inspectPartitionTypeWithSchema(metadata, currentSchema)
+	base, err := unifiedPartitionTypeWithSchema(metadata, currentSchema)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -808,11 +819,11 @@ func positionDeletesPartitionType(
 		positionDeleteContentOffsetID: {},
 		positionDeleteContentSizeID:   {},
 	}
-	for _, field := range base.FieldList {
+	for _, field := range base.Fields() {
 		used[field.ID] = struct{}{}
 	}
-	fields := make([]iceberg.NestedField, len(base.FieldList))
-	idByOld := make(map[int]int, len(base.FieldList))
+	fields := make([]iceberg.NestedField, base.NumFields())
+	idByOld := make(map[int]int, base.NumFields())
 	maxFieldID := int64(math.MaxInt32)
 	nextID := int64(1)
 	wrapped := false
@@ -822,7 +833,7 @@ func positionDeletesPartitionType(
 	} else if int64(lastColumnID) >= maxFieldID {
 		wrapped = true
 	}
-	for index, field := range base.FieldList {
+	for index, field := range base.Fields() {
 		for {
 			if nextID > maxFieldID {
 				if wrapped {
@@ -848,7 +859,7 @@ func positionDeletesPartitionType(
 		nextID++
 	}
 
-	return &iceberg.StructType{FieldList: fields}, idByOld, nil
+	return iceberg.NewStructType(fields...), idByOld, nil
 }
 
 // PositionDeletesSchema returns the schema of the position_deletes metadata table.
@@ -857,7 +868,7 @@ func PositionDeletesSchema(
 	partitionType *iceberg.StructType,
 	formatVersion int,
 ) *iceberg.Schema {
-	rowType := iceberg.StructType{}
+	rowType := *iceberg.NewStructType()
 	if tableSchema != nil {
 		rowType = tableSchema.AsStruct()
 	}
@@ -866,7 +877,7 @@ func PositionDeletesSchema(
 		{ID: positionDeletePosID, Name: "pos", Type: iceberg.PrimitiveTypes.Int64, Required: true},
 		{ID: positionDeleteRowID, Name: "row", Type: &rowType, Required: false},
 	}
-	if len(partitionType.FieldList) > 0 {
+	if partitionType.NumFields() > 0 {
 		fields = append(fields, iceberg.NestedField{
 			ID:       positionDeletePartitionID,
 			Name:     "partition",

@@ -65,9 +65,12 @@ func TestManifestEvaluator(t *testing.T) {
 		IntMin, IntMax       = []byte{byte(IntMinValue), 0x00, 0x00, 0x00}, []byte{byte(IntMaxValue), 0x00, 0x00, 0x00}
 		StringMin, StringMax = []byte("a"), []byte("z")
 		FloatMin, _          = iceberg.Float32Literal(0).MarshalBinary()
+		FloatNegZero, _      = iceberg.Float32Literal(math.Float32frombits(1 << 31)).MarshalBinary()
 		FloatMax, _          = iceberg.Float32Literal(20).MarshalBinary()
 		DblMin, _            = iceberg.Float64Literal(0).MarshalBinary()
 		DblMax, _            = iceberg.Float64Literal(20).MarshalBinary()
+		IntSeven, _          = iceberg.Int32Literal(7).MarshalBinary()
+		DblSeven, _          = iceberg.Float64Literal(7).MarshalBinary()
 		NanTrue, NanFalse    = true, false
 
 		testSchema = iceberg.NewSchema(1,
@@ -122,6 +125,26 @@ func TestManifestEvaluator(t *testing.T) {
 			iceberg.NestedField{
 				ID: 13, Name: "no_nulls_same_value_a",
 				Type: iceberg.PrimitiveTypes.Binary, Required: false,
+			},
+			iceberg.NestedField{
+				ID: 14, Name: "no_nulls_same_value_seven",
+				Type: iceberg.PrimitiveTypes.Int32, Required: false,
+			},
+			iceberg.NestedField{
+				ID: 15, Name: "negative_zero_float",
+				Type: iceberg.PrimitiveTypes.Float32, Required: false,
+			},
+			iceberg.NestedField{
+				ID: 16, Name: "positive_zero_double",
+				Type: iceberg.PrimitiveTypes.Float64, Required: false,
+			},
+			iceberg.NestedField{
+				ID: 17, Name: "single_double_unknown_nan",
+				Type: iceberg.PrimitiveTypes.Float64, Required: false,
+			},
+			iceberg.NestedField{
+				ID: 18, Name: "single_double_contains_nan",
+				Type: iceberg.PrimitiveTypes.Float64, Required: false,
 			},
 		)
 	)
@@ -217,6 +240,36 @@ func TestManifestEvaluator(t *testing.T) {
 				ContainsNaN:  nil,
 				LowerBound:   &StringMin,
 				UpperBound:   &StringMin,
+			},
+			{ // no_nulls_same_value_seven
+				ContainsNull: false,
+				ContainsNaN:  nil,
+				LowerBound:   &IntSeven,
+				UpperBound:   &IntSeven,
+			},
+			{ // negative_zero_float
+				ContainsNull: false,
+				ContainsNaN:  &NanFalse,
+				LowerBound:   &FloatNegZero,
+				UpperBound:   &FloatNegZero,
+			},
+			{ // positive_zero_double
+				ContainsNull: false,
+				ContainsNaN:  &NanFalse,
+				LowerBound:   &DblMin,
+				UpperBound:   &DblMin,
+			},
+			{ // single_double_unknown_nan
+				ContainsNull: false,
+				ContainsNaN:  nil,
+				LowerBound:   &DblSeven,
+				UpperBound:   &DblSeven,
+			},
+			{ // single_double_contains_nan
+				ContainsNull: false,
+				ContainsNaN:  &NanTrue,
+				LowerBound:   &DblSeven,
+				UpperBound:   &DblSeven,
 			},
 		}).Build()
 
@@ -526,6 +579,18 @@ func TestManifestEvaluator(t *testing.T) {
 				"should read: id above upper bound",
 			},
 			{
+				iceberg.NotEqualTo(iceberg.Reference("no_nulls_same_value_seven"), int32(7)), false,
+				"should skip: the later partition field has one excluded value",
+			},
+			{
+				iceberg.NotEqualTo(iceberg.Reference("single_double_unknown_nan"), float64(7)), true,
+				"should read: unknown double NaN presence",
+			},
+			{
+				iceberg.NotEqualTo(iceberg.Reference("single_double_contains_nan"), float64(7)), true,
+				"should read: double NaNs may match",
+			},
+			{
 				iceberg.NewNot(iceberg.EqualTo(iceberg.Reference("id"), int32(IntMinValue-25))), true,
 				"should read: id below lower bound",
 			},
@@ -644,6 +709,18 @@ func TestManifestEvaluator(t *testing.T) {
 			{
 				iceberg.NotIn(iceberg.Reference("no_nulls"), "abc", "def"), true,
 				"should read: notIn on no nulls column",
+			},
+			{
+				iceberg.NotIn(iceberg.Reference("no_nulls_same_value_seven"), int32(7), int32(8)), false,
+				"should skip: the later partition field has one excluded value",
+			},
+			{
+				iceberg.NotIn(iceberg.Reference("negative_zero_float"), float32(0), float32(9)), true,
+				"should read: notIn uses row-filter signed-zero semantics",
+			},
+			{
+				iceberg.NotIn(iceberg.Reference("positive_zero_double"), math.Float64frombits(uint64(1)<<63), float64(9)), true,
+				"should read: notIn distinguishes double signed zero",
 			},
 			{
 				iceberg.StartsWith(iceberg.Reference("some_nulls"), "a"), true,

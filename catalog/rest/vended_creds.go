@@ -31,6 +31,7 @@ import (
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/internal/adlsauth"
+	"github.com/apache/iceberg-go/internal/remotesigning"
 	iceio "github.com/apache/iceberg-go/io"
 	"golang.org/x/sync/semaphore"
 )
@@ -492,6 +493,10 @@ func mergeVendedCredentials(config, credentialConfig iceberg.Properties, locatio
 	}
 
 	maps.Copy(config, credentialConfig)
+	// Keep explicit vended signer tokens distinct from ambient catalog auth.
+	if token, ok := credentialConfig[keyOauthToken]; ok {
+		config[remotesigning.TokenProperty] = token
+	}
 }
 
 func scopedFilesystemKey(credentialIndex int, location string) string {

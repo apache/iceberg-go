@@ -122,3 +122,85 @@ func TestSnapshotRefRejectsInvalidRetention(t *testing.T) {
 		require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
 	}
 }
+
+func TestSnapshotRefMarshalValidRetention(t *testing.T) {
+	minSnapshots := 2
+	maxSnapshotAge := int64(100)
+	maxRefAge := int64(200)
+
+	tests := []struct {
+		name string
+		ref  table.SnapshotRef
+		want string
+	}{
+		{
+			name: "branch",
+			ref: table.SnapshotRef{
+				SnapshotID:         1,
+				Type:               table.BranchRef,
+				MinSnapshotsToKeep: &minSnapshots,
+				MaxSnapshotAgeMs:   &maxSnapshotAge,
+				MaxRefAgeMs:        &maxRefAge,
+			},
+			want: `{"snapshot-id":1,"type":"branch","min-snapshots-to-keep":2,"max-snapshot-age-ms":100,"max-ref-age-ms":200}`,
+		},
+		{
+			name: "tag",
+			ref: table.SnapshotRef{
+				SnapshotID:  2,
+				Type:        table.TagRef,
+				MaxRefAgeMs: &maxRefAge,
+			},
+			want: `{"snapshot-id":2,"type":"tag","max-ref-age-ms":200}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			encoded, err := json.Marshal(tt.ref)
+			require.NoError(t, err)
+			require.JSONEq(t, tt.want, string(encoded))
+
+			var decoded table.SnapshotRef
+			require.NoError(t, json.Unmarshal(encoded, &decoded))
+			require.Equal(t, tt.ref, decoded)
+		})
+	}
+}
+
+func TestSnapshotRefMarshalRejectsInvalidRetention(t *testing.T) {
+	zero := 0
+	one := 1
+	ageZero := int64(0)
+	ageNegative := int64(-1)
+	agePositive := int64(1)
+
+	tests := []struct {
+		name string
+		ref  table.SnapshotRef
+	}{
+		{"zero min snapshots", table.SnapshotRef{SnapshotID: 1, Type: table.BranchRef, MinSnapshotsToKeep: &zero}},
+		{"negative snapshot age", table.SnapshotRef{SnapshotID: 1, Type: table.BranchRef, MaxSnapshotAgeMs: &ageNegative}},
+		{"zero ref age", table.SnapshotRef{SnapshotID: 1, Type: table.BranchRef, MaxRefAgeMs: &ageZero}},
+		{"tag min snapshots", table.SnapshotRef{SnapshotID: 1, Type: table.TagRef, MinSnapshotsToKeep: &one}},
+		{"tag snapshot age", table.SnapshotRef{SnapshotID: 1, Type: table.TagRef, MaxSnapshotAgeMs: &agePositive}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := json.Marshal(tt.ref)
+			require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+		})
+	}
+
+	_, err := json.Marshal(table.SnapshotRef{SnapshotID: 1, Type: "other"})
+	require.ErrorIs(t, err, table.ErrInvalidRefType)
+
+	// Invalid refs must also fail when marshaled as part of table metadata.
+	_, err = json.Marshal(struct {
+		Refs map[string]table.SnapshotRef `json:"refs"`
+	}{Refs: map[string]table.SnapshotRef{
+		"tag": {SnapshotID: 1, Type: table.TagRef, MinSnapshotsToKeep: &one},
+	}})
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+}

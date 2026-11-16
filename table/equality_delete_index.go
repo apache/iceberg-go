@@ -188,9 +188,9 @@ func equalityDeleteMetricValueFromBytes(
 	data []byte,
 	clone bool,
 ) (equalityDeleteMetricValue, bool) {
-	if clone {
-		// String, binary, and fixed literals may retain the input bytes. Clone
-		// once so an index does not retain a borrowed metadata buffer.
+	if clone && kind == equalityDeleteRangeBytes {
+		// Binary and fixed literals keep the input bytes. Clone once so an
+		// index does not retain a borrowed metadata buffer.
 		data = slices.Clone(data)
 	}
 

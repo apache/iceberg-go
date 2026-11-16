@@ -66,6 +66,65 @@ func BenchmarkManifestEvaluatorBuiltInPartitions(b *testing.B) {
 	}
 }
 
+func BenchmarkManifestEvaluatorPrunesExcludedSingleValue(b *testing.B) {
+	schema := iceberg.NewSchema(1, iceberg.NestedField{
+		ID: 1, Name: "value", Type: iceberg.PrimitiveTypes.Int32, Required: true,
+	})
+	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{1}, FieldID: 1000,
+		Name: "value", Transform: iceberg.IdentityTransform{},
+	})
+	value := iceberg.Int32Literal(7)
+	bound, err := value.MarshalBinary()
+	if err != nil {
+		b.Fatal(err)
+	}
+	manifests := make([]iceberg.ManifestFile, 1_000)
+	for i := range manifests {
+		manifests[i] = iceberg.NewManifestBuilder(
+			2, fmt.Sprintf("manifest-%d.avro", i), 0, int32(spec.ID()), 1,
+		).Partitions([]iceberg.FieldSummary{{
+			ContainsNull: false,
+			LowerBound:   &bound,
+			UpperBound:   &bound,
+		}}).Build()
+	}
+
+	for _, tc := range []struct {
+		name   string
+		filter iceberg.BooleanExpression
+	}{
+		{"not_equal", iceberg.NotEqualTo(iceberg.Reference("value"), int32(7))},
+		{"not_in", iceberg.NotIn(iceberg.Reference("value"), int32(5), int32(7))},
+	} {
+		b.Run(tc.name, func(b *testing.B) {
+			eval, err := newManifestEvaluator(spec, schema, tc.filter, true)
+			if err != nil {
+				b.Fatal(err)
+			}
+
+			kept := 0
+			b.ReportAllocs()
+			b.ResetTimer()
+			for range b.N {
+				kept = 0
+				for _, manifest := range manifests {
+					matches, err := eval(manifest)
+					if err != nil {
+						b.Fatal(err)
+					}
+					if matches {
+						kept++
+					}
+				}
+				manifestEvaluatorBenchmarkSink = kept
+			}
+			b.ReportMetric(float64(len(manifests)), "manifests/op")
+			b.ReportMetric(float64(len(manifests)-kept), "pruned/op")
+		})
+	}
+}
+
 func manifestEvaluatorBenchmarkSpec(fieldCount int) (iceberg.PartitionSpec, *iceberg.Schema) {
 	schemaFields := make([]iceberg.NestedField, fieldCount)
 	partitionFields := make([]iceberg.PartitionField, fieldCount)

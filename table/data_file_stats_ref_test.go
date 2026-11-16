@@ -344,10 +344,10 @@ func TestDataFilePartitionFallsBackToPublicGetter(t *testing.T) {
 }
 
 func TestBorrowedPartitionRecordUsesPartitionFieldOrder(t *testing.T) {
-	partitionType := &iceberg.StructType{FieldList: []iceberg.NestedField{
-		{ID: 1000, Name: "first", Type: iceberg.PrimitiveTypes.Int32},
-		{ID: 1001, Name: "second", Type: iceberg.PrimitiveTypes.Binary},
-	}}
+	partitionType := iceberg.NewStructType(
+		iceberg.NestedField{ID: 1000, Name: "first", Type: iceberg.PrimitiveTypes.Int32},
+		iceberg.NestedField{ID: 1001, Name: "second", Type: iceberg.PrimitiveTypes.Binary},
+	)
 	partition := map[int]any{
 		1000: int32(7),
 		1001: []byte{1, 2},

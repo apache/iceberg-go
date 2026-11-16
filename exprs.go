@@ -406,7 +406,11 @@ func (r Reference) Bind(s *Schema, caseSensitive bool) (BoundTerm, error) {
 	if caseSensitive {
 		field, found = s.FindFieldByName(string(r))
 	} else {
-		field, found = s.FindFieldByNameCaseInsensitive(string(r))
+		var err error
+		field, found, err = s.findFieldByNameCaseInsensitive(string(r))
+		if err != nil {
+			return nil, err
+		}
 	}
 	if !found {
 		return nil, fmt.Errorf("%w: could not bind reference '%s', caseSensitive=%t",

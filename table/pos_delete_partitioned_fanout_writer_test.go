@@ -465,7 +465,7 @@ func TestPositionDeletePartitionedFanoutWriterEarlyStopCancelsRecordProduction(t
 		factory,
 	)
 
-	for dataFile, writeErr := range writer.Write(ctx, 1) {
+	for dataFile, writeErr := range writer.Write(ctx) {
 		require.NoError(t, writeErr)
 		require.NotNil(t, dataFile)
 

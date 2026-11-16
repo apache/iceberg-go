@@ -479,11 +479,6 @@ func (r *Reader) validateRange(offset, length int64) error {
 // validateBlobs validates all blob metadata entries.
 func (r *Reader) validateBlobs(blobs []BlobMetadata, footerStart int64) error {
 	for i, blob := range blobs {
-		// Type is required
-		if blob.Type == "" {
-			return fmt.Errorf("puffin: blob %d: type is required", i)
-		}
-
 		// Length must be non-negative
 		if blob.Length < 0 {
 			return fmt.Errorf("puffin: blob %d: invalid length %d", i, blob.Length)

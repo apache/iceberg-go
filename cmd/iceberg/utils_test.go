@@ -187,9 +187,9 @@ func TestParseSortOrder(t *testing.T) {
 		iceberg.NestedField{ID: 42, Name: "field1", Type: iceberg.PrimitiveTypes.String},
 		iceberg.NestedField{ID: 10, Name: "field2", Type: iceberg.PrimitiveTypes.Int64},
 		iceberg.NestedField{ID: 27, Name: "field3", Type: iceberg.PrimitiveTypes.Timestamp},
-		iceberg.NestedField{ID: 50, Name: "nested", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
-			{ID: 51, Name: "value", Type: iceberg.PrimitiveTypes.String},
-		}}},
+		iceberg.NestedField{ID: 50, Name: "nested", Type: iceberg.NewStructType(
+			iceberg.NestedField{ID: 51, Name: "value", Type: iceberg.PrimitiveTypes.String},
+		)},
 	)
 
 	tests := []struct {

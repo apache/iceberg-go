@@ -153,7 +153,7 @@ func TestLocalFSParsesFileURIs(t *testing.T) {
 		"file:" + filepath.ToSlash(path),
 		localhostFileURI(path),
 	} {
-		content, err := (LocalFS{}).ReadFile(name)
+		content, err := (LocalFS{}).ReadFile(context.Background(), name)
 		require.NoError(t, err, name)
 		assert.Equal(t, []byte("metadata"), content)
 	}
@@ -183,7 +183,7 @@ func TestLocalFSParsesEscapedFileURIsConsistently(t *testing.T) {
 		fileURI(path),
 		singleSlashFileURI(path),
 	} {
-		content, err := (LocalFS{}).ReadFile(name)
+		content, err := (LocalFS{}).ReadFile(context.Background(), name)
 		require.NoError(t, err, name)
 		assert.Equal(t, []byte("metadata"), content)
 	}
@@ -202,9 +202,22 @@ func TestLocalFSPreservesPlainPathsWithRawPercent(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "discount:100%off.txt")
 	require.NoError(t, os.WriteFile(path, []byte("content"), 0o600))
 
-	content, err := (LocalFS{}).ReadFile(path)
+	content, err := (LocalFS{}).ReadFile(context.Background(), path)
 	require.NoError(t, err)
 	assert.Equal(t, []byte("content"), content)
+}
+
+func TestLocalFSReadFileIgnoresContext(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "metadata.json")
+	require.NoError(t, os.WriteFile(path, []byte("metadata"), 0o600))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	content, err := (LocalFS{}).ReadFile(ctx, path)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("metadata"), content)
 }
 
 func TestLocalFSPreservesRelativePathsWithColon(t *testing.T) {
@@ -258,7 +271,7 @@ func TestLocalFSRenameNoReplaceDoesNotOverwrite(t *testing.T) {
 	require.NoError(t, os.WriteFile(src, []byte("new"), 0o644))
 	require.NoError(t, os.WriteFile(dst, []byte("old"), 0o644))
 
-	err := LocalFS{}.RenameNoReplace(src, dst)
+	err := LocalFS{}.RenameNoReplace(context.Background(), src, dst)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, fs.ErrExist)
 

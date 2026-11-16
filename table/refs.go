@@ -51,6 +51,18 @@ func (s *SnapshotRef) Equals(rhs SnapshotRef) bool {
 	return reflect.DeepEqual(s, &rhs)
 }
 
+// MarshalJSON rejects invalid refs, including refs built directly rather than
+// through metadata updates or JSON decoding.
+func (s SnapshotRef) MarshalJSON() ([]byte, error) {
+	if err := s.validate(); err != nil {
+		return nil, err
+	}
+
+	type rawSnapshotRef SnapshotRef
+
+	return json.Marshal(rawSnapshotRef(s))
+}
+
 func (s *SnapshotRef) UnmarshalJSON(b []byte) error {
 	aux := struct {
 		SnapshotID         *int64   `json:"snapshot-id"`

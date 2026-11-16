@@ -193,7 +193,7 @@ func benchmarkPartitionEvaluator(
 
 	filter := iceberg.EqualTo(iceberg.Reference("partition_1000"), int32(1))
 	partType := spec.PartitionType(schema)
-	partSchema := iceberg.NewSchema(0, partType.FieldList...)
+	partSchema := iceberg.NewSchema(0, partType.Fields()...)
 	fn, err := iceberg.ExpressionEvaluator(partSchema, filter, true)
 	if err != nil {
 		b.Fatal(err)

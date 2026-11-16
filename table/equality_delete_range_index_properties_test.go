@@ -390,9 +390,9 @@ func TestEqualityDeleteRangeIndexFloatNaNGuards(t *testing.T) {
 
 func TestEqualityDeleteRangeIndexOptionalParent(t *testing.T) {
 	schema := iceberg.NewSchema(1, iceberg.NestedField{
-		ID: 2, Name: "parent", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
-			{ID: 1, Name: "child", Type: iceberg.PrimitiveTypes.Int32, Required: true},
-		}},
+		ID: 2, Name: "parent", Type: iceberg.NewStructType(
+			iceberg.NestedField{ID: 1, Name: "child", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		),
 	})
 	entries := equalityDeleteRangeTestBucket(t, equalityDeleteRangeIndexMinEntries, 0, nil)
 	for _, entry := range entries {

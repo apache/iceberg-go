@@ -182,7 +182,7 @@ func TestParseAWSConfigRemoteSigningEnabled(t *testing.T) {
 			io.S3SignerURI:            "https://signer.example.com",
 			io.S3RemoteSigningEnabled: "true",
 		})
-		require.ErrorContains(t, err, "remote S3 request signing is not supported")
+		require.NoError(t, err)
 	})
 
 	t.Run("signer uri present with remote signing explicitly disabled", func(t *testing.T) {
@@ -212,7 +212,7 @@ func TestParseAWSConfigRemoteSigningEnabled(t *testing.T) {
 		_, err := ParseAWSConfig(context.Background(), map[string]string{
 			io.S3RemoteSigningEnabled: "true",
 		})
-		require.ErrorContains(t, err, "remote S3 request signing is not supported")
+		require.NoError(t, err)
 	})
 
 	t.Run("no signer properties at all", func(t *testing.T) {

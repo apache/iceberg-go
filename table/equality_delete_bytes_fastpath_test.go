@@ -99,8 +99,8 @@ func TestProcessEqualityDeletesSingleBytesMatchesGeneric(t *testing.T) {
 						encodeArrowValue(&encoded, record.Column(0), row)
 						keys[encoded.String()] = struct{}{}
 					}
-					fastSet := &equalityDeleteSet{keys: keys, fieldIDs: []int{1}, colNames: []string{"value"}}
-					genericSet := &equalityDeleteSet{keys: keys, fieldIDs: []int{1}, colNames: []string{"value"}}
+					fastSet := &equalityDeleteSet{keys: keys, fieldIDs: []int{1}, colNames: []string{"value"}, fieldTypes: []iceberg.Type{shape.iceType}}
+					genericSet := &equalityDeleteSet{keys: keys, fieldIDs: []int{1}, colNames: []string{"value"}, fieldTypes: []iceberg.Type{shape.iceType}}
 					genericSet.singleBytesOnce.Do(func() {})
 					fileSchema := iceberg.NewSchema(0, iceberg.NestedField{
 						ID: 1, Name: "value", Type: shape.iceType,
@@ -138,9 +138,10 @@ func TestProcessEqualityDeletesSingleBytesInvalidKeysFallBack(t *testing.T) {
 	for _, key := range []string{"", "\x01\x00", "\x02\x00\x00\x00\x00", "\x01\x00\x00\x00\x04bad"} {
 		t.Run(fmt.Sprintf("%x", key), func(t *testing.T) {
 			deleteSet := &equalityDeleteSet{
-				keys:     set[string]{key: {}},
-				fieldIDs: []int{1},
-				colNames: []string{"value"},
+				keys:       set[string]{key: {}},
+				fieldIDs:   []int{1},
+				colNames:   []string{"value"},
+				fieldTypes: []iceberg.Type{iceberg.PrimitiveTypes.String},
 			}
 			fileSchema := iceberg.NewSchema(0, iceberg.NestedField{
 				ID: 1, Name: "value", Type: iceberg.PrimitiveTypes.String,
@@ -155,15 +156,16 @@ func TestProcessEqualityDeletesSingleBytesInvalidKeysFallBack(t *testing.T) {
 
 func TestProcessEqualityDeletesNestedStringDoesNotBuildUnusedIndex(t *testing.T) {
 	deleteSet := &equalityDeleteSet{
-		keys:     set[string]{"\x01\x00\x00\x00\x01x": {}},
-		fieldIDs: []int{1},
-		colNames: []string{"person.name"},
+		keys:       set[string]{"\x01\x00\x00\x00\x01x": {}},
+		fieldIDs:   []int{1},
+		colNames:   []string{"person.name"},
+		fieldTypes: []iceberg.Type{iceberg.PrimitiveTypes.String},
 	}
 	fileSchema := iceberg.NewSchema(0, iceberg.NestedField{
 		ID: 2, Name: "person",
-		Type: &iceberg.StructType{FieldList: []iceberg.NestedField{{
+		Type: iceberg.NewStructType(iceberg.NestedField{
 			ID: 1, Name: "name", Type: iceberg.PrimitiveTypes.String,
-		}}},
+		}),
 	})
 	_, err := processEqualityDeletesColumnarForFile(t.Context(),
 		[]*equalityDeleteSet{deleteSet}, fileSchema, "data.parquet")
@@ -240,7 +242,7 @@ func TestProcessEqualityDeletesSingleBytesDictionary(t *testing.T) {
 			record := full.NewSlice(int64(tt.offset), full.NumRows())
 			defer record.Release()
 
-			deleteSet := &equalityDeleteSet{keys: set[string]{tt.key: {}}, fieldIDs: []int{2}, colNames: []string{"value"}}
+			deleteSet := &equalityDeleteSet{keys: set[string]{tt.key: {}}, fieldIDs: []int{2}, colNames: []string{"value"}, fieldTypes: []iceberg.Type{iceberg.PrimitiveTypes.String}}
 			fileSchema := iceberg.NewSchema(0,
 				iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
 				iceberg.NestedField{ID: 2, Name: "value", Type: iceberg.PrimitiveTypes.String},
@@ -281,9 +283,10 @@ func buildBenchDeleteSetSingleString(numDeletes int, noMatch bool) *equalityDele
 	}
 
 	return &equalityDeleteSet{
-		keys:     keys,
-		fieldIDs: []int{2},
-		colNames: []string{"name"},
+		keys:       keys,
+		fieldIDs:   []int{2},
+		colNames:   []string{"name"},
+		fieldTypes: []iceberg.Type{iceberg.PrimitiveTypes.String},
 	}
 }
 

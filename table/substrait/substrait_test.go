@@ -82,12 +82,12 @@ func TestRefTypes(t *testing.T) {
 func TestNestedReferencesPreserveBoundPath(t *testing.T) {
 	sc := iceberg.NewSchema(1,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64},
-		iceberg.NestedField{ID: 2, Name: "customer", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
-			{ID: 3, Name: "id", Type: iceberg.PrimitiveTypes.Int64},
-			{ID: 4, Name: "address", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
-				{ID: 5, Name: "zip", Type: iceberg.PrimitiveTypes.String},
-			}}},
-		}}},
+		iceberg.NestedField{ID: 2, Name: "customer", Type: iceberg.NewStructType(
+			iceberg.NestedField{ID: 3, Name: "id", Type: iceberg.PrimitiveTypes.Int64},
+			iceberg.NestedField{ID: 4, Name: "address", Type: iceberg.NewStructType(
+				iceberg.NestedField{ID: 5, Name: "zip", Type: iceberg.PrimitiveTypes.String},
+			)},
+		)},
 	)
 
 	tests := []struct {
@@ -121,9 +121,9 @@ func TestNestedReferencesPreserveBoundPath(t *testing.T) {
 
 func TestNestedReferenceWithoutTopLevelLeafName(t *testing.T) {
 	sc := iceberg.NewSchema(1,
-		iceberg.NestedField{ID: 1, Name: "customer", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
-			{ID: 2, Name: "id", Type: iceberg.PrimitiveTypes.Int64},
-		}}},
+		iceberg.NestedField{ID: 1, Name: "customer", Type: iceberg.NewStructType(
+			iceberg.NestedField{ID: 2, Name: "id", Type: iceberg.PrimitiveTypes.Int64},
+		)},
 	)
 	bound, err := iceberg.EqualTo(iceberg.Reference("customer.id"), int64(123)).Bind(sc, true)
 	require.NoError(t, err)

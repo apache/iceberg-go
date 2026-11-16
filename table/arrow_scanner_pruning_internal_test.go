@@ -289,14 +289,14 @@ func TestBindTaskFilterValidatesBoundSchema(t *testing.T) {
 	t.Run("accessor path mismatch is rejected", func(t *testing.T) {
 		field := iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true}
 		originalSchema := iceberg.NewSchema(0,
-			iceberg.NestedField{ID: 10, Name: "payload", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{field}}},
+			iceberg.NestedField{ID: 10, Name: "payload", Type: iceberg.NewStructType(field)},
 		)
 		boundNested, err := iceberg.BindExpr(originalSchema,
 			iceberg.EqualTo(iceberg.Reference("payload.id"), int64(1)), true)
 		require.NoError(t, err)
 		otherSchema := iceberg.NewSchema(0,
 			iceberg.NestedField{ID: 11, Name: "other", Type: iceberg.PrimitiveTypes.String, Required: true},
-			iceberg.NestedField{ID: 10, Name: "payload", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{field}}},
+			iceberg.NestedField{ID: 10, Name: "payload", Type: iceberg.NewStructType(field)},
 		)
 
 		_, _, err = bindTaskFilter(otherSchema, boundNested, true)

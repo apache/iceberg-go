@@ -79,7 +79,7 @@ func inspectContentFileFields(partitionType *iceberg.StructType) []iceberg.Neste
 		{ID: inspectContentFieldIDFileFormat, Name: "file_format", Type: iceberg.PrimitiveTypes.String, Required: true},
 		{ID: inspectContentFieldIDSpecID, Name: "spec_id", Type: iceberg.PrimitiveTypes.Int32, Required: false},
 	}
-	if partitionType != nil && len(partitionType.FieldList) > 0 {
+	if partitionType != nil && partitionType.NumFields() > 0 {
 		fields = append(fields, iceberg.NestedField{
 			ID: inspectContentFieldIDPartition, Name: "partition", Type: partitionType, Required: true,
 		})
@@ -94,8 +94,8 @@ func inspectContentFileFields(partitionType *iceberg.StructType) []iceberg.Neste
 		iceberg.NestedField{ID: inspectContentFieldIDLowerBounds, Name: "lower_bounds", Type: inspectBinaryMapType(126, 127), Required: false},
 		iceberg.NestedField{ID: inspectContentFieldIDUpperBounds, Name: "upper_bounds", Type: inspectBinaryMapType(129, 130), Required: false},
 		iceberg.NestedField{ID: inspectContentFieldIDKeyMetadata, Name: "key_metadata", Type: iceberg.PrimitiveTypes.Binary, Required: false},
-		iceberg.NestedField{ID: inspectContentFieldIDSplitOffsets, Name: "split_offsets", Type: &iceberg.ListType{ElementID: 133, Element: iceberg.PrimitiveTypes.Int64, ElementRequired: true}, Required: false},
-		iceberg.NestedField{ID: inspectContentFieldIDEqualityIDs, Name: "equality_ids", Type: &iceberg.ListType{ElementID: 136, Element: iceberg.PrimitiveTypes.Int32, ElementRequired: true}, Required: false},
+		iceberg.NestedField{ID: inspectContentFieldIDSplitOffsets, Name: "split_offsets", Type: iceberg.NewListType(133, iceberg.PrimitiveTypes.Int64, true), Required: false},
+		iceberg.NestedField{ID: inspectContentFieldIDEqualityIDs, Name: "equality_ids", Type: iceberg.NewListType(136, iceberg.PrimitiveTypes.Int32, true), Required: false},
 		iceberg.NestedField{ID: inspectContentFieldIDSortOrderID, Name: "sort_order_id", Type: iceberg.PrimitiveTypes.Int32, Required: false},
 		iceberg.NestedField{ID: inspectContentFieldIDFirstRowID, Name: "first_row_id", Type: iceberg.PrimitiveTypes.Int64, Required: false},
 		iceberg.NestedField{ID: inspectContentFieldIDReferencedDataFile, Name: "referenced_data_file", Type: iceberg.PrimitiveTypes.String, Required: false},
@@ -107,9 +107,9 @@ func inspectContentFileFields(partitionType *iceberg.StructType) []iceberg.Neste
 }
 
 func inspectInt64MapType(keyID, valueID int) *iceberg.MapType {
-	return &iceberg.MapType{KeyID: keyID, KeyType: iceberg.PrimitiveTypes.Int32, ValueID: valueID, ValueType: iceberg.PrimitiveTypes.Int64, ValueRequired: true}
+	return iceberg.NewMapType(keyID, iceberg.PrimitiveTypes.Int32, valueID, iceberg.PrimitiveTypes.Int64, true)
 }
 
 func inspectBinaryMapType(keyID, valueID int) *iceberg.MapType {
-	return &iceberg.MapType{KeyID: keyID, KeyType: iceberg.PrimitiveTypes.Int32, ValueID: valueID, ValueType: iceberg.PrimitiveTypes.Binary, ValueRequired: true}
+	return iceberg.NewMapType(keyID, iceberg.PrimitiveTypes.Int32, valueID, iceberg.PrimitiveTypes.Binary, true)
 }

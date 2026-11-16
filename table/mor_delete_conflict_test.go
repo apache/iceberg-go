@@ -115,6 +115,57 @@ func TestMergeOnReadDeleteConflict_ReferencedDataFileRemoved(t *testing.T) {
 	_, err = txn.Commit(ctx)
 	require.Error(t, err)
 	require.ErrorIs(t, err, table.ErrDataFilesMissing)
+	require.NotErrorIs(t, err, table.ErrCommitFailed)
+	require.ErrorIs(t, err, table.ErrTransactionUnusable)
+}
+
+// A first deletion vector is replayable until another writer commits a
+// vector for the same data file. The second writer must reject replay instead
+// of leaving two live vectors, which makes all subsequent scans fail.
+func TestMergeOnReadDeleteConflict_ConcurrentFirstDeletionVector(t *testing.T) {
+	ctx := t.Context()
+	tbl := appendTenRows(t, newV3MoRConflictTestTable(t))
+
+	pending := tbl.NewTransaction()
+	require.NoError(t, pending.Delete(ctx, iceberg.EqualTo(iceberg.Reference("id"), int64(7)), nil))
+
+	// Both writers plan against the same file with no existing DV.
+	peer, err := tbl.Delete(ctx, iceberg.EqualTo(iceberg.Reference("id"), int64(2)), nil)
+	require.NoError(t, err)
+	require.Equal(t, 1, liveDVCount(t, peer))
+
+	_, err = pending.Commit(ctx)
+	require.ErrorIs(t, err, table.ErrConflictingDeleteFiles)
+	require.ErrorContains(t, err, "concurrent snapshot")
+	require.Equal(t, 1, liveDVCount(t, peer))
+	require.Equal(t, []int64{1, 3, 4, 5, 6, 7, 8, 9, 10}, idsInTable(t, peer))
+}
+
+// A replacement snapshot can add a first DV just like a merge-on-read delete.
+// A staged delete must see that DV during replay and reject a second live one.
+func TestMergeOnReadDeleteConflict_ConcurrentFirstDeletionVectorFromConversion(t *testing.T) {
+	ctx := t.Context()
+	tbl := appendTenRows(t, newV3MoRConflictTestTable(t))
+	tbl = appendEqualityDelete(t, tbl, []int{1}, `[{"id":2}]`)
+
+	pending := tbl.NewTransaction()
+	require.NoError(t, pending.Delete(ctx, iceberg.EqualTo(iceberg.Reference("id"), int64(7)), nil))
+
+	conversion := tbl.NewTransaction()
+	result, err := conversion.ConvertEqualityDeletesToDeletionVectors(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 1, result.AddedDeletionVectors)
+	peer, err := conversion.Commit(ctx)
+	require.NoError(t, err)
+	require.Equal(t, table.OpReplace, peer.CurrentSnapshot().Summary.Operation)
+	require.Equal(t, 1, liveDVCount(t, peer))
+	require.Equal(t, []int64{1, 3, 4, 5, 6, 7, 8, 9, 10}, idsInTable(t, peer))
+
+	_, err = pending.Commit(ctx)
+	require.ErrorIs(t, err, table.ErrConflictingDeleteFiles)
+	require.ErrorContains(t, err, "concurrent snapshot")
+	require.Equal(t, 1, liveDVCount(t, peer))
+	require.Equal(t, []int64{1, 3, 4, 5, 6, 7, 8, 9, 10}, idsInTable(t, peer))
 }
 
 // TestMergeOnReadDeleteConflict_NoConflictCommits is the control: a MoR delete

@@ -166,11 +166,11 @@ func TestMergeInspectPartitionAggregateTimestampTies(t *testing.T) {
 	const timestamp = int64(123000)
 	firstSnapshot := int64(10)
 	secondSnapshot := int64(20)
-	dst := &inspectPartitionAggregate{
+	dst := &partitionAggregate{
 		dataRecordCount: 3, dataFileCount: 1, specID: 1,
 		lastUpdatedAt: new(timestamp), lastUpdatedSnapshot: &firstSnapshot,
 	}
-	sameTime := &inspectPartitionAggregate{
+	sameTime := &partitionAggregate{
 		dataRecordCount: 5, dataFileCount: 2, specID: 2,
 		lastUpdatedAt: new(timestamp), lastUpdatedSnapshot: &secondSnapshot,
 	}
@@ -183,7 +183,7 @@ func TestMergeInspectPartitionAggregateTimestampTies(t *testing.T) {
 	require.Equal(t, firstSnapshot, *dst.lastUpdatedSnapshot)
 
 	newerTime := timestamp + 1
-	newer := &inspectPartitionAggregate{
+	newer := &partitionAggregate{
 		specID: 3, lastUpdatedAt: &newerTime, lastUpdatedSnapshot: &secondSnapshot,
 	}
 	mergeInspectPartitionAggregate(dst, newer)

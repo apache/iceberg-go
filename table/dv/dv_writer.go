@@ -220,7 +220,7 @@ func (w *DVWriter) Flush(ctx context.Context, location string) ([]iceberg.DataFi
 			Type:           puffin.BlobTypeDeletionVector,
 			SnapshotID:     -1,
 			SequenceNumber: -1,
-			Fields:         []int32{},
+			Fields:         []int32{iceberg.RowPositionFieldID},
 			Properties: map[string]string{
 				dvCardinalityProperty:        strconv.FormatInt(cardinality, 10),
 				dvReferencedDataFileProperty: dataFilePath,

@@ -40,13 +40,14 @@ https://github.com/apache/iceberg/blob/main/core/src/test/resources/org/apache/i
 
 `deletion-vector-v1.puffin` wraps that payload in a complete Puffin envelope:
 blob type `deletion-vector-v1`, snapshot-id and sequence-number set to -1
-per spec, with `referenced-data-file` and `cardinality` properties. The
-envelope is what `puffin.Writer` emits today; this is a Go-writer wire-
-format pin, not a strong Java cross-impl pin. The basic envelope shape is
-cross-checked by `TestWriterBitIdenticalWithJava`, but that test does not
-exercise empty `Fields` arrays or multi-key blob `Properties` — both of
-which this fixture relies on — and JSON key ordering of blob `Properties`
-is encoder-defined. The property values
+per spec, with `fields` set to `[2147483645]` for `_pos`, and with
+`referenced-data-file` and `cardinality` properties. The envelope is what
+`puffin.Writer` emits today; this is a Go-writer wire-format pin, not a strong
+Java cross-impl pin. The basic envelope shape is cross-checked by
+`TestWriterBitIdenticalWithJava`, but that test does not exercise DV field
+metadata or multi-key blob `Properties` — both of which this fixture relies
+on — and JSON key ordering of blob `Properties` is encoder-defined. Property
+values
 (`referenced-data-file=data/test.parquet`, `cardinality=5`,
 `created-by="iceberg-go test fixture"`) are fixture choices, not bytes
 inherited from any specific Java-emitted file.

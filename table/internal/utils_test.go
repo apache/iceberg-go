@@ -21,6 +21,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"iter"
 	"slices"
 	"testing"
 	"time"
@@ -441,4 +442,54 @@ func TestDataFileStatisticsDecimalPartitionManifestRoundTrip(t *testing.T) {
 	got, ok := entries[0].DataFile().Partition()[1000].(iceberg.DecimalLiteral)
 	require.True(t, ok)
 	assert.True(t, got.Equals(iceberg.DecimalLiteral(decimal)))
+}
+
+func TestMapExecDiscardsQueuedInputsAfterWorkerFailure(t *testing.T) {
+	queued := make(chan struct{})
+	workerErr := errors.New("worker failed")
+	input := func(yield func(int) bool) {
+		if !yield(0) || !yield(1) {
+			return
+		}
+		close(queued)
+		yield(2)
+	}
+	var discarded []int
+	for _, err := range internal.MapExecWithDiscard(t.Context(), 1, iter.Seq[int](input), func(int) (int, error) {
+		<-queued
+
+		return 0, workerErr
+	}, func(value int) { discarded = append(discarded, value) }) {
+		require.ErrorIs(t, err, workerErr)
+	}
+	require.Equal(t, []int{1}, discarded)
+}
+
+func TestMapExecWithDiscardKeepsResultsCompletedAfterCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	secondStarted, canceled := make(chan struct{}), make(chan struct{})
+	var results []int
+	failures := 0
+	for result, err := range internal.MapExecWithDiscard(ctx, 2, slices.Values([]int{0, 1}), func(value int) (int, error) {
+		if value == 0 {
+			<-secondStarted
+			cancel()
+			close(canceled)
+
+			return 0, errors.New("worker failed")
+		}
+		close(secondStarted)
+		<-canceled
+
+		return 1, nil
+	}, func(int) {}) {
+		if err != nil {
+			failures++
+		} else {
+			results = append(results, result)
+		}
+	}
+	require.Equal(t, []int{1}, results)
+	require.Equal(t, 1, failures)
 }

@@ -38,7 +38,7 @@ func (i InspectTable) inspectEntries(
 	allSnapshots bool,
 	schemaFn func(*iceberg.StructType) *iceberg.Schema,
 ) (array.RecordReader, error) {
-	partitionType, err := inspectPartitionType(i.tbl.Metadata())
+	partitionType, err := unifiedPartitionType(i.tbl.Metadata())
 	if err != nil {
 		return nil, fmt.Errorf("inspect %s: %w", name, err)
 	}
@@ -111,7 +111,7 @@ func appendContentFile(builder *array.StructBuilder, partitionType *iceberg.Stru
 }
 
 func inspectContentFileType(partitionType *iceberg.StructType) *iceberg.StructType {
-	return &iceberg.StructType{FieldList: inspectContentFileFields(partitionType)}
+	return iceberg.NewStructType(inspectContentFileFields(partitionType)...)
 }
 
 func appendEntriesOptionalInt64(builder *array.Int64Builder, value int64) {

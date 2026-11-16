@@ -64,6 +64,7 @@ func TestEnumerateVariantLeavesNestedObject(t *testing.T) {
 	assert.Equal(t, "payload.typed_value.a.value", got["$['a']"].ownResidual)
 	assert.Equal(t, iceberg.PrimitiveTypes.Int64, got["$['a']"].icebergType)
 	assert.Equal(t, iceberg.PrimitiveTypes.Int32, got["$['n']"].icebergType)
+	assert.Equal(t, 16, got["$['n']"].intWidth)
 	assert.Equal(t, "payload.typed_value.location.typed_value.latitude.typed_value", got["$['location']['latitude']"].typedPath)
 	// nested leaf carries only its own residual value column, not ancestor residuals.
 	assert.Equal(t, "payload.typed_value.location.typed_value.latitude.value", got["$['location']['latitude']"].ownResidual)
@@ -119,6 +120,38 @@ func TestSerializeVariantBounds(t *testing.T) {
 		loKeys = append(loKeys, f.Key)
 	}
 	assert.Equal(t, []string{"$['a']", "$['name']"}, loKeys)
+}
+
+// TestSerializeVariantBoundsIntWidth checks Int32 bounds keep the INT(8)/INT(16) annotation width, as Java does.
+func TestSerializeVariantBoundsIntWidth(t *testing.T) {
+	for _, tt := range []struct {
+		intWidth int
+		want     variant.Type
+	}{{8, variant.Int8}, {16, variant.Int16}, {0, variant.Int32}} {
+		fields := []variantFieldBound{{
+			jsonPath: "$['n']", icebergType: iceberg.PrimitiveTypes.Int32, intWidth: tt.intWidth,
+			lower: iceberg.NewLiteral(int32(1)), upper: iceberg.NewLiteral(int32(100)),
+		}}
+		for _, useLower := range []bool{true, false} {
+			v, err := boundsObjectValue(fields, useLower)
+			require.NoError(t, err)
+			f, err := v.Value().(variant.ObjectValue).ValueByKey("$['n']")
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, f.Value.Type(), "intWidth %d", tt.intWidth)
+		}
+	}
+
+	for _, tt := range []struct {
+		intWidth int
+		v        int32
+	}{{8, math.MaxInt8 + 1}, {8, math.MinInt8 - 1}, {16, math.MaxInt16 + 1}, {16, math.MinInt16 - 1}} {
+		fields := []variantFieldBound{{
+			jsonPath: "$['n']", icebergType: iceberg.PrimitiveTypes.Int32, intWidth: tt.intWidth,
+			lower: iceberg.NewLiteral(tt.v), upper: iceberg.NewLiteral(tt.v),
+		}}
+		_, _, _, err := serializeVariantBounds(fields)
+		assert.Error(t, err, "intWidth %d value %d", tt.intWidth, tt.v)
+	}
 }
 
 func TestSerializeVariantBoundsEmpty(t *testing.T) {

@@ -142,12 +142,13 @@ type TableCatalog interface {
 // NamespaceCatalog contains the namespace operations supported by every
 // catalog. All built-in catalogs implement these operations.
 type NamespaceCatalog interface {
-	// ListNamespaces returns the list of available namespaces, optionally filtering by a
-	// parent namespace
+	// ListNamespaces returns the namespaces one level below parent, or the
+	// top-level namespaces when parent is empty.
 	ListNamespaces(ctx context.Context, parent table.Identifier) ([]table.Identifier, error)
 	// CreateNamespace tells the catalog to create a new namespace with the given properties
 	CreateNamespace(ctx context.Context, namespace table.Identifier, props iceberg.Properties) error
-	// DropNamespace tells the catalog to drop the namespace and all tables in that namespace
+	// DropNamespace drops an empty namespace. It returns ErrNamespaceNotEmpty
+	// while the namespace holds tables, views, or child namespaces.
 	DropNamespace(ctx context.Context, namespace table.Identifier) error
 	// CheckNamespaceExists returns if the namespace exists
 	CheckNamespaceExists(ctx context.Context, namespace table.Identifier) (bool, error)
@@ -206,7 +207,9 @@ func As[T any](cat Catalog) (T, bool) {
 
 // ViewCatalog is an optional capability for standard view operations.
 // Use As to discover support on a Catalog, including through decorators.
-// RenameView, RegisterView, and UpdateView are not part of this interface.
+// RenameView and UpdateView may be discovered separately through
+// RenamableViewCatalog and UpdatableViewCatalog. RegisterView is not part of
+// this interface.
 type ViewCatalog interface {
 	// ListViews lists view identifiers in a namespace.
 	ListViews(ctx context.Context, namespace table.Identifier) iter.Seq2[table.Identifier, error]
@@ -221,10 +224,17 @@ type ViewCatalog interface {
 }
 
 // UpdatableViewCatalog is an optional capability for updating existing views.
-// The REST catalog implements it; discover support with As.
+// Discover support with As.
 type UpdatableViewCatalog interface {
 	// UpdateView applies requirements and updates and returns the updated view.
 	UpdateView(ctx context.Context, ident table.Identifier, requirements []view.Requirement, updates []view.Update) (*view.View, error)
+}
+
+// RenamableViewCatalog is an optional capability for renaming existing views.
+// REST and SQL catalogs implement it; discover support with As.
+type RenamableViewCatalog interface {
+	// RenameView changes a view's identifier and returns the renamed view.
+	RenameView(ctx context.Context, from, to table.Identifier) (*view.View, error)
 }
 
 // TransactionalCatalog is an optional interface implemented by catalogs

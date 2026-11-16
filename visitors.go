@@ -453,6 +453,20 @@ func typedCmp[T LiteralType](st StructLike, term BoundTerm, lit Literal) int {
 	return nullsFirstCmp(rhs.Comparator(), v, l)
 }
 
+// Ordinary predicates use the same signed-zero equality as Arrow row filters.
+func typedFloatCmp[T float32 | float64](st StructLike, term BoundTerm, lit Literal) int {
+	rhs := lit.(TypedLiteral[T])
+	compare := rhs.Comparator()
+
+	return nullsFirstCmp(func(a, b T) int {
+		if a == 0 && b == 0 {
+			return 0
+		}
+
+		return compare(a, b)
+	}, typedTermEval[T](st, term), Optional[T]{Valid: true, Val: rhs.Value()})
+}
+
 func doCmp(st StructLike, term BoundTerm, lit Literal) int {
 	// we already properly casted and converted everything during binding
 	// so we can type assert based on the term type
@@ -464,9 +478,9 @@ func doCmp(st StructLike, term BoundTerm, lit Literal) int {
 	case Int64Type:
 		return typedCmp[int64](st, term, lit)
 	case Float32Type:
-		return typedCmp[float32](st, term, lit)
+		return typedFloatCmp[float32](st, term, lit)
 	case Float64Type:
-		return typedCmp[float64](st, term, lit)
+		return typedFloatCmp[float64](st, term, lit)
 	case DateType:
 		return typedCmp[Date](st, term, lit)
 	case TimeType:
@@ -498,8 +512,7 @@ func (e *exprEvaluator) VisitNotEqual(term BoundTerm, lit Literal) bool {
 }
 
 // The ordering comparisons are false for a NaN value, following IEEE 754 as
-// the Arrow row filter does. doCmp can't decide them alone, because
-// cmp.Compare orders NaN below every number.
+// the Arrow row filter does. doCmp alone uses a total order for floating point.
 
 func (e *exprEvaluator) VisitGreater(term BoundTerm, lit Literal) bool {
 	return !e.VisitIsNan(term) && doCmp(e.st, term, lit) > 0
@@ -572,9 +585,7 @@ var _ BoundGeospatialExprVisitor[bool] = (*exprEvaluator)(nil)
 // comparison also matches NaN, so NOT(x < 5) becomes x >= 5 OR is_nan(x): NaN
 // fails both x < 5 and x >= 5, and the result must hold for the same rows as
 // the NOT it replaces. That follows IEEE 754 comparison, as a scan's row
-// filter does. ExpressionEvaluator orders NaN below every number instead, so on
-// a NaN value it can disagree with the expression it evaluates before rewriting;
-// see https://github.com/apache/iceberg-go/issues/2359.
+// filter and ExpressionEvaluator do.
 func RewriteNotExpr(expr BooleanExpression) (BooleanExpression, error) {
 	return VisitExpr(expr, rewriteNotVisitor{})
 }

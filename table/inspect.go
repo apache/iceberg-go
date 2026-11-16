@@ -408,15 +408,15 @@ func (i InspectTable) appendManifestRows(
 				summaryContainsNaN.Append(*summary.ContainsNaN)
 			}
 
-			fieldType := partType.FieldList[idx].Type
+			fieldType := partType.Field(idx).Type
 			transform := spec.Field(idx).Transform
 			if err := appendManifestBound(summaryLower, fieldType, transform, summary.LowerBound); err != nil {
 				return fmt.Errorf("manifest %s partition field %q lower bound: %w",
-					manifest.FilePath(), partType.FieldList[idx].Name, err)
+					manifest.FilePath(), partType.Field(idx).Name, err)
 			}
 			if err := appendManifestBound(summaryUpper, fieldType, transform, summary.UpperBound); err != nil {
 				return fmt.Errorf("manifest %s partition field %q upper bound: %w",
-					manifest.FilePath(), partType.FieldList[idx].Name, err)
+					manifest.FilePath(), partType.Field(idx).Name, err)
 			}
 		}
 	}
@@ -706,13 +706,7 @@ func SnapshotsSchema() *iceberg.Schema {
 		iceberg.NestedField{ID: 3, Name: "parent_id", Type: iceberg.PrimitiveTypes.Int64, Required: false},
 		iceberg.NestedField{ID: 4, Name: "operation", Type: iceberg.PrimitiveTypes.String, Required: false},
 		iceberg.NestedField{ID: 5, Name: "manifest_list", Type: iceberg.PrimitiveTypes.String, Required: false},
-		iceberg.NestedField{ID: 6, Name: "summary", Required: false, Type: &iceberg.MapType{
-			KeyID:         7,
-			KeyType:       iceberg.PrimitiveTypes.String,
-			ValueID:       8,
-			ValueType:     iceberg.PrimitiveTypes.String,
-			ValueRequired: false,
-		}},
+		iceberg.NestedField{ID: 6, Name: "summary", Required: false, Type: iceberg.NewMapType(7, iceberg.PrimitiveTypes.String, 8, iceberg.PrimitiveTypes.String, false)},
 	)
 }
 
@@ -757,15 +751,11 @@ func ManifestsSchema() *iceberg.Schema {
 		iceberg.NestedField{ID: 15, Name: "added_delete_files_count", Type: iceberg.PrimitiveTypes.Int32, Required: false},
 		iceberg.NestedField{ID: 16, Name: "existing_delete_files_count", Type: iceberg.PrimitiveTypes.Int32, Required: false},
 		iceberg.NestedField{ID: 17, Name: "deleted_delete_files_count", Type: iceberg.PrimitiveTypes.Int32, Required: false},
-		iceberg.NestedField{ID: 8, Name: "partition_summaries", Required: true, Type: &iceberg.ListType{
-			ElementID:       9,
-			ElementRequired: true,
-			Element: &iceberg.StructType{FieldList: []iceberg.NestedField{
-				{ID: 10, Name: "contains_null", Type: iceberg.PrimitiveTypes.Bool, Required: true},
-				{ID: 11, Name: "contains_nan", Type: iceberg.PrimitiveTypes.Bool, Required: false},
-				{ID: 12, Name: "lower_bound", Type: iceberg.PrimitiveTypes.String, Required: false},
-				{ID: 13, Name: "upper_bound", Type: iceberg.PrimitiveTypes.String, Required: false},
-			}},
-		}},
+		iceberg.NestedField{ID: 8, Name: "partition_summaries", Required: true, Type: iceberg.NewListType(9, iceberg.NewStructType(
+			iceberg.NestedField{ID: 10, Name: "contains_null", Type: iceberg.PrimitiveTypes.Bool, Required: true},
+			iceberg.NestedField{ID: 11, Name: "contains_nan", Type: iceberg.PrimitiveTypes.Bool, Required: false},
+			iceberg.NestedField{ID: 12, Name: "lower_bound", Type: iceberg.PrimitiveTypes.String, Required: false},
+			iceberg.NestedField{ID: 13, Name: "upper_bound", Type: iceberg.PrimitiveTypes.String, Required: false},
+		), true)},
 	)
 }

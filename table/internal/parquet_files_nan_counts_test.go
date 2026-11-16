@@ -44,12 +44,10 @@ func TestWriteDataFileRecordsNaNValueCounts(t *testing.T) {
 	iceSchema := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "d", Type: iceberg.PrimitiveTypes.Float64},
 		iceberg.NestedField{ID: 2, Name: "f", Type: iceberg.PrimitiveTypes.Float32},
-		iceberg.NestedField{ID: 3, Name: "s", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
-			{ID: 4, Name: "x", Type: iceberg.PrimitiveTypes.Float64},
-		}}},
-		iceberg.NestedField{ID: 5, Name: "l", Type: &iceberg.ListType{
-			ElementID: 6, Element: iceberg.PrimitiveTypes.Float64,
-		}},
+		iceberg.NestedField{ID: 3, Name: "s", Type: iceberg.NewStructType(
+			iceberg.NestedField{ID: 4, Name: "x", Type: iceberg.PrimitiveTypes.Float64},
+		)},
+		iceberg.NestedField{ID: 5, Name: "l", Type: iceberg.NewListType(6, iceberg.PrimitiveTypes.Float64, false)},
 		iceberg.NestedField{ID: 7, Name: "n", Type: iceberg.PrimitiveTypes.Float64},
 		iceberg.NestedField{ID: 8, Name: "z", Type: iceberg.PrimitiveTypes.Float64},
 		iceberg.NestedField{ID: 9, Name: "i", Type: iceberg.PrimitiveTypes.Int32},

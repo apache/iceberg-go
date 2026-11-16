@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"maps"
+	"math"
 	"os"
 	"strconv"
 	"strings"
@@ -779,8 +780,8 @@ func TestShreddedVariantWriteLargeDecimal(t *testing.T) {
 	}
 }
 
-// columnPhysicalType returns the Parquet physical type of a top-level leaf column.
-func columnPhysicalType(t *testing.T, path, name string) parquet.Type {
+// leafColumn returns the Parquet descriptor of a leaf column.
+func leafColumn(t *testing.T, path, name string) *pqschema.Column {
 	t.Helper()
 	path = strings.TrimPrefix(path, "file://")
 	f, err := os.Open(path)
@@ -792,16 +793,45 @@ func columnPhysicalType(t *testing.T, path, name string) parquet.Type {
 	sc := pf.MetaData().Schema
 	for i := range sc.NumColumns() {
 		if col := sc.Column(i); col.Name() == name {
-			return col.PhysicalType()
+			return col
 		}
 	}
 	t.Fatalf("column %q not found", name)
 
-	return parquet.Types.Undefined
+	return nil
 }
 
-// TestShreddedVariantWriteRegularDecimalStats checks that with shredding on but no
-// shredded decimal, a regular decimal column keeps FLBA and its bounds stay correct.
+// columnPhysicalType returns the Parquet physical type of a leaf column.
+func columnPhysicalType(t *testing.T, path, name string) parquet.Type {
+	t.Helper()
+
+	return leafColumn(t, path, name).PhysicalType()
+}
+
+// columnLogicalType returns the Parquet logical type of a leaf column.
+func columnLogicalType(t *testing.T, path, name string) pqschema.LogicalType {
+	t.Helper()
+
+	return leafColumn(t, path, name).LogicalType()
+}
+
+// variantBoundField decodes a variant bound object and returns the value at path.
+func variantBoundField(t *testing.T, raw []byte, path string) variant.Value {
+	t.Helper()
+	meta, err := variant.NewMetadata(raw)
+	require.NoError(t, err)
+	v, err := variant.New(raw[:meta.SizeBytes()], raw[meta.SizeBytes():])
+	require.NoError(t, err)
+	obj, ok := v.Value().(variant.ObjectValue)
+	require.True(t, ok)
+	field, err := obj.ValueByKey(path)
+	require.NoError(t, err)
+
+	return field.Value
+}
+
+// TestShreddedVariantWriteRegularDecimalStats checks that a regular decimal uses
+// the spec's integer encoding and correct bounds even when no variant decimal is shredded.
 func TestShreddedVariantWriteRegularDecimalStats(t *testing.T) {
 	mem := memory.DefaultAllocator
 	iceSchema := iceberg.NewSchema(0,
@@ -857,9 +887,7 @@ func TestShreddedVariantWriteRegularDecimalStats(t *testing.T) {
 	}
 	require.Len(t, files, 1)
 
-	// The variant shreds no decimal, so per-file gating leaves StoreDecimalAsInteger
-	// off and the regular decimal column keeps its default FIXED_LEN_BYTE_ARRAY.
-	assert.Equal(t, parquet.Types.FixedLenByteArray, columnPhysicalType(t, files[0].FilePath(), "price"))
+	assert.Equal(t, parquet.Types.Int32, columnPhysicalType(t, files[0].FilePath(), "price"))
 
 	decTyp := iceberg.MustDecimalTypeOf(9, 2)
 	lb, err := iceberg.LiteralFromBytes(decTyp, files[0].LowerBoundValues()[2])
@@ -1472,19 +1500,105 @@ func TestShreddedVariantWriteNullFieldKeepsBound(t *testing.T) {
 	require.Len(t, files, 1)
 
 	// f has int64 + null (no conflict): its bound is kept and covers the non-null range.
-	buildObj := func(fv int64) []byte {
-		var b variant.Builder
-		start := b.Offset()
-		entries := []variant.FieldEntry{b.NextField(start, "$['f']")}
-		require.NoError(t, b.AppendInt(fv))
-		require.NoError(t, b.FinishObject(start, entries))
-		v, err := b.Build()
+	lo := variantBoundField(t, files[0].LowerBoundValues()[2], "$['f']")
+	hi := variantBoundField(t, files[0].UpperBoundValues()[2], "$['f']")
+	assert.Equal(t, variant.Int32, lo.Type())
+	assert.Equal(t, int32(1000), lo.Value())
+	assert.Equal(t, variant.Int32, hi.Type())
+	assert.Equal(t, int32(1006), hi.Value())
+}
+
+func TestShreddedVariantWriteSmallSampleKeepsWideBound(t *testing.T) {
+	mem := memory.DefaultAllocator
+	iceSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "payload", Type: iceberg.VariantType{}},
+	)
+	arrSchema, err := SchemaToArrowSchema(iceSchema, nil, true, false)
+	require.NoError(t, err)
+
+	write := func(t *testing.T, vals []int64) iceberg.DataFile {
+		idb := array.NewInt64Builder(mem)
+		defer idb.Release()
+		vb := extensions.NewVariantBuilder(mem, extensions.NewDefaultVariantType())
+		defer vb.Release()
+		for i, fv := range vals {
+			idb.Append(int64(i))
+			var b variant.Builder
+			require.NoError(t, b.Append(map[string]any{"f": fv}))
+			v, err := b.Build()
+			require.NoError(t, err)
+			vb.Append(v)
+		}
+		idArr := idb.NewArray()
+		defer idArr.Release()
+		pArr := vb.NewArray()
+		defer pArr.Release()
+		rec := array.NewRecordBatch(arrSchema, []arrow.Array{idArr, pArr}, int64(len(vals)))
+		defer rec.Release()
+
+		itr := func(yield func(arrow.RecordBatch, error) bool) { yield(rec, nil) }
+		loc := strings.ReplaceAll(t.TempDir(), "\\", "/")
+		meta, err := NewMetadata(iceSchema, iceberg.UnpartitionedSpec, UnsortedSortOrder, loc, iceberg.Properties{
+			PropertyFormatVersion:       "3",
+			ParquetShredVariantsKey:     "true",
+			ParquetVariantBufferSizeKey: "4",
+		})
+		require.NoError(t, err)
+		mb, err := MetadataBuilderFromBase(meta, "")
+		require.NoError(t, err)
+		u := uuid.New()
+		args := recordWritingArgs{sc: arrSchema, itr: itr, fs: iceio.LocalFS{}, writeUUID: &u, counter: infiniteCounter()}
+		factory, err := newWriterFactory(loc, args, mb, iceSchema, 512*1024*1024)
 		require.NoError(t, err)
 
-		return append(append([]byte{}, v.Metadata().Bytes()...), v.Bytes()...)
+		var files []iceberg.DataFile
+		for df, err := range unpartitionedWrite(context.Background(), factory, args.itr) {
+			require.NoError(t, err)
+			files = append(files, df)
+		}
+		require.Len(t, files, 1)
+
+		return files[0]
 	}
-	assert.Equal(t, buildObj(1000), files[0].LowerBoundValues()[2])
-	assert.Equal(t, buildObj(1006), files[0].UpperBoundValues()[2])
+
+	// Inference sees only the first 4 rows; later values within int32 must stay typed, or f loses its bounds.
+	for _, tt := range []struct {
+		name       string
+		vals       []int64
+		lower      int32
+		upper      int32
+		wantBounds bool
+	}{
+		{"wide after small", []int64{1, 2, 3, 4, 40000, 40001, 40002, 40003}, 1, 40003, true},
+		{"negative", []int64{-1, -2, -3, -4, -40000}, -40000, -1, true},
+		{"int32 limits", []int64{1, 2, 3, 4, math.MinInt32, math.MaxInt32}, math.MinInt32, math.MaxInt32, true},
+		{"past max int32", []int64{1, 2, 3, 4, math.MaxInt32 + 1}, 0, 0, false},
+		{"past min int32", []int64{1, 2, 3, 4, math.MinInt32 - 1}, 0, 0, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			df := write(t, tt.vals)
+			assert.Equal(t, parquet.Types.Int32, columnPhysicalType(t, df.FilePath(), "typed_value"))
+			lt := columnLogicalType(t, df.FilePath(), "typed_value")
+			assert.True(t, lt.Equals(pqschema.NewIntLogicalType(32, true)), "typed_value annotation %s", lt)
+
+			lo, hasLo := df.LowerBoundValues()[2]
+			hi, hasHi := df.UpperBoundValues()[2]
+			require.Equal(t, tt.wantBounds, hasLo, "lower bound presence")
+			require.Equal(t, tt.wantBounds, hasHi, "upper bound presence")
+			if !tt.wantBounds {
+				return
+			}
+			for _, b := range []struct {
+				raw  []byte
+				want int32
+			}{{lo, tt.lower}, {hi, tt.upper}} {
+				got := variantBoundField(t, b.raw, "$['f']")
+				assert.Equal(t, variant.Int32, got.Type())
+				assert.Equal(t, b.want, got.Value())
+			}
+		})
+	}
 }
 
 func TestShreddedVariantWriteFloatBound(t *testing.T) {
@@ -1608,7 +1722,6 @@ func TestShreddedVariantWriteScalarBounds(t *testing.T) {
 		build func(*variant.Builder) error
 	}{
 		{"bool", func(b *variant.Builder) error { return b.AppendBool(true) }},
-		{"int-small", func(b *variant.Builder) error { return b.AppendInt(1000) }},
 		{"int64", func(b *variant.Builder) error { return b.AppendInt(5_000_000_000) }},
 		{"float32", func(b *variant.Builder) error { return b.AppendFloat32(1.5) }},
 		{"float64", func(b *variant.Builder) error { return b.AppendFloat64(2.5) }},
@@ -2004,9 +2117,7 @@ func TestBuildExtractColumnDottedName(t *testing.T) {
 func TestBuildExtractColumnNested(t *testing.T) {
 	mem := memory.DefaultAllocator
 	iceSchema := iceberg.NewSchema(0,
-		iceberg.NestedField{ID: 3, Name: "wrapper", Type: &iceberg.StructType{
-			FieldList: []iceberg.NestedField{{ID: 2, Name: "payload", Type: iceberg.VariantType{}}},
-		}},
+		iceberg.NestedField{ID: 3, Name: "wrapper", Type: iceberg.NewStructType(iceberg.NestedField{ID: 2, Name: "payload", Type: iceberg.VariantType{}})},
 	)
 
 	vb := extensions.NewVariantBuilder(mem, extensions.NewDefaultVariantType())

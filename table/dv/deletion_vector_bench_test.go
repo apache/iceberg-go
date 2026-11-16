@@ -125,7 +125,7 @@ func benchmarkDVFiles(b *testing.B, numDVs int) []iceberg.DataFile {
 			Type:           puffin.BlobTypeDeletionVector,
 			SnapshotID:     -1,
 			SequenceNumber: -1,
-			Fields:         []int32{2147483546},
+			Fields:         []int32{iceberg.RowPositionFieldID},
 			Properties: map[string]string{
 				dvReferencedDataFileProperty: referencedDataFile,
 				dvCardinalityProperty:        "1",

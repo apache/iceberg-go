@@ -34,9 +34,8 @@ import (
 )
 
 const (
-	// ChangelogChangeTypeColumn is INSERT or DELETE. A copy-on-write overwrite
-	// emits both for rows that did not change. UPDATE_BEFORE and UPDATE_AFTER
-	// are not produced.
+	// ChangelogChangeTypeColumn is INSERT or DELETE in raw changelogs.
+	// ToNormalizedArrowRecords can also produce UPDATE_BEFORE and UPDATE_AFTER.
 	ChangelogChangeTypeColumn = "_change_type"
 	// ChangelogChangeOrdinalColumn is the zero-based ordinal of the snapshot
 	// that produced the change, shared by every row from that snapshot. The

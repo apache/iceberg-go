@@ -548,6 +548,18 @@ func NewSetSnapshotRefUpdate(
 	maxRefAgeMs, maxSnapshotAgeMs int64,
 	minSnapshotsToKeep int,
 ) *setSnapshotRefUpdate {
+	// Negative values are supported as omitted options by existing callers.
+	// Normalize them so JSON omitempty does not write invalid retention values.
+	if maxRefAgeMs < 0 {
+		maxRefAgeMs = 0
+	}
+	if maxSnapshotAgeMs < 0 {
+		maxSnapshotAgeMs = 0
+	}
+	if minSnapshotsToKeep < 0 {
+		minSnapshotsToKeep = 0
+	}
+
 	return &setSnapshotRefUpdate{
 		baseUpdate:         baseUpdate{ActionName: UpdateSetSnapshotRef},
 		RefName:            name,
@@ -823,7 +835,11 @@ func (u *removeSnapshotsUpdate) expiredSnapshots(preTable, postTable *Table, fil
 		if !ok {
 			return nil, fmt.Errorf("missing snapshot %d", id)
 		}
-		files[snap.ManifestList] = struct{}{}
+		// V1 snapshots may embed manifests and have no manifest list.
+		// Never pass an empty path to the FileIO removal callback.
+		if snap.ManifestList != "" {
+			files[snap.ManifestList] = struct{}{}
+		}
 		for _, path := range snap.statisticsPaths {
 			files[path] = struct{}{}
 		}

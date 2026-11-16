@@ -41,9 +41,9 @@ func TestSortedCompactionRecords_NestedAndNulls(t *testing.T) {
 
 	schema := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64},
-		iceberg.NestedField{ID: 2, Name: "s", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
-			{ID: 3, Name: "x", Type: iceberg.PrimitiveTypes.String},
-		}}},
+		iceberg.NestedField{ID: 2, Name: "s", Type: iceberg.NewStructType(
+			iceberg.NestedField{ID: 3, Name: "x", Type: iceberg.PrimitiveTypes.String},
+		)},
 	)
 	sc := arrow.NewSchema([]arrow.Field{
 		{Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: true},

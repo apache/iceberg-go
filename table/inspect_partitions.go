@@ -20,7 +20,6 @@ package table
 import (
 	"context"
 	"fmt"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -33,112 +32,11 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-type inspectPartitionAggregate struct {
-	specID              int32
-	partition           map[int]any
-	dataRecordCount     int64
-	dataFileCount       int32
-	dataFileSize        int64
-	positionDeleteCount int64
-	positionDeleteFiles int32
-	equalityDeleteCount int64
-	equalityDeleteFiles int32
-	lastUpdatedAt       *int64
-	lastUpdatedSnapshot *int64
-	orderingKey         string
-}
-
-type inspectPartitionAggregateTree struct {
-	children       map[any]*inspectPartitionAggregateTree
-	binaryChildren map[string]*inspectPartitionAggregateTree
-	aggregate      *inspectPartitionAggregate
-}
-
-func newInspectPartitionAggregateTree() *inspectPartitionAggregateTree {
-	return &inspectPartitionAggregateTree{}
-}
-
-// child uses a typed map for binary values to avoid interface-backed keys
-// during repeated lookups. Other values retain their existing key types.
-func (t *inspectPartitionAggregateTree) child(value any) (*inspectPartitionAggregateTree, bool) {
-	if binary, ok := value.([]byte); ok {
-		child, found := t.binaryChildren[string(binary)]
-
-		return child, found
-	}
-
-	child, found := t.children[comparablePartitionKey(value)]
-
-	return child, found
-}
-
-func (t *inspectPartitionAggregateTree) setChild(value any, child *inspectPartitionAggregateTree) {
-	if binary, ok := value.([]byte); ok {
-		if t.binaryChildren == nil {
-			t.binaryChildren = make(map[string]*inspectPartitionAggregateTree)
-		}
-		// A stored string key owns its bytes even if the input buffer changes.
-		t.binaryChildren[string(binary)] = child
-
-		return
-	}
-
-	if t.children == nil {
-		t.children = make(map[any]*inspectPartitionAggregateTree)
-	}
-	t.children[comparablePartitionKey(value)] = child
-}
-
-func (t *inspectPartitionAggregateTree) lookup(record partitionRecord) *inspectPartitionAggregate {
-	node := t
-	for _, value := range record {
-		child, ok := node.child(value)
-		if !ok {
-			return nil
-		}
-		node = child
-	}
-
-	return node.aggregate
-}
-
-func (t *inspectPartitionAggregateTree) lookupPartition(
-	partition map[int]any,
-	partitionType *iceberg.StructType,
-) *inspectPartitionAggregate {
-	node := t
-	for _, field := range partitionType.FieldList {
-		child, ok := node.child(partition[field.ID])
-		if !ok {
-			return nil
-		}
-		node = child
-	}
-
-	return node.aggregate
-}
-
-// insert walks the positional record, while lookupPartition walks partition
-// field IDs. Build records with the same partition type so their field order
-// stays aligned.
-func (t *inspectPartitionAggregateTree) insert(record partitionRecord, aggregate *inspectPartitionAggregate) {
-	node := t
-	for _, value := range record {
-		child, ok := node.child(value)
-		if !ok {
-			child = newInspectPartitionAggregateTree()
-			node.setChild(value, child)
-		}
-		node = child
-	}
-	node.aggregate = aggregate
-}
-
 // Partitions returns one row per live partition, aggregating data and delete
 // files from the current snapshot. Files from evolved specs are coerced into
 // the table-wide partition type before grouping.
 func (i InspectTable) Partitions(ctx context.Context) (array.RecordReader, error) {
-	partitionType, err := inspectPartitionType(i.tbl.Metadata())
+	partitionType, err := unifiedPartitionType(i.tbl.Metadata())
 	if err != nil {
 		return nil, fmt.Errorf("inspect partitions: %w", err)
 	}
@@ -156,14 +54,14 @@ func (i InspectTable) Partitions(ctx context.Context) (array.RecordReader, error
 	return i.partitionAggregateReader(ctx, arrowSchema, partitionType, aggregates), nil
 }
 
-// partitionAggregateReader encodes at most inspectRecordBatchSize partitions per
+// partitionAggregateReader encodes at most recordBatchSize partitions per
 // Arrow batch. Aggregate discovery is eager, but the Arrow buffers are bounded
 // and released as each record is consumed.
 func (i InspectTable) partitionAggregateReader(
 	ctx context.Context,
 	arrowSchema *arrow.Schema,
 	partitionType *iceberg.StructType,
-	aggregates []*inspectPartitionAggregate,
+	aggregates []*partitionAggregate,
 ) array.RecordReader {
 	return array.ReaderFromIter(arrowSchema, func(yield func(arrow.RecordBatch, error) bool) {
 		bldr := array.NewRecordBuilder(i.alloc, arrowSchema)
@@ -182,7 +80,7 @@ func (i InspectTable) partitionAggregateReader(
 
 				return
 			}
-			if (index+1)%inspectRecordBatchSize == 0 {
+			if (index+1)%recordBatchSize == 0 {
 				if !yield(bldr.NewRecordBatch(), nil) {
 					return
 				}
@@ -191,7 +89,7 @@ func (i InspectTable) partitionAggregateReader(
 
 		// Match the prior single-batch API for empty tables, but do not emit
 		// an extra empty batch after an exact multiple of the batch size.
-		if len(aggregates) == 0 || len(aggregates)%inspectRecordBatchSize != 0 {
+		if len(aggregates) == 0 || len(aggregates)%recordBatchSize != 0 {
 			_ = yield(bldr.NewRecordBatch(), nil)
 		}
 	})
@@ -201,7 +99,7 @@ func (i InspectTable) partitionAggregateReader(
 // per-manifest partition aggregation state.
 const inspectPartitionManifestConcurrency = 8
 
-func (i InspectTable) partitionAggregates(ctx context.Context, partitionType *iceberg.StructType) ([]*inspectPartitionAggregate, error) {
+func (i InspectTable) partitionAggregates(ctx context.Context, partitionType *iceberg.StructType) ([]*partitionAggregate, error) {
 	snapshot := i.tbl.Metadata().CurrentSnapshot()
 	if snapshot == nil {
 		return nil, nil
@@ -222,8 +120,8 @@ func (i InspectTable) partitionAggregates(ctx context.Context, partitionType *ic
 		snapshotTimes[snapshot.SnapshotID] = snapshot.TimestampMs
 	}
 
-	aggregates := make([]*inspectPartitionAggregate, 0)
-	aggregateTree := newInspectPartitionAggregateTree()
+	aggregates := make([]*partitionAggregate, 0)
+	aggregateTree := newPartitionAggregateTree()
 
 	// Buffer only a bounded number of manifests. Workers group their entries
 	// independently, then their results are merged in manifest order.
@@ -234,11 +132,11 @@ func (i InspectTable) partitionAggregates(ctx context.Context, partitionType *ic
 				snapshotTimes, aggregateTree, &aggregates)
 		}
 
-		partial := make([][]*inspectPartitionAggregate, len(batch))
+		partial := make([][]*partitionAggregate, len(batch))
 		g, gctx := errgroup.WithContext(ctx)
 		for index, manifest := range batch {
 			g.Go(func() error {
-				localTree := newInspectPartitionAggregateTree()
+				localTree := newPartitionAggregateTree()
 
 				return i.foldInspectPartitionManifest(gctx, fs, manifest, partitionType,
 					snapshotTimes, localTree, &partial[index])
@@ -308,8 +206,8 @@ func (i InspectTable) foldInspectPartitionManifest(
 	manifest iceberg.ManifestFile,
 	partitionType *iceberg.StructType,
 	snapshotTimes map[int64]int64,
-	aggregateTree *inspectPartitionAggregateTree,
-	aggregates *[]*inspectPartitionAggregate,
+	aggregateTree *partitionAggregateTree,
+	aggregates *[]*partitionAggregate,
 ) error {
 	// Avoid opening remote manifest files after the caller has canceled.
 	if err := ctx.Err(); err != nil {
@@ -332,10 +230,10 @@ func (i InspectTable) foldInspectPartitionManifest(
 		partitionValues := dataFilePartition(file)
 		aggregate := aggregateTree.lookupPartition(partitionValues, partitionType)
 		if aggregate == nil {
-			partition := inspectCoercePartition(partitionValues, partitionType)
+			partition := coercePartition(partitionValues, partitionType)
 			record := newPartitionRecord(partition, partitionType)
-			aggregate = &inspectPartitionAggregate{
-				partition:   cloneInspectPartition(partition),
+			aggregate = &partitionAggregate{
+				partition:   clonePartition(partition),
 				orderingKey: inspectPartitionKey(partition),
 			}
 			*aggregates = append(*aggregates, aggregate)
@@ -365,7 +263,7 @@ func (i InspectTable) foldInspectPartitionManifest(
 	return ctx.Err()
 }
 
-func mergeInspectPartitionAggregate(dst, src *inspectPartitionAggregate) {
+func mergeInspectPartitionAggregate(dst, src *partitionAggregate) {
 	dst.dataRecordCount += src.dataRecordCount
 	dst.dataFileCount += src.dataFileCount
 	dst.dataFileSize += src.dataFileSize
@@ -383,7 +281,7 @@ func mergeInspectPartitionAggregate(dst, src *inspectPartitionAggregate) {
 }
 
 func (i InspectTable) updatePartitionTimestamp(
-	aggregate *inspectPartitionAggregate,
+	aggregate *partitionAggregate,
 	snapshotTimes map[int64]int64,
 	snapshotID int64,
 	specID int32,
@@ -403,21 +301,6 @@ func (i InspectTable) updatePartitionTimestamp(
 	id := snapshotID
 	aggregate.lastUpdatedSnapshot = &id
 	aggregate.specID = specID
-}
-
-func inspectCoercePartition(values map[int]any, partitionType *iceberg.StructType) map[int]any {
-	if partitionType == nil || len(partitionType.FieldList) == 0 {
-		return nil
-	}
-
-	coerced := make(map[int]any, len(partitionType.FieldList))
-	for _, field := range partitionType.FieldList {
-		if value, ok := values[field.ID]; ok {
-			coerced[field.ID] = value
-		}
-	}
-
-	return coerced
 }
 
 func inspectPartitionKey(partition map[int]any) string {
@@ -472,26 +355,11 @@ func inspectPartitionKey(partition map[int]any) string {
 	return key.String()
 }
 
-func cloneInspectPartition(partition map[int]any) map[int]any {
-	if partition == nil {
-		return nil
-	}
-	returnMap := make(map[int]any, len(partition))
-	for id, value := range partition {
-		if bytes, ok := value.([]byte); ok {
-			value = slices.Clone(bytes)
-		}
-		returnMap[id] = value
-	}
-
-	return returnMap
-}
-
 // PartitionsSchema returns the partition metadata-table schema. For an
 // unpartitioned table the partition and spec_id columns are omitted, matching
 // Java's PartitionsTable behavior.
 func PartitionsSchema(partitionType *iceberg.StructType) *iceberg.Schema {
-	if partitionType == nil || len(partitionType.FieldList) == 0 {
+	if partitionType == nil || partitionType.NumFields() == 0 {
 		return iceberg.NewSchema(0,
 			iceberg.NestedField{ID: 2, Name: "record_count", Type: iceberg.PrimitiveTypes.Int64, Required: true},
 			iceberg.NestedField{ID: 3, Name: "file_count", Type: iceberg.PrimitiveTypes.Int32, Required: true},
@@ -520,20 +388,21 @@ func PartitionsSchema(partitionType *iceberg.StructType) *iceberg.Schema {
 	)
 }
 
-func appendPartitionAggregate(bldr *array.RecordBuilder, partitionType *iceberg.StructType, aggregate inspectPartitionAggregate) error {
+func appendPartitionAggregate(bldr *array.RecordBuilder, partitionType *iceberg.StructType, aggregate partitionAggregate) error {
 	idx := 0
-	if partitionType != nil && len(partitionType.FieldList) > 0 {
+	if partitionType != nil && partitionType.NumFields() > 0 {
 		partition := bldr.Field(idx).(*array.StructBuilder)
 		arrowType := partition.Type().(*arrow.StructType)
 		partition.Append(true)
-		for fieldIndex, field := range partitionType.FieldList {
+		for fieldIndex := range partitionType.NumFields() {
+			field := partitionType.Field(fieldIndex)
 			value := aggregate.partition[field.ID]
 			if value == nil {
 				partition.FieldBuilder(fieldIndex).AppendNull()
 
 				continue
 			}
-			valueScalar, err := inspectValueScalar(value, field.Type, arrowType.Field(fieldIndex).Type)
+			valueScalar, err := partitionValueScalar(value, field.Type, arrowType.Field(fieldIndex).Type)
 			if err != nil {
 				return fmt.Errorf("partition field %q: %w", field.Name, err)
 			}

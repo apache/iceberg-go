@@ -69,6 +69,185 @@ func TestDynamicPartitionMatcher(t *testing.T) {
 	}
 }
 
+func TestDynamicOverwriteManifestCandidates(t *testing.T) {
+	t.Run("identity partition keeps matches and unknown summaries", func(t *testing.T) {
+		schema := simpleSchema()
+		spec := iceberg.NewPartitionSpecID(4, iceberg.PartitionField{
+			SourceIDs: []int{1}, FieldID: 1000, Name: "id", Transform: iceberg.IdentityTransform{},
+		})
+		summary := func(lower, upper int32) iceberg.FieldSummary {
+			lo, err := iceberg.Int32Literal(lower).MarshalBinary()
+			require.NoError(t, err)
+			hi, err := iceberg.Int32Literal(upper).MarshalBinary()
+			require.NoError(t, err)
+
+			return iceberg.FieldSummary{LowerBound: &lo, UpperBound: &hi}
+		}
+		manifests := []iceberg.ManifestFile{
+			iceberg.NewManifestBuilder(2, "matching.avro", 1, int32(spec.ID()), 1).
+				Partitions([]iceberg.FieldSummary{summary(2, 2)}).Build(),
+			iceberg.NewManifestBuilder(2, "disjoint.avro", 1, int32(spec.ID()), 1).
+				Partitions([]iceberg.FieldSummary{summary(10, 20)}).Build(),
+			iceberg.NewManifestBuilder(2, "unknown-summary.avro", 1, int32(spec.ID()), 1).Build(),
+			iceberg.NewManifestBuilder(2, "old-spec.avro", 1, 3, 1).
+				Partitions([]iceberg.FieldSummary{summary(2, 2)}).Build(),
+		}
+
+		candidates, err := dynamicOverwriteManifestCandidates(t.Context(), manifests, spec, schema,
+			[]map[int]any{{1000: int32(2)}})
+		require.NoError(t, err)
+		require.Equal(t, []bool{true, false, true, false}, candidates)
+	})
+
+	t.Run("day transform uses projected partition bounds", func(t *testing.T) {
+		schema := iceberg.NewSchema(0,
+			iceberg.NestedField{ID: 2, Name: "event_date", Type: iceberg.PrimitiveTypes.Date, Required: true},
+		)
+		spec := iceberg.NewPartitionSpecID(5, iceberg.PartitionField{
+			SourceIDs: []int{2}, FieldID: 1000, Name: "event_day", Transform: iceberg.DayTransform{},
+		})
+		summary := func(lower, upper int32) iceberg.FieldSummary {
+			lo, err := iceberg.Int32Literal(lower).MarshalBinary()
+			require.NoError(t, err)
+			hi, err := iceberg.Int32Literal(upper).MarshalBinary()
+			require.NoError(t, err)
+
+			return iceberg.FieldSummary{LowerBound: &lo, UpperBound: &hi}
+		}
+		manifests := []iceberg.ManifestFile{
+			iceberg.NewManifestBuilder(2, "same-day.avro", 1, int32(spec.ID()), 1).
+				Partitions([]iceberg.FieldSummary{summary(20000, 20000)}).Build(),
+			iceberg.NewManifestBuilder(2, "other-day.avro", 1, int32(spec.ID()), 1).
+				Partitions([]iceberg.FieldSummary{summary(20001, 20002)}).Build(),
+		}
+
+		candidates, err := dynamicOverwriteManifestCandidates(t.Context(), manifests, spec, schema,
+			[]map[int]any{{1000: int32(20000)}})
+		require.NoError(t, err)
+		require.Equal(t, []bool{true, false}, candidates)
+	})
+
+	t.Run("bucket transform uses projected partition bounds", func(t *testing.T) {
+		schema := simpleSchema()
+		spec := iceberg.NewPartitionSpecID(7, iceberg.PartitionField{
+			SourceIDs: []int{1}, FieldID: 1000, Name: "id_bucket", Transform: iceberg.BucketTransform{NumBuckets: 16},
+		})
+		summary := func(value int32) iceberg.FieldSummary {
+			bound, err := iceberg.Int32Literal(value).MarshalBinary()
+			require.NoError(t, err)
+
+			return iceberg.FieldSummary{LowerBound: &bound, UpperBound: &bound}
+		}
+		manifests := []iceberg.ManifestFile{
+			iceberg.NewManifestBuilder(2, "same-bucket.avro", 1, int32(spec.ID()), 1).
+				Partitions([]iceberg.FieldSummary{summary(4)}).Build(),
+			iceberg.NewManifestBuilder(2, "other-bucket.avro", 1, int32(spec.ID()), 1).
+				Partitions([]iceberg.FieldSummary{summary(5)}).Build(),
+		}
+
+		candidates, err := dynamicOverwriteManifestCandidates(t.Context(), manifests, spec, schema,
+			[]map[int]any{{1000: int32(4)}})
+		require.NoError(t, err)
+		require.Equal(t, []bool{true, false}, candidates)
+	})
+
+	t.Run("null partition uses contains-null summary", func(t *testing.T) {
+		schema := iceberg.NewSchema(0,
+			iceberg.NestedField{ID: 2, Name: "region", Type: iceberg.PrimitiveTypes.String, Required: false},
+		)
+		spec := iceberg.NewPartitionSpecID(6, iceberg.PartitionField{
+			SourceIDs: []int{2}, FieldID: 1000, Name: "region", Transform: iceberg.IdentityTransform{},
+		})
+		lower, err := iceberg.StringLiteral("a").MarshalBinary()
+		require.NoError(t, err)
+		upper, err := iceberg.StringLiteral("z").MarshalBinary()
+		require.NoError(t, err)
+		manifests := []iceberg.ManifestFile{
+			iceberg.NewManifestBuilder(2, "nonnull.avro", 1, int32(spec.ID()), 1).
+				Partitions([]iceberg.FieldSummary{{LowerBound: &lower, UpperBound: &upper}}).Build(),
+			iceberg.NewManifestBuilder(2, "null.avro", 1, int32(spec.ID()), 1).
+				Partitions([]iceberg.FieldSummary{{ContainsNull: true}}).Build(),
+		}
+
+		candidates, err := dynamicOverwriteManifestCandidates(t.Context(), manifests, spec, schema,
+			[]map[int]any{{1000: nil}})
+		require.NoError(t, err)
+		require.Equal(t, []bool{false, true}, candidates)
+	})
+	t.Run("unpartitioned also selects old-spec manifests", func(t *testing.T) {
+		spec := iceberg.NewPartitionSpecID(7)
+		manifests := []iceberg.ManifestFile{
+			iceberg.NewManifestBuilder(2, "old-spec.avro", 1, 3, 1).Build(),
+			iceberg.NewManifestBuilder(2, "current-spec.avro", 1, int32(spec.ID()), 1).Build(),
+		}
+		got, err := dynamicOverwriteManifestCandidates(t.Context(), manifests, spec, simpleSchema(),
+			[]map[int]any{{}})
+		require.NoError(t, err)
+		require.Equal(t, []bool{true, true}, got)
+	})
+
+	t.Run("v1 manifest with unknown spec metadata stays included", func(t *testing.T) {
+		schema := simpleSchema()
+		spec := iceberg.NewPartitionSpecID(4, iceberg.PartitionField{
+			SourceIDs: []int{1}, FieldID: 1000, Name: "id", Transform: iceberg.IdentityTransform{},
+		})
+		manifests := []iceberg.ManifestFile{iceberg.NewManifestBuilder(1, "v1.avro", 1, 0, 1).Build()}
+		got, err := dynamicOverwriteManifestCandidates(t.Context(), manifests, spec, schema,
+			[]map[int]any{{1000: int32(2)}})
+		require.NoError(t, err)
+		require.Equal(t, []bool{true}, got)
+	})
+}
+
+func TestDynamicOverwriteManifestCandidatesIncompleteSummaries(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{ID: 2, Name: "region", Type: iceberg.PrimitiveTypes.String},
+	)
+	spec := iceberg.NewPartitionSpecID(4,
+		iceberg.PartitionField{SourceIDs: []int{1}, FieldID: 1000, Name: "id", Transform: iceberg.IdentityTransform{}},
+		iceberg.PartitionField{SourceIDs: []int{2}, FieldID: 1001, Name: "region", Transform: iceberg.IdentityTransform{}},
+	)
+	match, err := iceberg.Int32Literal(2).MarshalBinary()
+	require.NoError(t, err)
+	other, err := iceberg.Int32Literal(10).MarshalBinary()
+	require.NoError(t, err)
+
+	manifests := []iceberg.ManifestFile{
+		// The evaluator indexes one summary per field. Never evaluate a
+		// truncated list, which could otherwise panic.
+		iceberg.NewManifestBuilder(2, "short.avro", 1, int32(spec.ID()), 1).
+			Partitions([]iceberg.FieldSummary{{LowerBound: &match, UpperBound: &match}}).Build(),
+		// One missing bound is not evidence that values are all null.
+		iceberg.NewManifestBuilder(2, "one-bound.avro", 1, int32(spec.ID()), 1).
+			Partitions([]iceberg.FieldSummary{{LowerBound: &match}, {ContainsNull: true}}).Build(),
+		// Missing non-null bounds without null or NaN markers are unknown.
+		iceberg.NewManifestBuilder(2, "no-bounds.avro", 1, int32(spec.ID()), 1).
+			Partitions([]iceberg.FieldSummary{{}, {ContainsNull: true}}).Build(),
+		// A complete disjoint summary is still safe to prune.
+		iceberg.NewManifestBuilder(2, "disjoint.avro", 1, int32(spec.ID()), 1).
+			Partitions([]iceberg.FieldSummary{
+				{LowerBound: &other, UpperBound: &other},
+				{ContainsNull: true},
+			}).Build(),
+	}
+
+	got, err := dynamicOverwriteManifestCandidates(t.Context(), manifests, spec, schema,
+		[]map[int]any{{1000: int32(2), 1001: nil}})
+	require.NoError(t, err)
+	require.Equal(t, []bool{true, true, true, false}, got)
+}
+
+func TestDynamicOverwriteOldSpecDataWithoutLiveCounts(t *testing.T) {
+	oldSpec := iceberg.NewManifestBuilder(2, "old-zero-counts.avro", 1, 3, 1).Build()
+	require.False(t, oldSpec.HasAddedFiles())
+	require.False(t, oldSpec.HasExistingFiles())
+	require.True(t, mayHaveOldSpecData([]iceberg.ManifestFile{oldSpec}, 4))
+
+	currentSpec := iceberg.NewManifestBuilder(2, "current.avro", 1, 4, 1).Build()
+	require.False(t, mayHaveOldSpecData([]iceberg.ManifestFile{currentSpec}, 4))
+}
+
 func TestDynamicPartitionOverwriteDataFiles(t *testing.T) {
 	ctx := context.Background()
 	spec := partitionedSpec()
@@ -508,4 +687,116 @@ func TestDynamicPartitionOverwriteRemovesOnlyTouchedPartitionDeletes(t *testing.
 		liveDeletes = append(liveDeletes, entry.DataFile().FilePath())
 	}
 	require.Equal(t, []string{"file://delete-b.parquet"}, liveDeletes)
+}
+
+func TestDynamicPartitionOverwritePrunedUnpartitionedAfterSpecEvolution(t *testing.T) {
+	ctx := t.Context()
+	oldSpec := partitionedSpec()
+	seed, fs := createTestTransactionWithMemIO(t, oldSpec)
+	oldData := newTestDataFile(t, oldSpec, "file://old-spec.parquet", map[int]any{1000: int32(1)})
+	require.NoError(t, seed.AddDataFiles(ctx, []iceberg.DataFile{oldData}, nil))
+	base, err := seed.meta.Build()
+	require.NoError(t, err)
+
+	fsF := func(context.Context) (iceio.IO, error) { return fs, nil }
+	evolve := New(Identifier{"db", "tbl"}, base, "metadata.json", fsF, nil).NewTransaction()
+	emptySpec := iceberg.NewPartitionSpec()
+	require.NoError(t, evolve.meta.AddPartitionSpec(&emptySpec, false))
+	require.NoError(t, evolve.meta.SetDefaultSpecID(-1))
+	evolved, err := evolve.meta.Build()
+	require.NoError(t, err)
+	currentSpec := evolved.PartitionSpec()
+	require.True(t, currentSpec.IsUnpartitioned())
+
+	// Equality deletes written with an unpartitioned spec are global.
+	builder, err := iceberg.NewDataFileBuilder(currentSpec, iceberg.EntryContentEqDeletes,
+		"file://global-delete.parquet", iceberg.ParquetFile, nil, nil, nil, 1, 1)
+	require.NoError(t, err)
+	eqDelete := builder.EqualityFieldIDs([]int{1}).Build()
+	addDelete := New(Identifier{"db", "tbl"}, evolved, "metadata.json", fsF, nil).NewTransaction()
+	require.NoError(t, addDelete.NewRowDelta(nil).AddDeletes(eqDelete).Commit(ctx))
+	withDelete, err := addDelete.meta.Build()
+	require.NoError(t, err)
+
+	overwrite := New(Identifier{"db", "tbl"}, withDelete, "metadata.json", fsF, nil).NewTransaction()
+	replacement := newTestDataFile(t, currentSpec, "file://replacement.parquet", nil)
+	require.NoError(t, overwrite.dynamicPartitionOverwriteDataFiles(ctx, []iceberg.DataFile{replacement}, nil, false))
+	updated, err := overwrite.meta.Build()
+	require.NoError(t, err)
+
+	var dataPaths []string
+	for df, err := range updated.CurrentSnapshot().dataFiles(ctx, fs, nil) {
+		require.NoError(t, err)
+		dataPaths = append(dataPaths, df.FilePath())
+	}
+	require.Equal(t, []string{"file://replacement.parquet"}, dataPaths,
+		"unpartitioned overwrite must replace data under old specs too")
+
+	var deletePaths []string
+	for entry, err := range updated.CurrentSnapshot().entries(ctx, fs, iceberg.ManifestContentDeletes, true) {
+		require.NoError(t, err)
+		deletePaths = append(deletePaths, entry.DataFile().FilePath())
+	}
+	require.Empty(t, deletePaths, "no global delete may survive a full-table replacement")
+}
+
+func TestDynamicPartitionOverwritePrunedKeepsDeleteForSurvivingOldSpecData(t *testing.T) {
+	ctx := t.Context()
+	oldSpec := partitionedSpec()
+	seed, fs := createTestTransactionWithMemIO(t, oldSpec)
+	oldData := newTestDataFile(t, oldSpec, "file://old-spec.parquet", map[int]any{1000: int32(1)})
+	require.NoError(t, seed.AddDataFiles(ctx, []iceberg.DataFile{oldData}, nil))
+	base, err := seed.meta.Build()
+	require.NoError(t, err)
+
+	fsF := func(context.Context) (iceio.IO, error) { return fs, nil }
+	evolve := New(Identifier{"db", "tbl"}, base, "metadata.json", fsF, nil).NewTransaction()
+	newSpec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{1}, FieldID: 1001, Name: "id_bucket", Transform: iceberg.BucketTransform{NumBuckets: 16},
+	})
+	require.NoError(t, evolve.meta.AddPartitionSpec(&newSpec, false))
+	require.NoError(t, evolve.meta.SetDefaultSpecID(-1))
+	evolved, err := evolve.meta.Build()
+	require.NoError(t, err)
+	currentSpec := evolved.PartitionSpec()
+	var fieldID int
+	for _, field := range currentSpec.Fields() {
+		fieldID = field.FieldID
+
+		break
+	}
+	require.NotZero(t, fieldID)
+	nullPartition := map[int]any{fieldID: nil}
+
+	// A v2 position delete can target an old-spec data file even if its
+	// manifest stores it under a new partition tuple with a null value.
+	posDelete := newTestPosDeleteFileForSpec(t, currentSpec, "file://old-spec-delete.parquet",
+		nullPartition, oldData.FilePath())
+	addDelete := New(Identifier{"db", "tbl"}, evolved, "metadata.json", fsF, nil).NewTransaction()
+	require.NoError(t, addDelete.NewRowDelta(nil).AddDeletes(posDelete).Commit(ctx))
+	withDelete, err := addDelete.meta.Build()
+	require.NoError(t, err)
+
+	overwrite := New(Identifier{"db", "tbl"}, withDelete, "metadata.json", fsF, nil).NewTransaction()
+	replacement := newTestDataFile(t, currentSpec, "file://new-spec.parquet", nullPartition)
+	require.NoError(t, overwrite.dynamicPartitionOverwriteDataFiles(ctx, []iceberg.DataFile{replacement}, nil, false))
+	updated, err := overwrite.meta.Build()
+	require.NoError(t, err)
+
+	var dataPaths []string
+	for df, err := range updated.CurrentSnapshot().dataFiles(ctx, fs, nil) {
+		require.NoError(t, err)
+		if df.ContentType() == iceberg.EntryContentData {
+			dataPaths = append(dataPaths, df.FilePath())
+		}
+	}
+	require.ElementsMatch(t, []string{oldData.FilePath(), replacement.FilePath()}, dataPaths)
+
+	var deletePaths []string
+	for entry, err := range updated.CurrentSnapshot().entries(ctx, fs, iceberg.ManifestContentDeletes, true) {
+		require.NoError(t, err)
+		deletePaths = append(deletePaths, entry.DataFile().FilePath())
+	}
+	require.Equal(t, []string{posDelete.FilePath()}, deletePaths,
+		"deletes for surviving old-spec data must not be dropped")
 }
