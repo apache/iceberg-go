@@ -1060,10 +1060,11 @@ func (s *SparkIntegrationTestSuite) TestDynamicPartitionOverwrite() {
 		iceberg.NestedField{ID: 3, Name: "dt", Type: iceberg.PrimitiveTypes.Date},
 	)
 
-	// day(dt) makes (b, 2024-01-03) a separate partition from (b, 2024-01-01),
-	// so the overwrite has to replace by transformed value, not by source column.
+	// month(dt) puts (b, 2024-01-15) in the same partition as (b, 2024-01-01)
+	// and (b, 2024-02-01) in another, so the overwrite has to replace by
+	// transformed value, not by source column.
 	spec := iceberg.NewPartitionSpec(
-		iceberg.PartitionField{SourceIDs: []int{3}, FieldID: 1000, Name: "dt_day", Transform: iceberg.DayTransform{}},
+		iceberg.PartitionField{SourceIDs: []int{3}, FieldID: 1000, Name: "dt_month", Transform: iceberg.MonthTransform{}},
 		iceberg.PartitionField{SourceIDs: []int{2}, FieldID: 1001, Name: "cat", Transform: iceberg.IdentityTransform{}},
 	)
 	tbl, err := s.cat.CreateTable(s.ctx, catalog.ToIdentifier("default", "go_test_dynamic_partition_overwrite"), icebergSchema,
@@ -1079,10 +1080,10 @@ func (s *SparkIntegrationTestSuite) TestDynamicPartitionOverwrite() {
 		`[
 			{"id": 1, "cat": "a", "dt": "2024-01-01"},
 			{"id": 2, "cat": "b", "dt": "2024-01-01"},
-			{"id": 3, "cat": "b", "dt": "2024-01-01"},
+			{"id": 3, "cat": "b", "dt": "2024-01-15"},
 			{"id": 4, "cat": "c", "dt": "2024-01-02"},
 			{"id": 5, "cat": null, "dt": "2024-01-01"},
-			{"id": 6, "cat": "b", "dt": "2024-01-03"}
+			{"id": 6, "cat": "b", "dt": "2024-02-01"}
 		]`,
 	})
 	s.Require().NoError(err)
@@ -1092,6 +1093,13 @@ func (s *SparkIntegrationTestSuite) TestDynamicPartitionOverwrite() {
 	s.Require().NoError(tx.AppendTable(s.ctx, initialTable, 6, nil))
 	tbl, err = tx.Commit(s.ctx)
 	s.Require().NoError(err)
+
+	// A Spark-written file in (b, 2024-01) that the Go overwrite must also replace.
+	_, err = recipe.ExecuteSpark(s.T(), "./validation.py", "--sql",
+		"INSERT INTO default.go_test_dynamic_partition_overwrite "+
+			"SELECT 7 AS id, 'b' AS cat, DATE '2024-01-20' AS dt")
+	s.Require().NoError(err)
+	s.Require().NoError(tbl.Refresh(s.ctx))
 
 	overwriteTable, err := array.TableFromJSON(memory.DefaultAllocator, arrowSchema, []string{
 		`[
@@ -1116,7 +1124,7 @@ func (s *SparkIntegrationTestSuite) TestDynamicPartitionOverwrite() {
 +---+---+----------+
 |1  |a  |2024-01-01|
 |4  |c  |2024-01-02|
-|6  |b  |2024-01-03|
+|6  |b  |2024-02-01|
 |20 |b  |2024-01-01|
 |50 |-  |2024-01-01|
 +---+---+----------+`)
@@ -1133,7 +1141,7 @@ func (s *SparkIntegrationTestSuite) TestDynamicPartitionOverwrite() {
 +---------+----+`)
 
 	// Reverse direction: Spark's own dynamic INSERT OVERWRITE replaces only
-	// (c, 2024-01-02). Spark defaults to static mode, which would drop every row.
+	// (c, 2024-01). Spark defaults to static mode, which would drop every row.
 	_, err = recipe.ExecuteSpark(s.T(), "./validation.py",
 		"--conf", "spark.sql.sources.partitionOverwriteMode=dynamic",
 		"--sql", "INSERT OVERWRITE default.go_test_dynamic_partition_overwrite "+
@@ -1176,7 +1184,7 @@ func (s *SparkIntegrationTestSuite) TestDynamicPartitionOverwrite() {
 		"20|b|2024-01-01",
 		"40|c|2024-01-02",
 		"50|-|2024-01-01",
-		"6|b|2024-01-03",
+		"6|b|2024-02-01",
 	}, rows)
 }
 
