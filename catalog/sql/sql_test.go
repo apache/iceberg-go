@@ -178,12 +178,16 @@ func (s *SqliteCatalogTestSuite) SetupTest() {
 
 // catalogUri returns the file-backed SQLite DSN the whole suite shares, with a
 // busy timeout on every pooled connection; mattn and modernc both read
-// _busy_timeout. The timeout applies where SQLite consults the busy handler: a
-// lock requested before the transaction has read anything. A transaction that
-// reads first and then writes fails with SQLITE_BUSY at once, whatever the
-// timeout.
+// _busy_timeout. Catalog write transactions take the write lock before they
+// read, so a contended writer waits up to the timeout.
 func (s *SqliteCatalogTestSuite) catalogUri() string {
-	return "file://" + filepath.Join(s.warehouse, "sql-catalog.db") + "?_busy_timeout=5000"
+	return s.catalogURIWithBusyTimeout(5 * time.Second)
+}
+
+// catalogURIWithBusyTimeout returns the suite's DSN with another busy timeout.
+func (s *SqliteCatalogTestSuite) catalogURIWithBusyTimeout(timeout time.Duration) string {
+	return "file://" + filepath.Join(s.warehouse, "sql-catalog.db") +
+		"?_busy_timeout=" + strconv.FormatInt(timeout.Milliseconds(), 10)
 }
 
 func (s *SqliteCatalogTestSuite) confirmNoTables(db *sql.DB) {
@@ -3820,9 +3824,8 @@ func (s *SqliteCatalogTestSuite) TestCreateWaitsOnBusyTimeoutWhileWriteLockHeld(
 			s.Require().NoError(err)
 			s.Require().NoError(sqlDB.Close())
 
-			// Both drivers sqliteshim selects read _busy_timeout.
 			cat, err := catalog.Load(ctx, "default", iceberg.Properties{
-				"uri":             s.catalogUri() + "?_busy_timeout=5000",
+				"uri":             s.catalogURIWithBusyTimeout(5 * time.Second),
 				sqlcat.DriverKey:  sqliteshim.ShimName,
 				sqlcat.DialectKey: string(sqlcat.SQLite),
 				"type":            "sql",
@@ -3867,7 +3870,7 @@ func (s *SqliteCatalogTestSuite) TestCreateFailsAfterOneBusyTimeoutWhileWriteLoc
 	s.Require().NoError(sqlDB.Close())
 
 	cat, err := catalog.Load(ctx, "default", iceberg.Properties{
-		"uri":             s.catalogUri() + "?_busy_timeout=" + strconv.FormatInt(busyTimeout.Milliseconds(), 10),
+		"uri":             s.catalogURIWithBusyTimeout(busyTimeout),
 		sqlcat.DriverKey:  sqliteshim.ShimName,
 		sqlcat.DialectKey: string(sqlcat.SQLite),
 		"type":            "sql",
