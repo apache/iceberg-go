@@ -125,6 +125,11 @@ var (
 	errCommitForbidden    = fmt.Errorf("%w: %w", ErrForbidden, table.ErrCommitRejected)
 	errCommitNoSuchTable  = fmt.Errorf("%w: %w", catalog.ErrNoSuchTable, table.ErrCommitRejected)
 
+	// errNotSupported is a 406 or 501. It keeps ErrRESTError, which a 406
+	// matched before it also became iceberg.ErrNotImplemented. A 501 gains
+	// ErrRESTError here, like every other 5xx.
+	errNotSupported = fmt.Errorf("%w: %w", ErrRESTError, iceberg.ErrNotImplemented)
+
 	// errNotModified reports a 304 to a request sent with withIfNoneMatch.
 	errNotModified = errors.New("not modified")
 )
@@ -763,8 +768,10 @@ func handleNon200(rsp *http.Response, override map[int]error, typeOverride map[s
 		e.wrapping = ErrRESTError
 	case 419:
 		e.wrapping = ErrAuthorizationExpired
-	case http.StatusNotImplemented:
-		e.wrapping = iceberg.ErrNotImplemented
+	case http.StatusNotAcceptable, http.StatusNotImplemented:
+		// 406 is the spec's UnsupportedOperationResponse; 501 is what a server
+		// without the operation may answer instead. Both are "not supported".
+		e.wrapping = errNotSupported
 	case http.StatusServiceUnavailable:
 		e.wrapping = ErrServiceUnavailable
 	default:
