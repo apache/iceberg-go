@@ -641,14 +641,19 @@ func (rd *RowDelta) resolveRemovedDeletes(ctx context.Context, fs iceio.IO, meta
 	return resolved, nil
 }
 
-// removedEarlierInTransaction reports whether path is a live delete entry
-// on the snapshot the transaction started from but not on staged, the
-// snapshot this delta plans against: an operation staged earlier in the
-// transaction removed it. The start snapshot is resolved with
-// planningSnapshot, as staged is, so a branch the transaction creates
-// starts from the main branch head. resolveRemovedDeletes calls it only
-// for a removal it cannot resolve, so successful commits never pay for
-// the extra scan.
+// removedEarlierInTransaction reports whether path is a live delete
+// entry on the snapshot the transaction started from.
+// resolveRemovedDeletes calls it only for a removal with no live entry
+// at that path on staged, the snapshot this delta plans against, so
+// true means a change staged earlier in the transaction left the file
+// no longer live. A delete file that was not live on the start
+// snapshot, such as one added and then removed earlier in the same
+// transaction, reports false, and the removal keeps the "do not belong
+// to the table" error. The start snapshot is resolved with
+// planningSnapshot, as staged is, so for a branch that did not exist
+// when the transaction started it is the main branch head. Because it
+// runs only after a removal has failed, a RowDelta.Commit that
+// succeeds never pays for this scan.
 func (rd *RowDelta) removedEarlierInTransaction(ctx context.Context, fs iceio.IO, staged *Snapshot, path string) (bool, error) {
 	startMeta, err := MetadataBuilderFromBase(rd.txn.tbl.metadata, rd.txn.tbl.metadataLocation)
 	if err != nil {
