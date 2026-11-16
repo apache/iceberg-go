@@ -28,7 +28,6 @@ import (
 	"io"
 	"maps"
 	"math/rand/v2"
-	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -176,8 +175,14 @@ func (s *SqliteCatalogTestSuite) SetupTest() {
 	s.Require().NoError(err)
 }
 
+// catalogUri returns the file-backed SQLite DSN the whole suite shares, with a
+// busy timeout on every pooled connection; mattn and modernc both read
+// _busy_timeout. The timeout applies where SQLite consults the busy handler: a
+// lock requested before the transaction has read anything. A transaction that
+// reads first and then writes fails with SQLITE_BUSY at once, whatever the
+// timeout.
 func (s *SqliteCatalogTestSuite) catalogUri() string {
-	return "file://" + filepath.Join(s.warehouse, "sql-catalog.db")
+	return "file://" + filepath.Join(s.warehouse, "sql-catalog.db") + "?_busy_timeout=5000"
 }
 
 func (s *SqliteCatalogTestSuite) confirmNoTables(db *sql.DB) {
@@ -2862,10 +2867,11 @@ func (s *SqliteCatalogTestSuite) TestCreateNamespaceConcurrent() {
 	// gets ErrNamespaceAlreadyExists, not the driver's duplicate-key error.
 	const writers = 8
 
-	// A busy timeout so the writers queue on the sqlite lock instead of failing
-	// with SQLITE_BUSY, which is a different contention problem to this one.
+	// The shared catalogUri() DSN carries a busy timeout, so the writers queue
+	// on the sqlite lock instead of failing with SQLITE_BUSY, which is a
+	// different contention problem to this one.
 	loaded, err := catalog.Load(context.Background(), "default", iceberg.Properties{
-		"uri":             s.catalogUri() + "?_pragma=" + url.QueryEscape("busy_timeout(10000)"),
+		"uri":             s.catalogUri(),
 		sqlcat.DriverKey:  sqliteshim.ShimName,
 		sqlcat.DialectKey: string(sqlcat.SQLite),
 		"type":            "sql",
