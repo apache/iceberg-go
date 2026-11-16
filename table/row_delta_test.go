@@ -1797,7 +1797,8 @@ func TestRowDeltaFastAppendRejectsDuplicateAddedDVs(t *testing.T) {
 // Condition: Writer A adds a DV for data file D; a concurrent writer commits
 // the first DV for D before A's commit lands, forcing A to retry.
 // Assertion: A's commit fails on the retry (after one refresh, before a second
-// commit attempt) with the concurrent-DV conflict error.
+// commit attempt) with ErrConflictingDeleteFiles, and the transaction becomes
+// unusable.
 func TestRowDeltaRejectsConcurrentFirstDVOnRetry(t *testing.T) {
 	localFS := func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil }
 
@@ -1868,12 +1869,22 @@ func TestRowDeltaRejectsConcurrentFirstDVOnRetry(t *testing.T) {
 
 	_, err = txA.Commit(t.Context())
 	require.Error(t, err)
+	assert.ErrorIs(t, err, table.ErrConflictingDeleteFiles)
+	assert.ErrorIs(t, err, table.ErrCommitFailed)
+	assert.ErrorIs(t, err, table.ErrTransactionUnusable)
 	assert.Contains(t, err.Error(), "concurrent snapshot")
 	assert.Contains(t, err.Error(), dataPath)
 	assert.Equal(t, int32(1), catA.loadTableCalls.Load(),
 		"the commit must refresh once for the retry before rejecting")
 	assert.Equal(t, int32(1), catA.commitTableCalls.Load(),
 		"the validator must reject on the refreshed retry, before a second commit attempt")
+
+	// The conflict leaves the transaction unusable: committing it again fails
+	// before reaching the catalog.
+	_, err = txA.Commit(t.Context())
+	require.ErrorIs(t, err, table.ErrTransactionUnusable)
+	assert.Equal(t, int32(1), catA.loadTableCalls.Load())
+	assert.Equal(t, int32(1), catA.commitTableCalls.Load())
 }
 
 func writeRowDeltaDataFile(t *testing.T, tbl *table.Table, path string, ids ...int64) iceberg.DataFile {

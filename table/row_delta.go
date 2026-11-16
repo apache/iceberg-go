@@ -720,6 +720,12 @@ func (rd *RowDelta) validate(cc *conflictContext, referenced []string) error {
 // this delta also adds a DV for would strand two live DVs on one data file —
 // reject. A removal-carrying delta is non-replayable (see RemoveDeletes), so a
 // retry never has removals to reconcile against the concurrent DV here.
+// A conflict is reported as an error wrapping ErrConflictingDeleteFiles, and
+// so ErrCommitFailed, which makes Transaction.Commit fail with
+// ErrTransactionUnusable. To resolve it, build a new row delta from the
+// reloaded table that adds a DV holding both DVs' positions and removes the
+// concurrent DV with RemoveDeletes. Errors reading the concurrent snapshots'
+// manifests do not wrap ErrConflictingDeleteFiles.
 func (rd *RowDelta) validateNoConcurrentReplacedDVs(cc *conflictContext) error {
 	addedRefs := make(map[string]struct{}, len(rd.delFiles))
 	for _, f := range rd.delFiles {
@@ -727,23 +733,9 @@ func (rd *RowDelta) validateNoConcurrentReplacedDVs(cc *conflictContext) error {
 			addedRefs[ref] = struct{}{}
 		}
 	}
-	if len(addedRefs) == 0 {
-		return nil
-	}
 
-	return cc.forEachAddedEntry(iceberg.ManifestContentDeletes, func(snap Snapshot, entry iceberg.ManifestEntry) error {
-		df := entry.DataFile()
-		ref := explicitReferencedDataFile(df)
-		if !IsDeletionVector(df) || ref == "" {
-			return nil
-		}
-		if _, ok := addedRefs[ref]; ok {
-			return fmt.Errorf("cannot add a deletion vector for data file %s: concurrent snapshot %d committed a live deletion vector %s for it; reload the table and rewrite the DV to supersede the concurrent one, removing the superseded DV in the same row delta",
-				ref, snap.SnapshotID, df.FilePath())
-		}
-
-		return nil
-	})
+	return validateNoConcurrentDVs(cc, addedRefs,
+		"reload the table and rewrite the DV to supersede the concurrent one, removing the superseded DV in the same row delta")
 }
 
 // Operation returns the snapshot operation type that will be used when
