@@ -49,7 +49,7 @@ import (
 //     from the current branch head (validateDataFilesExist), unless
 //     this delta or an operation staged before it in the transaction adds them.
 //   - Data additions: on retries, reject paths added by concurrent snapshots
-//     so replay cannot create a second live reference to the same file.
+//     that are still live. A later concurrent deletion resolves the path.
 //   - Equality deletes under write.delete.isolation-level=serializable
 //     (the default): concurrent data files in the same partition(s) as
 //     the equality deletes are rejected. For partitioned tables an
@@ -152,14 +152,18 @@ func (rd *RowDelta) RemoveDeletes(files ...iceberg.DataFile) *RowDelta {
 // commit, if any file has an unexpected content type, if a removed
 // deletion vector lacks a replacement or is not referenced by the
 // current snapshot, if the delta would leave two live deletion vectors
-// on one data file (a replacement added while the superseded live DV
-// is not removed, or two added replacements for one data file), if an
-// added data file path appears more than once in this delta or is added
-// concurrently before a retry, if a position delete
-// references a data file that an operation staged earlier in the
-// transaction removed (ErrDataFilesMissing), or if the table format
-// version does not support delete files.
+// on one data file (a replacement added while the superseded live DV is not
+// removed, or two added replacements for one data file), if an added data
+// file path is repeated in this delta or remains live after a concurrent
+// snapshot adds it during retry, if a position delete references a data file
+// that an operation staged earlier in the transaction removed
+// (ErrDataFilesMissing), or if the table format version does not support
+// delete files.
 // Deletes require v2 or later, DVs require v3 or later.
+//
+// For duplicates within one RowDelta, this is stricter than Java's
+// BaseRowDelta: Java keeps the first file with a given spec ID and path,
+// while this implementation returns an error.
 //
 // With removals present the staged commit is non-replayable: an
 // optimistic-concurrency conflict fails the transaction's Commit with
@@ -748,32 +752,15 @@ func (rd *RowDelta) validateNoConcurrentDuplicateDataPaths(cc *conflictContext) 
 			break
 		}
 
-		manifests, err := cc.manifestsFor(snap)
-		if err != nil {
-			return fmt.Errorf("loading manifests for concurrent snapshot %d: %w", snap.SnapshotID, err)
-		}
-
 		// Resolve each candidate path against the newest snapshot that changed
 		// it. Prefer ADDED if a malformed snapshot contains both statuses for
 		// the same path, failing closed on an ambiguous live-file state.
 		changes := make(map[string]iceberg.ManifestEntryStatus)
-		for _, mf := range manifests {
-			if mf.ManifestContent() != iceberg.ManifestContentData || mf.SnapshotID() != snap.SnapshotID ||
-				(mf.AddedDataFiles() == 0 && mf.DeletedDataFiles() == 0) {
-				continue
-			}
-
-			for entry, err := range mf.Entries(cc.ctx, cc.manifestReadIO(), false) {
-				if err != nil {
-					return fmt.Errorf("reading entries from manifest %s: %w", mf.FilePath(), err)
-				}
-				if entry.SnapshotID() != snap.SnapshotID {
-					continue
-				}
-
+		if err := cc.forEachChangedEntryInSnapshot(snap, iceberg.ManifestContentData,
+			func(_ Snapshot, entry iceberg.ManifestEntry) error {
 				path := entry.DataFile().FilePath()
 				if _, ok := unresolved[path]; !ok {
-					continue
+					return nil
 				}
 
 				switch entry.Status() {
@@ -784,7 +771,10 @@ func (rd *RowDelta) validateNoConcurrentDuplicateDataPaths(cc *conflictContext) 
 						changes[path] = iceberg.EntryStatusDELETED
 					}
 				}
-			}
+
+				return nil
+			}); err != nil {
+			return err
 		}
 
 		for path, status := range changes {
