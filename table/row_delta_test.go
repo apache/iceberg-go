@@ -589,14 +589,15 @@ func TestRowDeltaRemoveDeletesMissingFromStagedSnapshot(t *testing.T) {
 			neverCommitted := writeDV(t, location, "dv-never.puffin", dataPath, []int64{1})
 
 			tests := []struct {
-				name    string
-				remove  iceberg.DataFile
-				want    string
-				notWant string
+				name      string
+				remove    iceberg.DataFile
+				want      string
+				notWant   string
+				invalidOp bool
 			}{
-				{"removed earlier in the transaction", dv2, removedEarlier, notInTable},
-				{"never committed", neverCommitted, notInTable, removedEarlier},
-				{"removed before the transaction", dv1, notInTable, removedEarlier},
+				{"removed earlier in the transaction", dv2, removedEarlier, notInTable, true},
+				{"never committed", neverCommitted, notInTable, removedEarlier, false},
+				{"removed before the transaction", dv1, notInTable, removedEarlier, false},
 			}
 			for _, tt := range tests {
 				t.Run(tt.name, func(t *testing.T) {
@@ -608,6 +609,11 @@ func TestRowDeltaRemoveDeletesMissingFromStagedSnapshot(t *testing.T) {
 					require.Error(t, err)
 					assert.Contains(t, err.Error(), tt.want)
 					assert.NotContains(t, err.Error(), tt.notWant)
+					if tt.invalidOp {
+						assert.ErrorIs(t, err, table.ErrInvalidOperation)
+					} else {
+						assert.NotErrorIs(t, err, table.ErrInvalidOperation)
+					}
 				})
 			}
 		})

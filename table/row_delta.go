@@ -537,14 +537,14 @@ func (rd *RowDelta) findReplacedLiveDVs(ctx context.Context, fs iceio.IO, meta *
 // A removed file that does not resolve to a live delete entry is an
 // error: the producer would otherwise silently skip the removal and
 // the commit would strand two live DVs on one data file. When the file
-// is live on the snapshot the transaction started from, the error
-// says an operation staged earlier in the transaction removed it. Two removals
-// resolving to live entries that reference the same data file are also
-// an error — the producer keys DV removals by referenced data file, so
-// letting both through would silently drop one, and two live DVs on
-// one data file is a spec violation to surface, not paper over. For
-// the same reason a removal whose referenced data file matches more
-// than one live entry at the path is rejected: the producer would
+// is live on the snapshot the transaction started from, the error says
+// an operation staged earlier in the transaction removed it. Two
+// removals resolving to live entries that reference the same data file
+// are also an error — the producer keys DV removals by referenced data
+// file, so letting both through would silently drop one, and two live
+// DVs on one data file is a spec violation to surface, not paper over.
+// For the same reason a removal whose referenced data file matches
+// more than one live entry at the path is rejected: the producer would
 // tombstone every matching entry while the snapshot summary counts
 // only one removal.
 func (rd *RowDelta) resolveRemovedDeletes(ctx context.Context, fs iceio.IO, meta *MetadataBuilder) (resolved []iceberg.DataFile, _ error) {
@@ -583,8 +583,8 @@ func (rd *RowDelta) resolveRemovedDeletes(ctx context.Context, fs iceio.IO, meta
 				return nil, err
 			}
 			if removed {
-				return nil, fmt.Errorf("cannot remove delete file %s: an operation staged earlier in this transaction already removed it",
-					f.FilePath())
+				return nil, fmt.Errorf("%w: cannot remove delete file %s: an operation staged earlier in this transaction already removed it",
+					ErrInvalidOperation, f.FilePath())
 			}
 
 			return nil, fmt.Errorf("cannot remove delete files that do not belong to the table: %s", f.FilePath())
