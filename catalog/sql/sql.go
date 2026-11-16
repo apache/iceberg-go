@@ -201,7 +201,7 @@ func init() {
 
 		// Here, name is the loader-supplied catalog name and is persisted as the
 		// catalog_name partition key on every row in the iceberg_tables and iceberg_namespace_properties.
-		cat, err := NewCatalog(name, sqldb, SupportedDialect(dialect), p)
+		cat, err := NewCatalog(ctx, name, sqldb, SupportedDialect(dialect), p)
 		if err != nil {
 			_ = sqldb.Close()
 
@@ -411,7 +411,7 @@ func (c *Catalog) isV0() bool { return c.schemaVersion == schemaV0 }
 //
 // If the "init_catalog_tables" property is set to "true", then creating the catalog will also attempt to
 // to verify whether the necessary tables (iceberg_tables and iceberg_namespace_properties) exist, creating
-// them if they do not already exist.
+// them if they do not already exist. The table creation and schema version queries run on ctx.
 //
 // The environment variable ICEBERG_SQL_DEBUG can be set to automatically log the sql queries to the terminal:
 // - ICEBERG_SQL_DEBUG=1 logs only failed queries
@@ -422,7 +422,7 @@ func (c *Catalog) isV0() bool { return c.schemaVersion == schemaV0 }
 //
 // SQLite callers that allow concurrent writers should configure WAL and a busy timeout in the driver DSN so the
 // settings apply to every pooled connection. NewCatalog does not mutate connection settings on the caller-owned db.
-func NewCatalog(name string, db *sql.DB, dialect SupportedDialect, props iceberg.Properties) (*Catalog, error) {
+func NewCatalog(ctx context.Context, name string, db *sql.DB, dialect SupportedDialect, props iceberg.Properties) (*Catalog, error) {
 	d, err := getDialect(dialect)
 	if err != nil {
 		return nil, err
@@ -435,8 +435,6 @@ func NewCatalog(name string, db *sql.DB, dialect SupportedDialect, props iceberg
 		// ICEBERG_SQL_DEBUG=1 logs only failed queries
 		// ICEBERG_SQL_DEBUG=2 log all queries
 		bundebug.FromEnv("ICEBERG_SQL_DEBUG")))
-
-	ctx := context.Background()
 
 	if cat.props.GetBool(initCatalogTablesKey, true) {
 		if err := cat.CreateSQLTables(ctx); err != nil {

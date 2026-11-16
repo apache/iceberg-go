@@ -94,7 +94,7 @@ func newNamespaceRaceCatalog(t *testing.T) *Catalog {
 	require.NoError(t, err)
 
 	warehouse := filepath.Join(t.TempDir(), "warehouse")
-	cat, err := NewCatalog("default", db, SQLite, iceberg.Properties{
+	cat, err := NewCatalog(context.Background(), "default", db, SQLite, iceberg.Properties{
 		"warehouse": "file://" + filepath.ToSlash(warehouse),
 	})
 	require.NoError(t, err)

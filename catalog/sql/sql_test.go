@@ -117,8 +117,34 @@ func TestNewCatalogInvalidDialect(t *testing.T) {
 	assert.NoError(t, err)
 	defer sqldb.Close()
 
-	_, err = sqlcat.NewCatalog("default", sqldb, "foobar", nil)
+	_, err = sqlcat.NewCatalog(context.Background(), "default", sqldb, "foobar", nil)
 	assert.ErrorContains(t, err, "unsupported sql dialect")
+}
+
+func TestNewCatalogCancelledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	for _, initTables := range []string{"true", "false"} {
+		t.Run("init_catalog_tables="+initTables, func(t *testing.T) {
+			sqldb, err := sql.Open(sqliteshim.ShimName, ":memory:")
+			require.NoError(t, err)
+			defer sqldb.Close()
+
+			_, err = sqlcat.NewCatalog(ctx, "default", sqldb, sqlcat.SQLite, iceberg.Properties{
+				"init_catalog_tables": initTables,
+			})
+			assert.ErrorIs(t, err, context.Canceled)
+		})
+	}
+
+	_, err := catalog.Load(ctx, "sql", iceberg.Properties{
+		sqlcat.DriverKey:  sqliteshim.ShimName,
+		sqlcat.DialectKey: string(sqlcat.SQLite),
+		"uri":             ":memory:",
+		"type":            "sql",
+	})
+	assert.ErrorIs(t, err, context.Canceled)
 }
 
 func randomString(n int) string {
@@ -3096,7 +3122,7 @@ func (s *SqliteCatalogTestSuite) newAbortCatalog(mode insertFailure) (*sqlcat.Ca
 
 	// Postgres dialect so the savepoint-backed recovery path runs; the driver
 	// above emulates Postgres aborting the tx over an sqlite base.
-	cat, err := sqlcat.NewCatalog("default", sqldb, sqlcat.Postgres, iceberg.Properties{"warehouse": "file://" + s.warehouse})
+	cat, err := sqlcat.NewCatalog(context.Background(), "default", sqldb, sqlcat.Postgres, iceberg.Properties{"warehouse": "file://" + s.warehouse})
 	s.Require().NoError(err)
 
 	return cat, drv
@@ -3185,7 +3211,7 @@ func (s *SqliteCatalogTestSuite) newDupCatalog() (*sqlcat.Catalog, *dupInsertDri
 
 	// SQLite dialect so the non-Postgres recovery branch (plain insert + re-check)
 	// runs; the driver rolls back only the failing statement, so no savepoint.
-	cat, err := sqlcat.NewCatalog("default", sqldb, sqlcat.SQLite, iceberg.Properties{"warehouse": "file://" + s.warehouse})
+	cat, err := sqlcat.NewCatalog(context.Background(), "default", sqldb, sqlcat.SQLite, iceberg.Properties{"warehouse": "file://" + s.warehouse})
 	s.Require().NoError(err)
 
 	return cat, drv
