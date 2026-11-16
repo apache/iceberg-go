@@ -15,13 +15,12 @@
 // specific language governing permissions and limitations
 // under the License.
 
-package table
+package internal
 
 import (
 	"testing"
 
 	"github.com/apache/iceberg-go"
-	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
 
@@ -36,20 +35,7 @@ func TestUnifiedPartitionTypeUsesAllActiveSpecs(t *testing.T) {
 	newSpec := iceberg.NewPartitionSpecID(1, iceberg.PartitionField{
 		SourceIDs: []int{2}, FieldID: 1001, Name: "category", Transform: iceberg.IdentityTransform{},
 	})
-	lastPartitionID := 1001
-	meta := &metadataV2{commonMetadata: commonMetadata{
-		FormatVersion:   2,
-		UUID:            uuid.New(),
-		LastColumnId:    2,
-		SchemaList:      []*iceberg.Schema{schema},
-		CurrentSchemaID: 0,
-		Specs:           []iceberg.PartitionSpec{oldSpec, newSpec},
-		DefaultSpecID:   1,
-		LastPartitionID: &lastPartitionID,
-		SnapshotRefs:    map[string]SnapshotRef{},
-	}}
-
-	partitionType, err := unifiedPartitionType(meta)
+	partitionType, err := UnifiedPartitionType([]iceberg.PartitionSpec{oldSpec, newSpec}, schema)
 	require.NoError(t, err)
 	require.Equal(t, []int{1000, 1001}, []int{
 		partitionType.Field(0).ID,
@@ -66,20 +52,6 @@ func TestUnifiedPartitionTypeRejectsIncompatibleFieldReuse(t *testing.T) {
 		iceberg.NestedField{ID: 1, Name: "first", Type: iceberg.PrimitiveTypes.Int32, Required: true},
 		iceberg.NestedField{ID: 2, Name: "second", Type: iceberg.PrimitiveTypes.Int32, Required: true},
 	)
-	metadataFor := func(specs []iceberg.PartitionSpec) Metadata {
-		lastPartitionID := 1000
-
-		return &metadataV2{commonMetadata: commonMetadata{
-			FormatVersion:   2,
-			UUID:            uuid.New(),
-			LastColumnId:    2,
-			SchemaList:      []*iceberg.Schema{schema},
-			CurrentSchemaID: 0,
-			Specs:           specs,
-			DefaultSpecID:   specs[len(specs)-1].ID(),
-			LastPartitionID: &lastPartitionID,
-		}}
-	}
 	field := func(specID, sourceID int, transform iceberg.Transform) iceberg.PartitionSpec {
 		return iceberg.NewPartitionSpecID(specID, iceberg.PartitionField{
 			SourceIDs: []int{sourceID}, FieldID: 1000, Name: "part", Transform: transform,
@@ -121,7 +93,7 @@ func TestUnifiedPartitionTypeRejectsIncompatibleFieldReuse(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := unifiedPartitionType(metadataFor(tt.specs))
+			_, err := UnifiedPartitionType(tt.specs, schema)
 			if tt.valid {
 				require.NoError(t, err)
 
@@ -133,6 +105,6 @@ func TestUnifiedPartitionTypeRejectsIncompatibleFieldReuse(t *testing.T) {
 
 	unknown, err := iceberg.ParseTransform("future_transform")
 	require.NoError(t, err)
-	_, err = unifiedPartitionType(metadataFor([]iceberg.PartitionSpec{field(0, 1, unknown)}))
+	_, err = UnifiedPartitionType([]iceberg.PartitionSpec{field(0, 1, unknown)}, schema)
 	require.ErrorIs(t, err, iceberg.ErrInvalidPartitionSpec)
 }

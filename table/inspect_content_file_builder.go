@@ -25,6 +25,8 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/iceberg-go"
+	iceinternal "github.com/apache/iceberg-go/internal"
+	tblutils "github.com/apache/iceberg-go/table/internal"
 )
 
 func appendContentFileRecord(bldr *array.RecordBuilder, partitionType *iceberg.StructType, file iceberg.DataFile) error {
@@ -59,7 +61,7 @@ type inspectContentFileBuilder struct {
 	filePath           *array.StringBuilder
 	fileFormat         *array.StringBuilder
 	specID             *array.Int32Builder
-	partition          *partitionStructBuilder
+	partition          *tblutils.PartitionStructBuilder
 	recordCount        *array.Int64Builder
 	fileSize           *array.Int64Builder
 	columnSizes        *array.MapBuilder
@@ -105,11 +107,11 @@ func newInspectContentFileBuilderFromFields(
 	builder func(int) array.Builder,
 	partitionType *iceberg.StructType,
 ) (inspectContentFileBuilder, error) {
-	lookup, err := newBuilderLookup("content-file", fields, builder)
+	lookup, err := tblutils.NewBuilderLookup("content-file", fields, builder)
 	if err != nil {
 		return inspectContentFileBuilder{}, err
 	}
-	if err := validateBuilderLookup("content-file", lookup, inspectContentFileFieldIDs(partitionType)); err != nil {
+	if err := tblutils.ValidateBuilderLookup("content-file", lookup, inspectContentFileFieldIDs(partitionType)); err != nil {
 		return inspectContentFileBuilder{}, err
 	}
 
@@ -131,7 +133,7 @@ func newInspectContentFileBuilderFromFields(
 		if bindErr != nil {
 			return out, bindErr
 		}
-		if out.partition, err = newPartitionStructBuilder(partitionBuilder, partitionType); err != nil {
+		if out.partition, err = tblutils.NewPartitionStructBuilder(partitionBuilder, partitionType); err != nil {
 			return out, err
 		}
 	}
@@ -194,18 +196,18 @@ func (b *inspectContentFileBuilder) append(file iceberg.DataFile) error {
 	b.specID.Append(file.SpecID())
 
 	if b.partition != nil {
-		if err := b.partition.append(dataFilePartition(file)); err != nil {
+		if err := b.partition.Append(iceinternal.BorrowedDataFilePartition(file)); err != nil {
 			return err
 		}
 	}
 
 	b.recordCount.Append(file.Count())
 	b.fileSize.Append(file.FileSizeBytes())
-	columnSizes, keyMetadata, splitOffsets, equalityFieldIDs := dataFileCollections(file)
+	columnSizes, keyMetadata, splitOffsets, equalityFieldIDs := iceinternal.BorrowedDataFileCollections(file)
 	if err := appendInspectInt64Map(b.columnSizes, columnSizes, &b.columnSizeFieldIDs); err != nil {
 		return err
 	}
-	valueCounts, nullCounts, nanCounts, lowerBounds, upperBounds := dataFileStats(file)
+	valueCounts, nullCounts, nanCounts, lowerBounds, upperBounds := iceinternal.BorrowedDataFileStats(file)
 	if err := appendInspectInt64Map(b.valueCounts, valueCounts, &b.valueCountFieldIDs); err != nil {
 		return err
 	}
