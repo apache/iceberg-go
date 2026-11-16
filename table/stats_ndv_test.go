@@ -23,10 +23,12 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/datasketches-go/theta"
 	"github.com/apache/iceberg-go"
@@ -34,14 +36,14 @@ import (
 	"github.com/apache/iceberg-go/catalog/sql"
 	"github.com/apache/iceberg-go/table"
 	"github.com/apache/iceberg-go/table/stats"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/uptrace/bun/driver/sqliteshim"
 )
 
-// createNDVTable creates a fresh sqlite-backed table named name with the given
-// schema and appends one record batch built from the JSON rows.
-func createNDVTable(t *testing.T, name string, sc *iceberg.Schema, jsonRows []string) (*table.Table, context.Context) {
+// newNDVTable creates an empty sqlite-backed table named name.
+func newNDVTable(t *testing.T, name string, sc *iceberg.Schema, props iceberg.Properties) (*table.Table, context.Context) {
 	t.Helper()
 	ctx := context.Background()
 	cat, err := catalog.Load(ctx, "default", iceberg.Properties{
@@ -56,10 +58,17 @@ func createNDVTable(t *testing.T, name string, sc *iceberg.Schema, jsonRows []st
 	ident := table.Identifier{"default", name}
 	require.NoError(t, cat.CreateNamespace(ctx, catalog.NamespaceFromIdent(ident), nil))
 
-	tbl, err := cat.CreateTable(ctx, ident, sc)
+	tbl, err := cat.CreateTable(ctx, ident, sc, catalog.WithProperties(props))
 	require.NoError(t, err)
 
-	arrowSchema, err := table.SchemaToArrowSchema(sc, nil, true, false)
+	return tbl, ctx
+}
+
+// appendNDVRows appends one data file built from the JSON rows, using the
+// table's current schema.
+func appendNDVRows(t *testing.T, ctx context.Context, tbl *table.Table, jsonRows []string) *table.Table {
+	t.Helper()
+	arrowSchema, err := table.SchemaToArrowSchema(tbl.Schema(), nil, true, false)
 	require.NoError(t, err)
 	arrTable, err := array.TableFromJSON(memory.DefaultAllocator, arrowSchema,
 		[]string{"[" + strings.Join(jsonRows, ",") + "]"})
@@ -69,41 +78,70 @@ func createNDVTable(t *testing.T, name string, sc *iceberg.Schema, jsonRows []st
 	tbl, err = tbl.AppendTable(ctx, arrTable, arrTable.NumRows(), nil)
 	require.NoError(t, err)
 
-	return tbl, ctx
+	return tbl
 }
 
-// ndvTestTable creates a fresh sqlite-backed table named tbl and appends rows:
-// 100 distinct ids (1..100) and a category cycling through 3 distinct values.
-func ndvTestTable(t *testing.T, name string) (*table.Table, context.Context) {
+// createNDVTable creates a fresh sqlite-backed table named name with the given
+// schema and appends one data file built from the JSON rows.
+func createNDVTable(t *testing.T, name string, sc *iceberg.Schema, jsonRows []string) (*table.Table, context.Context) {
 	t.Helper()
-	sc := iceberg.NewSchema(0,
-		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
-		iceberg.NestedField{ID: 2, Name: "category", Type: iceberg.PrimitiveTypes.String, Required: true},
-	)
+	tbl, ctx := newNDVTable(t, name, sc, nil)
 
+	return appendNDVRows(t, ctx, tbl, jsonRows), ctx
+}
+
+// ndvRows builds rows ids lo..hi with a category cycling through 3 values.
+func ndvRows(lo, hi int) []string {
 	categories := []string{"north", "south", "east"}
-	rows := make([]string, 0, 100)
-	for i := 1; i <= 100; i++ {
+	rows := make([]string, 0, hi-lo+1)
+	for i := lo; i <= hi; i++ {
 		rows = append(rows, fmt.Sprintf(`{"id": %d, "category": %q}`, i, categories[i%len(categories)]))
 	}
 
-	return createNDVTable(t, name, sc, rows)
+	return rows
+}
+
+var ndvTestSchema = iceberg.NewSchema(0,
+	iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+	iceberg.NestedField{ID: 2, Name: "category", Type: iceberg.PrimitiveTypes.String, Required: true},
+)
+
+// ndvTestTable creates a fresh sqlite-backed table named name and appends
+// 100 distinct ids (1..100) and a category cycling through 3 distinct values.
+func ndvTestTable(t *testing.T, name string) (*table.Table, context.Context) {
+	t.Helper()
+
+	return createNDVTable(t, name, ndvTestSchema, ndvRows(1, 100))
+}
+
+// ndvValues returns the NDV of each column, keyed by field ID.
+func ndvValues(stats table.NDVStats) map[int]int64 {
+	out := make(map[int]int64, len(stats.Columns))
+	for id, r := range stats.Columns {
+		out[id] = r.NDV
+	}
+
+	return out
 }
 
 func TestComputeNDVsAllColumns(t *testing.T) {
 	tbl, ctx := ndvTestTable(t, "ndv_all")
 
-	results, err := tbl.ComputeNDVs(ctx, 0)
+	got, err := tbl.ComputeNDVs(ctx, 0)
 	require.NoError(t, err)
-	require.Len(t, results, 2)
+
+	// The result names the snapshot it analyzed, so a statistics writer does
+	// not have to resolve it again.
+	require.NotNil(t, got.Snapshot)
+	assert.Equal(t, tbl.CurrentSnapshot().SnapshotID, got.Snapshot.SnapshotID)
+	assert.Equal(t, tbl.CurrentSnapshot().SequenceNumber, got.Snapshot.SequenceNumber)
 
 	// Both cardinalities are well below the nominal entry count, so the sketch
 	// estimates are exact.
-	assert.Equal(t, int64(100), results[1].NDV)
-	assert.Equal(t, int64(3), results[2].NDV)
+	assert.Equal(t, map[int]int64{1: 100, 2: 3}, ndvValues(got))
 
 	// The serialized sketches carry the same estimate when read back.
-	for _, r := range results {
+	for _, r := range got.Columns {
 		ndv, err := stats.NDVFromBytes(r.Sketch)
 		require.NoError(t, err)
 		assert.Equal(t, r.NDV, ndv)
@@ -113,62 +151,386 @@ func TestComputeNDVsAllColumns(t *testing.T) {
 func TestComputeNDVsSelectedColumn(t *testing.T) {
 	tbl, ctx := ndvTestTable(t, "ndv_selected")
 
-	results, err := tbl.ComputeNDVs(ctx, 0, "category")
+	// Only the named column is sketched; the unselected "id" is absent.
+	got, err := tbl.ComputeNDVs(ctx, 0, "category")
 	require.NoError(t, err)
-	require.Len(t, results, 1)
-	assert.Equal(t, int64(3), results[2].NDV)
-}
+	assert.Equal(t, map[int]int64{2: 3}, ndvValues(got))
 
-func TestComputeNDVsExcludesUnselectedColumns(t *testing.T) {
-	tbl, ctx := ndvTestTable(t, "ndv_unselected")
-
-	// Selecting only "category" yields exactly one sketch; the unselected "id"
-	// column is absent from the results.
-	results, err := tbl.ComputeNDVs(ctx, 0, "category")
+	// Naming a column twice sketches it once.
+	got, err = tbl.ComputeNDVs(ctx, 0, "category", "category")
 	require.NoError(t, err)
-	_, hasID := results[1]
-	assert.False(t, hasID)
-	_, hasCategory := results[2]
-	assert.True(t, hasCategory)
+	assert.Equal(t, map[int]int64{2: 3}, ndvValues(got))
 }
 
 func TestComputeNDVsUnknownColumnErrors(t *testing.T) {
 	tbl, ctx := ndvTestTable(t, "ndv_unknown")
 
-	// A column that does not exist in the schema fails projection rather than
-	// being silently skipped.
-	_, err := tbl.ComputeNDVs(ctx, 0, "does_not_exist")
-	require.Error(t, err)
+	// Names are checked against the snapshot schema before the scan is built,
+	// so an unknown name, including "*" (which a scan would treat as every
+	// column), is an invalid argument rather than a projection error.
+	for _, name := range []string{"does_not_exist", "*", "ID"} {
+		_, err := tbl.ComputeNDVs(ctx, 0, name)
+		require.ErrorIs(t, err, iceberg.ErrInvalidArgument, name)
+		assert.ErrorContains(t, err, "can't find column", name)
+	}
 }
 
-func TestComputeNDVsPrimitiveTypes(t *testing.T) {
-	sc := iceberg.NewSchema(0,
-		iceberg.NestedField{ID: 1, Name: "f_int", Type: iceberg.PrimitiveTypes.Int32, Required: true},
-		iceberg.NestedField{ID: 2, Name: "f_long", Type: iceberg.PrimitiveTypes.Int64, Required: true},
-		iceberg.NestedField{ID: 3, Name: "f_float", Type: iceberg.PrimitiveTypes.Float32, Required: true},
-		iceberg.NestedField{ID: 4, Name: "f_double", Type: iceberg.PrimitiveTypes.Float64, Required: true},
-		iceberg.NestedField{ID: 5, Name: "f_bool", Type: iceberg.PrimitiveTypes.Bool, Required: true},
-		iceberg.NestedField{ID: 6, Name: "f_str", Type: iceberg.PrimitiveTypes.String, Required: true},
-	)
+func TestComputeNDVsNoSnapshot(t *testing.T) {
+	tbl, ctx := newNDVTable(t, "ndv_empty", ndvTestSchema, nil)
+	require.Nil(t, tbl.CurrentSnapshot())
 
-	rows := make([]string, 0, 12)
-	for i := range 12 {
-		rows = append(rows, fmt.Sprintf(
-			`{"f_int": %d, "f_long": %d, "f_float": %g, "f_double": %g, "f_bool": %t, "f_str": "s%d"}`,
-			i%4, i, float64(i%3)+0.5, float64(i%5)+0.25, i%2 == 0, i%6))
-	}
+	// Like Java's EMPTY_RESULT: no snapshot means no sketches, not an empty
+	// sketch per column.
+	got, err := tbl.ComputeNDVs(ctx, 0)
+	require.NoError(t, err)
+	assert.Nil(t, got.Snapshot)
+	assert.Empty(t, got.Columns)
 
-	tbl, ctx := createNDVTable(t, "ndv_types", sc, rows)
+	_, err = tbl.ComputeNDVs(ctx, 12345)
+	require.ErrorIs(t, err, table.ErrInvalidOperation)
+}
 
-	results, err := tbl.ComputeNDVs(ctx, 0)
+func TestComputeNDVsSkipsGeospatialColumns(t *testing.T) {
+	geom, err := iceberg.GeometryTypeOf(iceberg.DefaultGeoCRS)
+	require.NoError(t, err)
+	geog, err := iceberg.GeographyTypeOf(iceberg.DefaultGeoCRS, "spherical")
 	require.NoError(t, err)
 
-	// Every primitive type reaches its sketch through Iceberg single-value
-	// serialization, and each column's cardinality is small enough to be exact.
-	wantNDV := map[int]int64{1: 4, 2: 12, 3: 3, 4: 5, 5: 2, 6: 6}
-	require.Len(t, results, len(wantNDV))
-	for fieldID, want := range wantNDV {
-		assert.Equal(t, want, results[fieldID].NDV, "field %d", fieldID)
+	sc := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{ID: 2, Name: "geom", Type: geom},
+		iceberg.NestedField{ID: 3, Name: "geog", Type: geog},
+	)
+	tbl, ctx := newNDVTable(t, "ndv_geo", sc, iceberg.Properties{table.PropertyFormatVersion: "3"})
+	tbl = appendNDVRows(t, ctx, tbl, []string{
+		`{"id": 1, "geom": "01010000000000000000003e400000000000002440", "geog": null}`,
+		`{"id": 2, "geom": "0101000000000000000000f03f0000000000000040", "geog": null}`,
+	})
+
+	// Iceberg defines no single-value serialization for geospatial values, so
+	// the default set leaves them out instead of failing the whole call.
+	got, err := tbl.ComputeNDVs(ctx, 0)
+	require.NoError(t, err)
+	assert.Equal(t, map[int]int64{1: 2}, ndvValues(got))
+
+	for _, name := range []string{"geom", "geog"} {
+		_, err = tbl.ComputeNDVs(ctx, 0, name)
+		require.ErrorIs(t, err, iceberg.ErrInvalidArgument, name)
+		assert.ErrorContains(t, err, "geospatial", name)
+	}
+}
+
+// TestComputeNDVsTypes checks each primitive type end to end: values written
+// through Arrow and read back by the scan must hash to the same sketch as their
+// Iceberg single-value serialization, which table/stats pins against the Java
+// fixtures. Each value appears twice plus a null, so NDV is the number of
+// distinct non-empty values.
+func TestComputeNDVsTypes(t *testing.T) {
+	fixed4, err := iceberg.FixedTypeOf(4)
+	require.NoError(t, err)
+	dec, err := iceberg.DecimalTypeOf(9, 2)
+	require.NoError(t, err)
+	u1 := uuid.MustParse("f79c3e09-677c-4bbd-a479-3f349cb785e7")
+	u2 := uuid.MustParse("00000000-0000-0000-0000-000000000001")
+
+	const ts1, ts2 = int64(1_600_000_000_000_000), int64(1_700_000_000_123_456)
+
+	tests := []struct {
+		name string
+		typ  iceberg.Type
+		json []string // distinct values, JSON-encoded for Arrow
+		lits []iceberg.Literal
+	}{
+		{
+			"boolean", iceberg.PrimitiveTypes.Bool,
+			[]string{"true", "false"},
+			[]iceberg.Literal{iceberg.NewLiteral(true), iceberg.NewLiteral(false)},
+		},
+		{
+			"int", iceberg.PrimitiveTypes.Int32,
+			[]string{"-7", "0", "2147483647"},
+			[]iceberg.Literal{iceberg.NewLiteral(int32(-7)), iceberg.NewLiteral(int32(0)), iceberg.NewLiteral(int32(2147483647))},
+		},
+		{
+			"long", iceberg.PrimitiveTypes.Int64,
+			[]string{"-5000000000", "1"},
+			[]iceberg.Literal{iceberg.NewLiteral(int64(-5_000_000_000)), iceberg.NewLiteral(int64(1))},
+		},
+		{
+			"float", iceberg.PrimitiveTypes.Float32,
+			[]string{"0.5", "-1.25", "3"},
+			[]iceberg.Literal{iceberg.NewLiteral(float32(0.5)), iceberg.NewLiteral(float32(-1.25)), iceberg.NewLiteral(float32(3))},
+		},
+		{
+			"double", iceberg.PrimitiveTypes.Float64,
+			[]string{"0.1", "1e300"},
+			[]iceberg.Literal{iceberg.NewLiteral(0.1), iceberg.NewLiteral(1e300)},
+		},
+		{
+			"string", iceberg.PrimitiveTypes.String,
+			[]string{`""`, `"é"`, `"value"`},
+			[]iceberg.Literal{iceberg.NewLiteral(""), iceberg.NewLiteral("é"), iceberg.NewLiteral("value")},
+		},
+		{
+			"date", iceberg.PrimitiveTypes.Date,
+			[]string{"18000", "-1"},
+			[]iceberg.Literal{iceberg.NewLiteral(iceberg.Date(18000)), iceberg.NewLiteral(iceberg.Date(-1))},
+		},
+		{
+			"time", iceberg.PrimitiveTypes.Time,
+			[]string{"0", "86399999999"},
+			[]iceberg.Literal{iceberg.NewLiteral(iceberg.Time(0)), iceberg.NewLiteral(iceberg.Time(86_399_999_999))},
+		},
+		{
+			"timestamp", iceberg.PrimitiveTypes.Timestamp,
+			[]string{strconv.FormatInt(ts1, 10), strconv.FormatInt(ts2, 10)},
+			[]iceberg.Literal{iceberg.NewLiteral(iceberg.Timestamp(ts1)), iceberg.NewLiteral(iceberg.Timestamp(ts2))},
+		},
+		{
+			"timestamptz", iceberg.PrimitiveTypes.TimestampTz,
+			[]string{strconv.FormatInt(ts1, 10), strconv.FormatInt(ts2, 10)},
+			[]iceberg.Literal{iceberg.NewLiteral(iceberg.Timestamp(ts1)), iceberg.NewLiteral(iceberg.Timestamp(ts2))},
+		},
+		{
+			"decimal", dec,
+			[]string{`"1.23"`, `"-0.01"`, `"9999999.99"`},
+			[]iceberg.Literal{
+				iceberg.NewLiteral(iceberg.Decimal{Val: decimal128.FromI64(123), Scale: 2}),
+				iceberg.NewLiteral(iceberg.Decimal{Val: decimal128.FromI64(-1), Scale: 2}),
+				iceberg.NewLiteral(iceberg.Decimal{Val: decimal128.FromI64(999_999_999), Scale: 2}),
+			},
+		},
+		{
+			"uuid", iceberg.PrimitiveTypes.UUID,
+			[]string{strconv.Quote(u1.String()), strconv.Quote(u2.String())},
+			[]iceberg.Literal{iceberg.NewLiteral(u1), iceberg.NewLiteral(u2)},
+		},
+		{
+			"binary", iceberg.PrimitiveTypes.Binary,
+			[]string{`""`, `"AAEC"`},
+			[]iceberg.Literal{iceberg.NewLiteral([]byte{}), iceberg.NewLiteral([]byte{0, 1, 2})},
+		},
+		{
+			"fixed", fixed4,
+			[]string{`"AAAAAA=="`, `"3q2+7w=="`},
+			[]iceberg.Literal{
+				iceberg.NewLiteral([]byte{0, 0, 0, 0}),
+				iceberg.NewLiteral([]byte{0xde, 0xad, 0xbe, 0xef}),
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Len(t, tc.lits, len(tc.json))
+			sc := iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "v", Type: tc.typ})
+
+			rows := []string{`{"v": null}`}
+			want := stats.NewSketch()
+			for i, v := range tc.json {
+				rows = append(rows, `{"v": `+v+`}`, `{"v": `+v+`}`)
+				lit, err := tc.lits[i].To(tc.typ)
+				require.NoError(t, err)
+				b, err := lit.MarshalBinary()
+				require.NoError(t, err)
+				want.Add(b)
+			}
+
+			tbl, ctx := createNDVTable(t, "ndv_type_"+tc.name, sc, rows)
+			got, err := tbl.ComputeNDVs(ctx, 0)
+			require.NoError(t, err)
+			require.Contains(t, got.Columns, 1)
+
+			// DataSketches ignores empty byte arrays, as Java does (the Java
+			// "string" fixture also leaves "" out of its count), so an empty
+			// string or binary value is not counted.
+			wantNDV := int64(len(tc.json))
+			if tc.name == "string" || tc.name == "binary" {
+				wantNDV--
+			}
+			assert.Equal(t, wantNDV, got.Columns[1].NDV)
+			assertSameNDVSketch(t, want.Serialize(), got.Columns[1].Sketch)
+		})
+	}
+}
+
+// assertSameNDVSketch compares decoded sketch state; see table/stats for why
+// raw bytes are not compared.
+func assertSameNDVSketch(t *testing.T, want, got []byte) {
+	t.Helper()
+	w, err := theta.Decode(want, theta.DefaultSeed)
+	require.NoError(t, err)
+	g, err := theta.Decode(got, theta.DefaultSeed)
+	require.NoError(t, err)
+	assert.Equal(t, w.IsEmpty(), g.IsEmpty(), "empty")
+	assert.Equal(t, w.Theta64(), g.Theta64(), "theta")
+	assert.Equal(t, slices.Collect(w.All()), slices.Collect(g.All()), "retained hashes")
+}
+
+// TestComputeNDVsSnapshotContents checks that sketches cover exactly the live
+// rows of the analyzed snapshot: rows spread over several data files, rows
+// removed by position deletes, deletion vectors or equality deletes, and an
+// older snapshot read with its own schema.
+func TestComputeNDVsSnapshotContents(t *testing.T) {
+	mor := func(version string) iceberg.Properties {
+		return iceberg.Properties{
+			table.PropertyFormatVersion: version,
+			table.WriteDeleteModeKey:    table.WriteModeMergeOnRead,
+		}
+	}
+	deleteIDsAbove := func(t *testing.T, ctx context.Context, tbl *table.Table, id int64) *table.Table {
+		t.Helper()
+		tbl, err := tbl.Delete(ctx, iceberg.GreaterThan(iceberg.Reference("id"), id), nil)
+		require.NoError(t, err)
+
+		return tbl
+	}
+
+	tests := []struct {
+		name  string
+		props iceberg.Properties
+		// build populates the table and returns it with the snapshot to analyze
+		// (0 for current).
+		build func(t *testing.T, ctx context.Context, tbl *table.Table) (*table.Table, int64)
+		want  map[int]int64
+		// deletes reports how many delete files of one kind the analyzed
+		// snapshot's tasks carry, so a delete case can't silently degrade to
+		// copy-on-write.
+		deletes func(table.FileScanTask) int
+	}{
+		{
+			name: "several data files",
+			build: func(t *testing.T, ctx context.Context, tbl *table.Table) (*table.Table, int64) {
+				tbl = appendNDVRows(t, ctx, tbl, ndvRows(1, 40))
+				tbl = appendNDVRows(t, ctx, tbl, ndvRows(31, 70)) // overlaps 31..40
+				tbl = appendNDVRows(t, ctx, tbl, []string{`{"id": 500, "category": "west"}`})
+				tasks, err := tbl.Scan().PlanFiles(ctx)
+				require.NoError(t, err)
+				require.Len(t, tasks, 3)
+
+				return tbl, 0
+			},
+			want: map[int]int64{1: 71, 2: 4},
+		},
+		{
+			name:  "position deletes",
+			props: mor("2"),
+			build: func(t *testing.T, ctx context.Context, tbl *table.Table) (*table.Table, int64) {
+				tbl = appendNDVRows(t, ctx, tbl, ndvRows(1, 100))
+
+				return deleteIDsAbove(t, ctx, tbl, 1), 0
+			},
+			want:    map[int]int64{1: 1, 2: 1},
+			deletes: func(task table.FileScanTask) int { return len(task.DeleteFiles) },
+		},
+		{
+			name:  "deletion vectors",
+			props: mor("3"),
+			build: func(t *testing.T, ctx context.Context, tbl *table.Table) (*table.Table, int64) {
+				tbl = appendNDVRows(t, ctx, tbl, ndvRows(1, 100))
+
+				return deleteIDsAbove(t, ctx, tbl, 2), 0
+			},
+			want:    map[int]int64{1: 2, 2: 2},
+			deletes: func(task table.FileScanTask) int { return len(task.DeletionVectorFiles) },
+		},
+		{
+			name:  "equality deletes",
+			props: mor("2"),
+			build: func(t *testing.T, ctx context.Context, tbl *table.Table) (*table.Table, int64) {
+				tbl = appendNDVRows(t, ctx, tbl, ndvRows(1, 100))
+
+				// Delete every "east" row (ids divisible by 3).
+				eqSchema, err := table.SchemaToArrowSchema(
+					iceberg.NewSchema(0, iceberg.NestedField{ID: 2, Name: "category", Type: iceberg.PrimitiveTypes.String, Required: true}),
+					nil, true, false)
+				require.NoError(t, err)
+				eqPath := filepath.Join(t.TempDir(), "eq-del.parquet")
+				writeParquetFile(t, eqPath, eqSchema, `[{"category": "east"}]`)
+				info, err := os.Stat(eqPath)
+				require.NoError(t, err)
+				b, err := iceberg.NewDataFileBuilder(*iceberg.UnpartitionedSpec, iceberg.EntryContentEqDeletes,
+					eqPath, iceberg.ParquetFile, nil, nil, nil, 1, info.Size())
+				require.NoError(t, err)
+				b.EqualityFieldIDs([]int{2})
+
+				tx := tbl.NewTransaction()
+				rd := tx.NewRowDelta(nil)
+				rd.AddDeletes(b.Build())
+				require.NoError(t, rd.Commit(ctx))
+				tbl, err = tx.Commit(ctx)
+				require.NoError(t, err)
+
+				return tbl, 0
+			},
+			want:    map[int]int64{1: 67, 2: 2},
+			deletes: func(task table.FileScanTask) int { return len(task.EqualityDeleteFiles) },
+		},
+		{
+			name: "older snapshot after schema change",
+			build: func(t *testing.T, ctx context.Context, tbl *table.Table) (*table.Table, int64) {
+				tbl = appendNDVRows(t, ctx, tbl, ndvRows(1, 10))
+				old := tbl.CurrentSnapshot().SnapshotID
+
+				// Rename category and add a column, then write more rows. The old
+				// snapshot is read with its own schema, and its sketches are keyed
+				// by field ID, not the current name.
+				tx := tbl.NewTransaction()
+				require.NoError(t, tx.UpdateSchema(true, false).
+					RenameColumn([]string{"category"}, "region").
+					AddColumn([]string{"extra"}, iceberg.PrimitiveTypes.Int32, "", false, nil).
+					Commit())
+				tbl, err := tx.Commit(ctx)
+				require.NoError(t, err)
+				tbl = appendNDVRows(t, ctx, tbl, []string{
+					`{"id": 11, "region": "west", "extra": 1}`,
+					`{"id": 12, "region": "up", "extra": 2}`,
+				})
+
+				return tbl, old
+			},
+			want: map[int]int64{1: 10, 2: 3},
+		},
+	}
+
+	for i, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tbl, ctx := newNDVTable(t, fmt.Sprintf("ndv_contents_%d", i), ndvTestSchema, tc.props)
+			tbl, snapshotID := tc.build(t, ctx, tbl)
+
+			if tc.deletes != nil {
+				tasks, err := tbl.Scan().PlanFiles(ctx)
+				require.NoError(t, err)
+				n := 0
+				for _, task := range tasks {
+					n += tc.deletes(task)
+				}
+				require.Positive(t, n, "expected merge-on-read delete files")
+			}
+
+			got, err := tbl.ComputeNDVs(ctx, snapshotID)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, ndvValues(got))
+
+			// Sketching one column at a time must give the same counts: deletes
+			// keyed on an unselected column (equality deletes on category) still
+			// apply when only id is read.
+			for fieldID, want := range tc.want {
+				sc, err := tbl.Scan(table.WithSnapshotID(got.Snapshot.SnapshotID)).Projection()
+				require.NoError(t, err)
+				field, ok := sc.FindFieldByID(fieldID)
+				require.True(t, ok)
+				one, err := tbl.ComputeNDVs(ctx, snapshotID, field.Name)
+				require.NoError(t, err)
+				assert.Equal(t, map[int]int64{fieldID: want}, ndvValues(one), field.Name)
+			}
+
+			require.NotNil(t, got.Snapshot)
+			if snapshotID == 0 {
+				snapshotID = tbl.CurrentSnapshot().SnapshotID
+			}
+			assert.Equal(t, snapshotID, got.Snapshot.SnapshotID)
+		})
 	}
 }
 
@@ -188,11 +550,9 @@ func TestComputeNDVsSkipsNullValues(t *testing.T) {
 
 	tbl, ctx := createNDVTable(t, "ndv_nulls", sc, rows)
 
-	results, err := tbl.ComputeNDVs(ctx, 0)
+	got, err := tbl.ComputeNDVs(ctx, 0)
 	require.NoError(t, err)
-	require.Len(t, results, 2)
-	assert.Equal(t, int64(len(vals)), results[1].NDV)
-	assert.Equal(t, int64(3), results[2].NDV)
+	assert.Equal(t, map[int]int64{1: int64(len(vals)), 2: 3}, ndvValues(got))
 }
 
 func TestComputeNDVsRejectsNonPrimitiveColumns(t *testing.T) {
@@ -220,10 +580,9 @@ func TestComputeNDVsRejectsNonPrimitiveColumns(t *testing.T) {
 	assert.ErrorContains(t, err, "nested")
 
 	// The default column set skips the struct column.
-	results, err := tbl.ComputeNDVs(ctx, 0)
+	got, err := tbl.ComputeNDVs(ctx, 0)
 	require.NoError(t, err)
-	require.Len(t, results, 1)
-	assert.Equal(t, int64(2), results[1].NDV)
+	assert.Equal(t, map[int]int64{1: 2}, ndvValues(got))
 }
 
 // TestComputeNDVsMatchesJavaFixtures writes the values behind two Iceberg-Java
@@ -260,8 +619,9 @@ func TestComputeNDVsMatchesJavaFixtures(t *testing.T) {
 
 	tbl, ctx := createNDVTable(t, "ndv_java_fixtures", sc, rows)
 
-	results, err := tbl.ComputeNDVs(ctx, 0)
+	got, err := tbl.ComputeNDVs(ctx, 0)
 	require.NoError(t, err)
+	results := got.Columns
 
 	for fieldID, fixture := range map[int]string{1: "long", 2: "string"} {
 		t.Run(fixture, func(t *testing.T) {

@@ -27,6 +27,16 @@ import (
 	"github.com/apache/iceberg-go/table/stats"
 )
 
+// NDVStats is the result of ComputeNDVs.
+type NDVStats struct {
+	// Snapshot is the snapshot the sketches were computed over. Its ID and
+	// sequence number identify the sketches when they are written to a Puffin
+	// statistics file. It is nil when the table has no snapshot.
+	Snapshot *Snapshot
+	// Columns holds one sketch per analyzed column, keyed by field ID.
+	Columns map[int]NDVResult
+}
+
 // NDVResult is the number-of-distinct-values sketch computed for one column.
 type NDVResult struct {
 	// FieldID is the Iceberg field ID of the column.
@@ -40,62 +50,63 @@ type NDVResult struct {
 
 // ComputeNDVs scans a snapshot and computes a DataSketches Theta sketch per
 // top-level primitive column, returning the estimated number of distinct values
-// keyed by field ID.
+// keyed by field ID along with the snapshot that was analyzed.
 //
-// When snapshotID is 0 the current snapshot is used. When columns is empty every
-// top-level primitive column is analyzed, matching Iceberg-Java's
-// ComputeTableStats default. Naming an unknown column, a non-primitive column,
-// or a column nested inside a struct is an error.
+// When snapshotID is 0 the current snapshot is used; a table without a
+// snapshot yields an empty result, as in Iceberg-Java's ComputeTableStats.
+// When columns is empty every top-level primitive column is analyzed except
+// geometry and geography columns, which have no single-value serialization
+// to hash. Naming an unknown column, a non-primitive column, a geospatial
+// column, or a column nested inside a struct is an error.
 //
 // Values are fed to the sketch using Iceberg's single-value serialization (the
 // same encoding used for manifest bounds), so estimates are comparable with
 // sketches produced by other Iceberg implementations. Null values are not
 // counted.
-func (t Table) ComputeNDVs(ctx context.Context, snapshotID int64, columns ...string) (map[int]NDVResult, error) {
-	opts := []ScanOption{WithSnapshotID(snapshotID)}
-	if len(columns) > 0 {
-		opts = append(opts, WithSelectedFields(columns...))
-	}
-	scan := t.Scan(opts...)
+func (t Table) ComputeNDVs(ctx context.Context, snapshotID int64, columns ...string) (NDVStats, error) {
+	base := t.Scan(WithSnapshotID(snapshotID))
 
-	// Resolve the snapshot so an empty or missing target is a clear error rather
-	// than a silently empty result.
-	if _, err := scan.ResolveSnapshot(); err != nil {
-		return nil, fmt.Errorf("compute NDVs: %w", err)
-	}
-
-	projected, err := scan.Projection()
+	snap, err := base.ResolveSnapshot()
 	if err != nil {
-		return nil, fmt.Errorf("compute NDVs: %w", err)
+		return NDVStats{}, fmt.Errorf("compute NDVs: %w", err)
+	}
+	if snap == nil {
+		return NDVStats{Columns: map[int]NDVResult{}}, nil
 	}
 
-	if err := validateNDVColumns(projected, columns); err != nil {
-		return nil, fmt.Errorf("compute NDVs: %w", err)
-	}
-
-	// Restrict to top-level primitive fields; nested fields are not sketched,
-	// matching the reference implementation.
-	primitives := make(map[string]iceberg.NestedField)
-	for _, f := range projected.Fields() {
-		if _, ok := f.Type.(iceberg.PrimitiveType); ok {
-			primitives[f.Name] = f
-		}
-	}
-	if len(primitives) == 0 {
-		return map[int]NDVResult{}, nil
-	}
-
-	arrowSchema, records, err := scan.ToArrowRecords(ctx)
+	schema, err := base.Projection()
 	if err != nil {
-		return nil, fmt.Errorf("compute NDVs: %w", err)
+		return NDVStats{}, fmt.Errorf("compute NDVs: %w", err)
+	}
+
+	fields, err := ndvFields(schema, columns)
+	if err != nil {
+		return NDVStats{}, fmt.Errorf("compute NDVs: %w", err)
+	}
+	if len(fields) == 0 {
+		return NDVStats{Snapshot: snap, Columns: map[int]NDVResult{}}, nil
+	}
+
+	// Select only the sketched columns so the default path does not read and
+	// decode nested or geospatial columns just to drop them.
+	byName := make(map[string]iceberg.NestedField, len(fields))
+	names := make([]string, 0, len(fields))
+	for _, f := range fields {
+		byName[f.Name] = f
+		names = append(names, f.Name)
+	}
+
+	arrowSchema, records, err := t.Scan(WithSnapshotID(snapshotID), WithSelectedFields(names...)).
+		ToArrowRecords(ctx)
+	if err != nil {
+		return NDVStats{}, fmt.Errorf("compute NDVs: %w", err)
 	}
 
 	// Map each arrow column index to the target field and its sketch, matching
-	// by name against the projected schema (the returned arrow schema carries no
-	// field-id metadata).
-	targets := make(map[int]*ndvTarget)
+	// by name (the returned arrow schema carries no field-id metadata).
+	targets := make(map[int]*ndvTarget, len(fields))
 	for i, f := range arrowSchema.Fields() {
-		nf, ok := primitives[f.Name]
+		nf, ok := byName[f.Name]
 		if !ok {
 			continue
 		}
@@ -104,12 +115,12 @@ func (t Table) ComputeNDVs(ctx context.Context, snapshotID int64, columns ...str
 
 	for rec, err := range records {
 		if err != nil {
-			return nil, fmt.Errorf("compute NDVs: %w", err)
+			return NDVStats{}, fmt.Errorf("compute NDVs: %w", err)
 		}
 		if err := addRecordToSketches(rec, targets); err != nil {
 			rec.Release()
 
-			return nil, fmt.Errorf("compute NDVs: %w", err)
+			return NDVStats{}, fmt.Errorf("compute NDVs: %w", err)
 		}
 		rec.Release()
 	}
@@ -123,28 +134,64 @@ func (t Table) ComputeNDVs(ctx context.Context, snapshotID int64, columns ...str
 		}
 	}
 
-	return results, nil
+	return NDVStats{Snapshot: snap, Columns: results}, nil
 }
 
-// validateNDVColumns rejects explicitly named columns that cannot be sketched,
-// as Iceberg-Java's ComputeTableStats does, rather than silently dropping them.
-func validateNDVColumns(projected *iceberg.Schema, columns []string) error {
+// ndvFields returns the columns to sketch. With no columns named it returns
+// every top-level primitive column that can be sketched. Named columns are
+// validated as Iceberg-Java's ComputeTableStats does, so a column that can't
+// be sketched is an error rather than a silently missing result.
+func ndvFields(schema *iceberg.Schema, columns []string) ([]iceberg.NestedField, error) {
+	if len(columns) == 0 {
+		var fields []iceberg.NestedField
+		for _, f := range schema.Fields() {
+			if ndvSketchable(f.Type) {
+				fields = append(fields, f)
+			}
+		}
+
+		return fields, nil
+	}
+
+	fields := make([]iceberg.NestedField, 0, len(columns))
 	for _, name := range columns {
-		f, ok := projected.FindFieldByName(name)
+		f, ok := schema.FindFieldByName(name)
 		if !ok {
-			return fmt.Errorf("%w: can't find column %q", iceberg.ErrInvalidArgument, name)
+			return nil, fmt.Errorf("%w: can't find column %q", iceberg.ErrInvalidArgument, name)
 		}
 		if _, ok := f.Type.(iceberg.PrimitiveType); !ok {
-			return fmt.Errorf("%w: can't compute stats on non-primitive type column: %s (%s)",
+			return nil, fmt.Errorf("%w: can't compute stats on non-primitive type column: %s (%s)",
 				iceberg.ErrInvalidArgument, name, f.Type)
 		}
-		if !slices.ContainsFunc(projected.Fields(), func(top iceberg.NestedField) bool { return top.ID == f.ID }) {
-			return fmt.Errorf("%w: can't compute stats on nested column: %s",
+		if !ndvSketchable(f.Type) {
+			return nil, fmt.Errorf("%w: can't compute stats on geospatial column: %s (%s)",
+				iceberg.ErrInvalidArgument, name, f.Type)
+		}
+		if !slices.ContainsFunc(schema.Fields(), func(top iceberg.NestedField) bool { return top.ID == f.ID }) {
+			return nil, fmt.Errorf("%w: can't compute stats on nested column: %s",
 				iceberg.ErrInvalidArgument, name)
+		}
+		if !slices.ContainsFunc(fields, func(seen iceberg.NestedField) bool { return seen.ID == f.ID }) {
+			fields = append(fields, f)
 		}
 	}
 
-	return nil
+	return fields, nil
+}
+
+// ndvSketchable reports whether values of typ can be hashed into a sketch.
+// Geometry and geography are primitive, but Iceberg defines no single-value
+// serialization for their values (only for their bounds), so there is no
+// encoding shared with other implementations to hash.
+func ndvSketchable(typ iceberg.Type) bool {
+	switch typ.(type) {
+	case iceberg.GeometryType, iceberg.GeographyType:
+		return false
+	case iceberg.PrimitiveType:
+		return true
+	default:
+		return false
+	}
 }
 
 // ndvTarget pairs a primitive column with the sketch accumulating its values.
