@@ -215,15 +215,20 @@ func addIDOnlyFile(t *testing.T, tbl *Table, name string, partition map[int]any,
 func scanIDAndColumn(t *testing.T, tbl *Table, opts ...ScanOption) []string {
 	t.Helper()
 
-	result, err := tbl.Scan(opts...).ToArrowTable(t.Context())
+	_, records, err := tbl.Scan(opts...).ToArrowRecords(t.Context())
 	require.NoError(t, err)
-	defer result.Release()
+
+	return idAndColumnRows(t, records)
+}
+
+// idAndColumnRows formats each row of two-column (id, value) records as
+// "id:value", sorted, with "id:<null>" for a null value.
+func idAndColumnRows(t *testing.T, records iter.Seq2[arrow.RecordBatch, error]) []string {
+	t.Helper()
 
 	rows := []string{}
-	reader := array.NewTableReader(result, -1)
-	defer reader.Release()
-	for reader.Next() {
-		rec := reader.RecordBatch()
+	for rec, err := range records {
+		require.NoError(t, err)
 		ids := rec.Column(0).(*array.Int64)
 		for i := range int(rec.NumRows()) {
 			value := "<null>"
@@ -232,6 +237,7 @@ func scanIDAndColumn(t *testing.T, tbl *Table, opts ...ScanOption) []string {
 			}
 			rows = append(rows, fmt.Sprintf("%d:%s", ids.Value(i), value))
 		}
+		rec.Release()
 	}
 	sort.Strings(rows)
 
@@ -410,4 +416,57 @@ func TestIdentityPartitionValueUsesFileSpecAndWinsOverInitialDefault(t *testing.
 			require.Equal(t, tt.want, scanIDAndColumn(t, tbl, WithRowFilter(tt.filter)))
 		})
 	}
+}
+
+// Overwrite rewrites the files its filter touches, keeping the rows the
+// filter does not match. The kept rows of a file that does not store the
+// partition column must carry the partition value into the rewritten file.
+func TestOverwriteOnIdentityPartitionColumnMissingFromDataFile(t *testing.T) {
+	tbl := regionTestTable(t, iceberg.Properties{PropertyFormatVersion: "2"})
+	filter := iceberg.NewAnd(
+		iceberg.EqualTo(iceberg.Reference("region"), "west"),
+		iceberg.EqualTo(iceberg.Reference("id"), int64(1)))
+
+	schema, err := SchemaToArrowSchema(tbl.Schema(), nil, true, false)
+	require.NoError(t, err)
+	replacement, err := array.TableFromJSON(memory.DefaultAllocator, schema,
+		[]string{`[{"id":9,"region":"west"}]`})
+	require.NoError(t, err)
+	defer replacement.Release()
+	rdr := array.NewTableReader(replacement, -1)
+	defer rdr.Release()
+
+	txn := tbl.NewTransaction()
+	require.NoError(t, txn.Overwrite(t.Context(), rdr, nil, WithOverwriteFilter(filter)))
+	tbl, err = txn.Commit(t.Context())
+	require.NoError(t, err)
+
+	require.Equal(t, []string{"1:east", "2:east", "3:west", "9:west"}, scanIDAndColumn(t, tbl))
+}
+
+// Incremental scans attach the whole row filter to each task, without
+// partition-specific simplification, so it must be evaluated against each
+// file's partition value.
+func TestIncrementalScansOnIdentityPartitionColumnMissingFromDataFile(t *testing.T) {
+	tbl := regionTestTable(t, iceberg.Properties{PropertyFormatVersion: "2"})
+	first := tbl.Metadata().Snapshots()[0].SnapshotID
+	westOne := iceberg.NewAnd(
+		iceberg.EqualTo(iceberg.Reference("region"), "west"),
+		iceberg.EqualTo(iceberg.Reference("id"), int64(1)))
+
+	t.Run("append", func(t *testing.T) {
+		appendScan := tbl.NewIncrementalAppendScan(WithRowFilter(westOne)).FromSnapshotInclusive(first)
+		tasks, err := appendScan.PlanFiles(t.Context())
+		require.NoError(t, err)
+		_, records, err := tbl.Scan(WithRowFilter(westOne)).ReadTasks(t.Context(), tasks)
+		require.NoError(t, err)
+		require.Equal(t, []string{"1:west"}, idAndColumnRows(t, records))
+	})
+
+	t.Run("changelog", func(t *testing.T) {
+		scan := tbl.NewIncrementalChangelogScan(WithRowFilter(westOne)).FromSnapshotInclusive(first)
+		_, records, err := scan.ToArrowRecords(t.Context())
+		require.NoError(t, err)
+		require.Equal(t, []string{"1:west"}, idAndColumnRows(t, records))
+	})
 }
