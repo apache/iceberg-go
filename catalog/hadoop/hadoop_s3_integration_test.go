@@ -77,7 +77,7 @@ func (s *HadoopS3IntegrationSuite) TearDownTest() {
 	}
 
 	if remover, ok := fs.(icebergio.RemoveAllIO); ok {
-		_ = remover.RemoveAll(s.warehouse)
+		_ = remover.RemoveAll(context.Background(), s.warehouse)
 	}
 }
 
