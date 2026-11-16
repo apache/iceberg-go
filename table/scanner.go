@@ -1017,7 +1017,25 @@ func matchEqualityDeletesToData(dataEntry iceberg.ManifestEntry, eqDeleteEntries
 }
 
 func partitionsMatch(a, b map[int]any) bool {
-	return maps.EqualFunc(a, b, partitionValuesEqual)
+	return maps.EqualFunc(a, b, promotedPartitionValuesEqual)
+}
+
+// promotedPartitionValuesEqual compares partition values across an identity
+// source promotion (int to long, float to double): manifests written before
+// the promotion decode the old width. Both widenings are exact.
+func promotedPartitionValuesEqual(left, right any) bool {
+	return partitionValuesEqual(widenPromotedPartitionValue(left), widenPromotedPartitionValue(right))
+}
+
+func widenPromotedPartitionValue(value any) any {
+	switch value := value.(type) {
+	case int32:
+		return int64(value)
+	case float32:
+		return float64(value)
+	}
+
+	return value
 }
 
 // buildDVIndex indexes deletion vectors by the data file path they reference.

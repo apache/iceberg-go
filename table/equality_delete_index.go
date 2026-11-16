@@ -342,9 +342,12 @@ func comparableEqualityDeletePartitionValue(value any) (any, error) {
 		return equalityDeleteIntegerPartitionValue(value), nil
 	case iceberg.TimestampNano:
 		return equalityDeleteIntegerPartitionValue(value), nil
-	case float32, float64:
-		// Keep equality-delete indexing aligned with writer partition keys:
-		// canonicalize NaNs within each width and preserve signed zero.
+	case float32:
+		// Widen like integers so values decoded from manifests written before
+		// a float to double promotion share a key with newer ones.
+		return comparablePartitionKey(float64(value)), nil
+	case float64:
+		// Canonicalize NaNs and preserve signed zero.
 		return comparablePartitionKey(value), nil
 	case string:
 		return equalityDeleteStringPartitionValue(value), nil
