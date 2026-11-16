@@ -1098,6 +1098,14 @@ func (u *UpdateSchema) BuildUpdates() ([]Update, []Requirement, error) {
 	if existingSchemaID != u.schema.ID {
 		requirements = append(requirements, AssertCurrentSchemaID(u.schema.ID))
 		if existingSchemaID == -1 {
+			// A stale writer must not reuse field IDs assigned since its
+			// base. Skipped when the stored last-column-id is below the
+			// schema history: the catalog and the transaction then disagree
+			// on the counter and every commit would fail.
+			base := u.txn.tbl.Metadata()
+			if base.LastColumnID() == columnIDFloor(base.LastColumnID(), base.Schemas()) {
+				requirements = append(requirements, AssertLastAssignedFieldID(base.LastColumnID()))
+			}
 			updates = append(
 				updates,
 				NewAddSchemaUpdate(newSchema),

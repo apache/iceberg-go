@@ -1314,6 +1314,43 @@ func TestBuildUpdates(t *testing.T) {
 		assert.IsType(t, &setCurrentSchemaUpdate{}, updates[0])
 		assert.Equal(t, 0, updates[0].(*setCurrentSchemaUpdate).SchemaID)
 	})
+
+	t.Run("test BuildUpdates asserts last-assigned-field-id when adding a schema", func(t *testing.T) {
+		table := New([]string{"table"}, testMetadata, "", nil, nil)
+		txn := table.NewTransaction()
+		updateSchema := txn.UpdateSchema(true, false).
+			AddColumn([]string{"new_col"}, iceberg.PrimitiveTypes.String, "", false, nil)
+
+		updates, requirements, err := updateSchema.BuildUpdates()
+		require.NoError(t, err)
+		require.Len(t, requirements, 2)
+		assert.IsType(t, &assertCurrentSchemaId{}, requirements[0])
+		require.IsType(t, &assertLastAssignedFieldId{}, requirements[1])
+		assert.Equal(t, testMetadata.LastColumnID(),
+			requirements[1].(*assertLastAssignedFieldId).LastAssignedFieldID)
+		require.Len(t, updates, 2)
+		assert.IsType(t, &addSchemaUpdate{}, updates[0])
+		assert.IsType(t, &setCurrentSchemaUpdate{}, updates[1])
+	})
+
+	t.Run("test chained schema updates assert last-assigned-field-id once", func(t *testing.T) {
+		table := New([]string{"table"}, testMetadata, "", nil, nil)
+		txn := table.NewTransaction()
+		for _, name := range []string{"first", "second"} {
+			require.NoError(t, txn.UpdateSchema(true, false).
+				AddColumn([]string{name}, iceberg.PrimitiveTypes.String, "", false, nil).
+				Commit())
+		}
+
+		var fieldIDReqs []*assertLastAssignedFieldId
+		for _, r := range txn.reqs {
+			if req, ok := r.(*assertLastAssignedFieldId); ok {
+				fieldIDReqs = append(fieldIDReqs, req)
+			}
+		}
+		require.Len(t, fieldIDReqs, 1)
+		assert.Equal(t, testMetadata.LastColumnID(), fieldIDReqs[0].LastAssignedFieldID)
+	})
 }
 
 // TestAddColumnMonotonicFieldIDs exercises the case where the table's
