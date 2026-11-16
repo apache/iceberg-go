@@ -3225,6 +3225,9 @@ make integration-external-rest
 <p><strong>Path-based data-file addition renamed.</strong> Replace <code>Transaction.AddFiles</code> with <code>AddDataFilesByPath</code>, <code>AddFilesOption</code> with <code>AddDataFilesByPathOption</code>, and <code>WithAddFilesConcurrency</code> with <code>WithAddDataFilesByPathConcurrency</code>. Behavior is unchanged.</p>
 </li>
 <li>
+<p><strong>Directory IO methods take a context.</strong> <code>RemoveAllIO.RemoveAll</code> and <code>MkdirAllIO.MkdirAll</code> now take <code>context.Context</code> first, so custom implementations and callers must update.</p>
+</li>
+<li>
 <p><strong>Manifest builder constructor renamed.</strong> Replace <code>iceberg.NewManifestFile(...)</code> with <code>iceberg.NewManifestBuilder(...)</code>. It still returns a <code>ManifestBuilder</code>.</p>
 </li>
 <li>
