@@ -804,10 +804,13 @@ func getRetentionInt64(props iceberg.Properties, standardKey, legacyKey string, 
 // committing. A transaction containing only expiries with no updates makes no
 // commit attempt and never refreshes or replans.
 //
-// Snapshot expiration requires complete history. REST catalogs using
-// snapshot-loading-mode=refs cannot stage it; load the table with
-// snapshot-loading-mode=all. A retry or resumed commit refreshing to refs-only
-// history makes the transaction unusable.
+// Snapshot expiration requires complete history, even if the proposed
+// expiration would be a no-op. REST snapshot-loading-mode=refs can omit
+// ancestors needed for retention; staging on such a table fails with
+// ErrInvalidOperation before recording updates. Other operations may still
+// be staged in that transaction. A retry or resumed commit that refreshes
+// to refs-only history fails with ErrTransactionUnusable without replaying
+// the expiration. Reload with snapshot-loading-mode=all and begin anew.
 //
 // The replay failures that make the transaction unusable are listed on
 // ErrTransactionUnusable.
