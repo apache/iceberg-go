@@ -88,6 +88,17 @@ func TestSQLCatalogIORegistriesAreIsolated(t *testing.T) {
 
 		_, err = iceio.LoadFS(t.Context(), nil, created.MetadataLocation())
 		require.ErrorIs(t, err, iceio.ErrIOSchemeNotFound)
+
+		// CommitTable stages and writes new metadata, not just the initial create.
+		_, updatedLocation, err := tc.cat.CommitTable(t.Context(), ident, nil,
+			[]table.Update{table.NewSetPropertiesUpdate(iceberg.Properties{"updated": "true"})})
+		require.NoError(t, err)
+		require.NotEqual(t, created.MetadataLocation(), updatedLocation)
+		newMetadata, err := tc.fs.Open(t.Context(), updatedLocation)
+		require.NoError(t, err)
+		require.NoError(t, newMetadata.Close())
+		_, err = iceio.LoadFS(t.Context(), nil, updatedLocation)
+		require.ErrorIs(t, err, iceio.ErrIOSchemeNotFound)
 	}
 }
 
