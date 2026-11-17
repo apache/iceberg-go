@@ -49,6 +49,15 @@ func TestValidateIdentifierFields(t *testing.T) {
 		{"double", []int{1}, []NestedField{{
 			ID: 1, Name: "id", Type: PrimitiveTypes.Float64, Required: true,
 		}}, "float or double"},
+		{"float pointer", []int{1}, []NestedField{{
+			ID: 1, Name: "id", Type: &Float32Type{}, Required: true,
+		}}, "float or double"},
+		{"double pointer", []int{1}, []NestedField{{
+			ID: 1, Name: "id", Type: &Float64Type{}, Required: true,
+		}}, "float or double"},
+		{"long pointer", []int{1}, []NestedField{{
+			ID: 1, Name: "id", Type: &Int64Type{}, Required: true,
+		}}, ""},
 		{"struct", []int{1}, []NestedField{{
 			ID: 1, Name: "id", Type: &StructType{FieldList: nil}, Required: true,
 		}}, "must be primitive"},

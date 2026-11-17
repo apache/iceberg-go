@@ -46,7 +46,7 @@ func (c *Catalog) RenameView(ctx context.Context, from, to table.Identifier) (*v
 	if err != nil {
 		return nil, err
 	}
-	toNamespace, exists, err := c.resolveNamespaceKey(ctx, catalog.NamespaceFromIdent(to))
+	toNamespace, exists, err := c.resolveListableNamespaceKey(ctx, catalog.NamespaceFromIdent(to))
 	if err != nil {
 		return nil, err
 	}
@@ -66,7 +66,7 @@ func (c *Catalog) RenameView(ctx context.Context, from, to table.Identifier) (*v
 		if !sourceExists {
 			return fmt.Errorf("%w: %s", catalog.ErrNoSuchView, from)
 		}
-		exists, err := c.namespaceExistsInTx(ctx, tx, toNamespace)
+		exists, err := c.listableNamespaceExistsInTx(ctx, tx, catalog.NamespaceFromIdent(to), toNamespace)
 		if err != nil {
 			return err
 		}
