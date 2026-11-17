@@ -88,6 +88,7 @@ func NewCatalog(props iceberg.Properties, opts ...Option) (*Catalog, error) {
 func NewCatalogWithClient(client HiveClient, props iceberg.Properties, opts ...Option) *Catalog {
 	o := NewHiveOptions()
 	o.ApplyProperties(props)
+
 	for _, opt := range opts {
 		opt(o)
 	}
@@ -376,7 +377,7 @@ func (c *Catalog) CreateView(ctx context.Context, identifier table.Identifier, v
 		maps.Copy(ioProps, cfg.Properties)
 	}
 
-	createdView, err := view.CreateViewFromVersionWithRegistry(ctx, identifier, freshSchema, version, loc, ioProps, cfg.Properties, c.opts.ioRegistry)
+	createdView, err := view.CreateViewFromVersion(ctx, identifier, freshSchema, version, loc, ioProps, cfg.Properties, view.WithIORegistry(c.opts.ioRegistry))
 	if err != nil {
 		return nil, err
 	}
