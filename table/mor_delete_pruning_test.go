@@ -234,6 +234,10 @@ func TestV3MergeOnReadDoubleDeletePartitionedMergesDeletionVectors(t *testing.T)
 // newPartitionedMergeOnReadTestTable builds a v3 merge-on-read table partitioned
 // by identity(category) so distinct category values land in distinct data files.
 func newPartitionedMergeOnReadTestTable(t *testing.T) *table.Table {
+	return newPartitionedMergeOnReadTestTableVersion(t, "3")
+}
+
+func newPartitionedMergeOnReadTestTableVersion(t testing.TB, formatVersion string) *table.Table {
 	t.Helper()
 
 	location := filepath.ToSlash(t.TempDir())
@@ -249,7 +253,7 @@ func newPartitionedMergeOnReadTestTable(t *testing.T) *table.Table {
 	})
 	meta, err := table.NewMetadata(schema, &spec, table.UnsortedSortOrder, location,
 		iceberg.Properties{
-			table.PropertyFormatVersion: "3",
+			table.PropertyFormatVersion: formatVersion,
 			table.WriteDeleteModeKey:    table.WriteModeMergeOnRead,
 		})
 	require.NoError(t, err)
@@ -459,5 +463,100 @@ func TestV3MergeOnReadUpgradePreservesPositionDeletes(t *testing.T) {
 				require.Zero(t, withOldPositionDeletes)
 			}
 		})
+	}
+}
+
+// TestV3MergeOnReadUpgradeMergesMultiplePositionDeleteFiles checks that the
+// first DV includes deletes written by separate v2 commits for the same file.
+func TestV3MergeOnReadUpgradeMergesMultiplePositionDeleteFiles(t *testing.T) {
+	ctx := t.Context()
+	tbl := newMergeOnReadTestTable(t)
+	tbl = appendRows(t, tbl, `[{"id":1,"data":"a"},{"id":2,"data":"b"},{"id":3,"data":"c"},{"id":4,"data":"d"},{"id":5,"data":"e"}]`)
+
+	var err error
+	tbl, err = tbl.Delete(ctx, iceberg.EqualTo(iceberg.Reference("id"), int64(1)), nil)
+	require.NoError(t, err)
+	tbl, err = tbl.Delete(ctx, iceberg.EqualTo(iceberg.Reference("id"), int64(2)), nil)
+	require.NoError(t, err)
+
+	tasks, err := tbl.Scan().PlanFiles(ctx)
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	require.Len(t, tasks[0].DeleteFiles, 2, "each v2 delete must leave a position-delete file")
+	require.NotEqual(t, tasks[0].DeleteFiles[0].FilePath(), tasks[0].DeleteFiles[1].FilePath())
+
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.UpgradeFormatVersion(3))
+	tbl, err = tx.Commit(ctx)
+	require.NoError(t, err)
+	require.Equal(t, []int64{3, 4, 5}, idsInTable(t, tbl))
+
+	tbl, err = tbl.Delete(ctx, iceberg.EqualTo(iceberg.Reference("id"), int64(3)), nil)
+	require.NoError(t, err)
+	require.Equal(t, []int64{4, 5}, idsInTable(t, tbl),
+		"the first DV must include both older position-delete files")
+	require.Equal(t, 1, liveDVCount(t, tbl))
+
+	tasks, err = tbl.Scan().PlanFiles(ctx)
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	require.Len(t, tasks[0].DeletionVectorFiles, 1)
+	require.Empty(t, tasks[0].DeleteFiles,
+		"the DV replaces both position-delete files for this data file")
+}
+
+// TestV3MergeOnReadUpgradePreservesPartitionedPositionDeletes checks that
+// legacy delete positions stay attached to their own partitioned data files.
+func TestV3MergeOnReadUpgradePreservesPartitionedPositionDeletes(t *testing.T) {
+	ctx := t.Context()
+	tbl := newPartitionedMergeOnReadTestTableVersion(t, "2")
+
+	arrowSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: false},
+		{Name: "category", Type: arrow.BinaryTypes.String, Nullable: false},
+	}, nil)
+	data, err := array.TableFromJSON(memory.DefaultAllocator, arrowSchema, []string{
+		`[{"id":1,"category":"x"},{"id":2,"category":"x"},{"id":3,"category":"x"},` +
+			`{"id":4,"category":"y"},{"id":5,"category":"y"},{"id":6,"category":"y"}]`,
+	})
+	require.NoError(t, err)
+	defer data.Release()
+
+	tbl, err = tbl.Append(ctx, array.NewTableReader(data, -1), nil)
+	require.NoError(t, err)
+	tbl, err = tbl.Delete(ctx, iceberg.EqualTo(iceberg.Reference("id"), int64(1)), nil)
+	require.NoError(t, err)
+	tbl, err = tbl.Delete(ctx, iceberg.EqualTo(iceberg.Reference("id"), int64(4)), nil)
+	require.NoError(t, err)
+	require.Equal(t, []int64{2, 3, 5, 6}, idsInTable(t, tbl))
+
+	tasks, err := tbl.Scan().PlanFiles(ctx)
+	require.NoError(t, err)
+	require.Len(t, tasks, 2)
+	for _, task := range tasks {
+		require.Len(t, task.DeleteFiles, 1)
+		require.Empty(t, task.DeletionVectorFiles)
+	}
+
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.UpgradeFormatVersion(3))
+	tbl, err = tx.Commit(ctx)
+	require.NoError(t, err)
+
+	tbl, err = tbl.Delete(ctx, iceberg.NewOr(
+		iceberg.EqualTo(iceberg.Reference("id"), int64(2)),
+		iceberg.EqualTo(iceberg.Reference("id"), int64(5)),
+	), nil)
+	require.NoError(t, err)
+	require.Equal(t, []int64{3, 6}, idsInTable(t, tbl),
+		"each new DV must preserve deletes from its own partitioned data file")
+	require.Equal(t, 2, liveDVCount(t, tbl))
+
+	tasks, err = tbl.Scan().PlanFiles(ctx)
+	require.NoError(t, err)
+	require.Len(t, tasks, 2)
+	for _, task := range tasks {
+		require.Len(t, task.DeletionVectorFiles, 1)
+		require.Empty(t, task.DeleteFiles)
 	}
 }
