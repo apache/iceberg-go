@@ -239,11 +239,52 @@ func TestExpireReplayRejectsRefsOnlyHistoryAfterRetry(t *testing.T) {
 	})
 }
 
+func TestExpireReplayRejectsRefsOnlyHistoryOnResume(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		fs, inner, tbl := newExpireReplayTable(t, iceberg.Properties{CommitNumRetriesKey: "0"})
+		var ids [4]int64
+		for i, name := range []string{"s1", "s2", "s3", "s4"} {
+			tbl, ids[i] = appendOnBranch(t, tbl, MainBranch, name)
+		}
+		peerUpdate(t, inner, NewSetSnapshotRefUpdate("expired-tag", ids[0], TagRef, time.Hour.Milliseconds(), 0, 0))
+		time.Sleep(2 * time.Hour)
+
+		cat := &refsOnlyReloadCatalog{reqValidatingCatalog: inner}
+		tx := newOCCTable(t, inner.metadata, fs, cat).NewTransaction()
+		require.NoError(t, tx.ExpireSnapshots(
+			WithOlderThan(0), WithRetainLast(5), WithPostCommit(false),
+		))
+		staged, err := tx.StagedTable()
+		require.NoError(t, err)
+		assert.Nil(t, staged.Metadata().SnapshotByName("expired-tag"))
+
+		peer := peerAppend(t, fs, inner, MainBranch, "s5")
+		cat.partial = refsOnlySnapshotMetadata(t, inner.metadata, ids[0], peer)
+		attemptsBefore := inner.attempts.Load()
+
+		_, err = tx.Commit(t.Context())
+		require.ErrorIs(t, err, ErrCommitFailed)
+		require.NotErrorIs(t, err, ErrTransactionUnusable)
+		assert.Equal(t, 0, cat.loads, "first attempt must not refresh")
+		assert.Equal(t, attemptsBefore+1, inner.attempts.Load())
+
+		_, err = tx.Commit(t.Context())
+		require.ErrorIs(t, err, ErrTransactionUnusable)
+		require.ErrorIs(t, err, errSnapshotHistoryIncompleteForExpiration)
+		assert.Equal(t, 1, cat.loads)
+		assert.Equal(t, attemptsBefore+1, inner.attempts.Load(), "resume must stop before resubmitting expiration")
+		assert.Equal(t, sortedIDs(ids[0], ids[1], ids[2], ids[3], peer), survivors(inner.metadata))
+		assert.NotNil(t, inner.metadata.SnapshotByID(ids[0]))
+		assert.NotNil(t, inner.metadata.SnapshotByName("expired-tag"))
+		assert.Equal(t, peer, refHead(t, inner.metadata, MainBranch))
+	})
+}
+
 func TestRefsOnlyReloadDoesNotBlockAppendReplay(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		fs, inner, tbl := newExpireReplayTable(t, nil)
 		tbl, first := appendOnBranch(t, tbl, MainBranch, "first")
-		tbl, _ = appendOnBranch(t, tbl, MainBranch, "head")
+		appendOnBranch(t, tbl, MainBranch, "head")
 		cat := &refsOnlyReloadCatalog{reqValidatingCatalog: inner}
 		tx := newOCCTable(t, inner.metadata, fs, cat).NewTransaction()
 		stageFiles(t, tx, "ours")
