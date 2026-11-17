@@ -1004,10 +1004,10 @@ func (t *Transaction) writePositionDeletesForFiles(ctx context.Context, fs io.IO
 	}
 
 	posDeleteFiles := positionDeleteRecordsToDataFiles(ctx, meta.loc, meta, partitionContextByFilePath, recordWritingArgs{
-		sc:          PositionalDeleteArrowSchema,
-		itr:         recordsWithPaths,
-		writeUUID:   &commitUUID,
-		fs:          wfs,
+		sc:              PositionalDeleteArrowSchema,
+		itr:             recordsWithPaths,
+		writeUUID:       &commitUUID,
+		fs:              wfs,
 		existingDeletes: existingDeletes,
 	})
 
