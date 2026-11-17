@@ -104,8 +104,9 @@ func CreateStagedTable(
 	return createStagedTable(ctx, catprops, nspropsFn, ident, "", sc, registry, opts...)
 }
 
-// CreateStagedTableWithNamespaceKey uses namespaceKey for the warehouse path
-// while keeping the original identifier for namespace property lookup.
+// CreateStagedTableWithNamespaceKey creates a staged table using namespaceKey
+// in its default warehouse location while retaining ident's namespace
+// components for namespace property lookup.
 func CreateStagedTableWithNamespaceKey(
 	ctx context.Context, catprops iceberg.Properties, nspropsFn GetNamespacePropsFn,
 	ident table.Identifier, namespaceKey string, sc *iceberg.Schema,
