@@ -54,7 +54,7 @@ func TestSQLCatalogIORegistriesAreIsolated(t *testing.T) {
 		require.NoError(t, err)
 		t.Cleanup(func() { require.NoError(t, db.Close()) })
 
-		cat, err := sqlcat.NewCatalogWithOptions("isolated", db, sqlcat.SQLite,
+		cat, err := sqlcat.NewCatalog("isolated", db, sqlcat.SQLite,
 			iceberg.Properties{"warehouse": scheme + "://bucket/warehouse"},
 			sqlcat.WithIORegistry(registry))
 		require.NoError(t, err)
@@ -106,7 +106,7 @@ func TestSQLViewUsesCatalogIOPropertiesWithIsolatedRegistry(t *testing.T) {
 	require.NoError(t, err)
 	defer db.Close()
 
-	cat, err := sqlcat.NewCatalogWithOptions("isolated", db, sqlcat.SQLite,
+	cat, err := sqlcat.NewCatalog("isolated", db, sqlcat.SQLite,
 		iceberg.Properties{
 			"warehouse":             scheme + "://bucket/warehouse",
 			"storage-secret":        "catalog-only",
@@ -171,7 +171,7 @@ func TestSQLViewCollisionCleanupUsesViewIOProperties(t *testing.T) {
 	db, err := sql.Open(sqliteshim.ShimName, filepath.Join(t.TempDir(), "cleanup.db"))
 	require.NoError(t, err)
 	defer db.Close()
-	cat, err := sqlcat.NewCatalogWithOptions("test", db, sqlcat.SQLite,
+	cat, err := sqlcat.NewCatalog("test", db, sqlcat.SQLite,
 		iceberg.Properties{"warehouse": scheme + "://bucket/warehouse", "storage-token": "catalog", sqlcat.SchemaVersionKey: sqlcat.SchemaVersionV1},
 		sqlcat.WithIORegistry(registry))
 	require.NoError(t, err)
