@@ -40,10 +40,10 @@ func TestCreateViewWithIsolatedIORegistry(t *testing.T) {
 	}
 
 	for i, registry := range registries {
-		created, err := CreateViewWithIORegistry(
+		created, err := CreateView(
 			t.Context(), "test", []string{"db", "orders"},
 			newTestSchema(0), Representation{SQL: "SELECT 1", Dialect: "spark"},
-			[]string{"db"}, scheme+"://bucket/view", nil, registry,
+			[]string{"db"}, scheme+"://bucket/view", nil, WithIORegistry(registry),
 		)
 		require.NoError(t, err)
 		require.NotNil(t, created)
@@ -70,12 +70,12 @@ func TestCreateViewWithSeparateIOPropertiesAndRegistry(t *testing.T) {
 		return fs, nil
 	}))
 
-	created, err := CreateViewWithIOPropertiesAndRegistry(
+	created, err := CreateViewWithIOProperties(
 		t.Context(), "test", []string{"db", "orders"},
 		newTestSchema(0), Representation{SQL: "SELECT 1", Dialect: "spark"},
 		[]string{"db"}, "isolated-view-properties://bucket/view",
 		iceberg.Properties{"storage-only": "token"},
-		iceberg.Properties{"persisted": "value"}, registry,
+		iceberg.Properties{"persisted": "value"}, WithIORegistry(registry),
 	)
 	require.NoError(t, err)
 	require.Equal(t, "token", seen["storage-only"])
@@ -84,10 +84,10 @@ func TestCreateViewWithSeparateIOPropertiesAndRegistry(t *testing.T) {
 }
 
 func TestCreateViewWithEmptyRegistryDoesNotFallBackToGlobal(t *testing.T) {
-	_, err := CreateViewWithIORegistry(
+	_, err := CreateView(
 		t.Context(), "test", []string{"db", "orders"},
 		newTestSchema(0), Representation{SQL: "SELECT 1", Dialect: "spark"},
-		[]string{"db"}, "file:///tmp/view-registry-no-fallback", nil, &iceio.Registry{},
+		[]string{"db"}, "file:///tmp/view-registry-no-fallback", nil, WithIORegistry(&iceio.Registry{}),
 	)
 	require.ErrorIs(t, err, iceio.ErrIOSchemeNotFound)
 }
@@ -108,10 +108,10 @@ func TestCreateViewFromVersionPreservesMetadataWithIsolatedRegistry(t *testing.T
 		WithTimestampMS(1234),
 	)
 	require.NoError(t, err)
-	created, err := CreateViewFromVersionWithRegistry(
+	created, err := CreateViewFromVersion(
 		t.Context(), []string{"db", "v"}, newTestSchema(0), version,
 		scheme+"://bucket/view", iceberg.Properties{"storage-only": "secret"},
-		iceberg.Properties{"view-property": "stored"}, registry,
+		iceberg.Properties{"view-property": "stored"}, WithIORegistry(registry),
 	)
 	require.NoError(t, err)
 	got := created.CurrentVersion()
