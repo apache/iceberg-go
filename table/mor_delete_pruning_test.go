@@ -459,6 +459,8 @@ func TestV3MergeOnReadUpgradePreservesPositionDeletes(t *testing.T) {
 				require.NoError(t, err)
 				require.Empty(t, idsInTable(t, tbl))
 				require.Equal(t, 2, liveDVCount(t, tbl))
+				require.Equal(t, 1, liveDeleteFileCount(t, tbl, iceberg.EntryContentPosDeletes),
+					"the shared legacy file is still live after both data files have DVs")
 			} else {
 				require.Zero(t, withOldPositionDeletes)
 			}
@@ -505,6 +507,36 @@ func TestV3MergeOnReadUpgradeMergesMultiplePositionDeleteFiles(t *testing.T) {
 		"the DV replaces both position-delete files for this data file")
 }
 
+// TestV3MergeOnReadUpgradeSkipsDVWhenDeleteFindsNoRows checks that legacy
+// deletes do not become a DV when a later delete matches only already-deleted
+// rows. Candidate files may pass stats pruning even when the scan returns no
+// new position-delete records.
+func TestV3MergeOnReadUpgradeSkipsDVWhenDeleteFindsNoRows(t *testing.T) {
+	ctx := t.Context()
+	tbl := appendRows(t, newMergeOnReadTestTable(t),
+		`[{"id":1,"data":"a"},{"id":2,"data":"b"},{"id":3,"data":"c"}]`)
+
+	var err error
+	tbl, err = tbl.Delete(ctx, iceberg.EqualTo(iceberg.Reference("id"), int64(1)), nil)
+	require.NoError(t, err)
+	require.Equal(t, 1, liveDeleteFileCount(t, tbl, iceberg.EntryContentPosDeletes))
+
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.UpgradeFormatVersion(3))
+	tbl, err = tx.Commit(ctx)
+	require.NoError(t, err)
+	require.Equal(t, []int64{2, 3}, idsInTable(t, tbl))
+
+	// id=1 is already covered by the v2 position-delete file, so this delete
+	// has no new positions to write as a DV.
+	tbl, err = tbl.Delete(ctx, iceberg.EqualTo(iceberg.Reference("id"), int64(1)), nil)
+	require.NoError(t, err)
+	require.Equal(t, []int64{2, 3}, idsInTable(t, tbl))
+	require.Zero(t, liveDVCount(t, tbl), "an empty delete must not write a DV")
+	require.Equal(t, 1, liveDeleteFileCount(t, tbl, iceberg.EntryContentPosDeletes),
+		"the original position-delete file must remain live")
+}
+
 // TestV3MergeOnReadUpgradePreservesPartitionedPositionDeletes checks that
 // legacy delete positions stay attached to their own partitioned data files.
 func TestV3MergeOnReadUpgradePreservesPartitionedPositionDeletes(t *testing.T) {
@@ -538,6 +570,15 @@ func TestV3MergeOnReadUpgradePreservesPartitionedPositionDeletes(t *testing.T) {
 		require.Empty(t, task.DeletionVectorFiles)
 	}
 
+	// Evolve the spec while the old files and delete files are still live. The
+	// first DVs must keep each data file's historical spec and partition.
+	evolve := tbl.NewTransaction()
+	require.NoError(t, evolve.UpdateSpec(true).AddIdentity("id").Commit())
+	tbl, err = evolve.Commit(ctx)
+	require.NoError(t, err)
+	currentSpec := tbl.Spec()
+	require.Equal(t, 1, currentSpec.ID())
+
 	tx := tbl.NewTransaction()
 	require.NoError(t, tx.UpgradeFormatVersion(3))
 	tbl, err = tx.Commit(ctx)
@@ -558,5 +599,12 @@ func TestV3MergeOnReadUpgradePreservesPartitionedPositionDeletes(t *testing.T) {
 	for _, task := range tasks {
 		require.Len(t, task.DeletionVectorFiles, 1)
 		require.Empty(t, task.DeleteFiles)
+		dvFile := task.DeletionVectorFiles[0]
+		require.Equal(t, task.File.SpecID(), dvFile.SpecID(),
+			"the DV must use the historical spec of its data file")
+		assert.Equal(t, task.File.Partition(), dvFile.Partition(),
+			"the DV must keep the historical partition of its data file")
+		require.NotEqual(t, int32(currentSpec.ID()), task.File.SpecID(),
+			"the data file must still use the historical spec after evolution")
 	}
 }

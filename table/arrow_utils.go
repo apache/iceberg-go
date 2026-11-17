@@ -2481,28 +2481,14 @@ func positionDeleteRecordsToDataFilesDV(ctx context.Context, rootLocation string
 			return metadata.PartitionSpecByID(int(id))
 		})
 
-		// Seed the writer with any deletion vector the referenced data file
-		// already carries so its previously deleted positions survive into the
-		// merged DV. The scan that produced args.itr does NOT apply the existing
-		// DVs (makePositionDeleteRecordsForFilter builds its FileScanTasks
-		// without DeleteFiles), so the incoming batches may re-report positions
-		// already in the old DV; re-Setting them on top of the seed is a no-op
-		// because the bitmap is idempotent. The seed is what guarantees the old
-		// positions survive — do not remove it, or a second delete would drop
-		// the earlier deletes and resurrect those rows. The spec allows at most
-		// one DV per data file, so the caller supersedes the old DV once this
-		// merged one is written.
+		// Seed a file's existing deletes only after a new position is found for
+		// it. A filter can select files from their stats even when no live row
+		// matches; seeding those files eagerly would turn an empty delete into a
+		// DV rewrite. The scan does not apply existing DVs, so skip positions
+		// already present in the seed before deciding that a replacement is
+		// needed.
 		hasEntries := false
-		for filePath, bitmap := range args.existingDVs {
-			pCtx, ok := partitionContextByFilePath[filePath]
-			if !ok {
-				yield(nil, fmt.Errorf("unexpected missing partition context for existing deletion vector path %s", filePath))
-
-				return
-			}
-			writer.Load(filePath, bitmap, pCtx.specID, pCtx.partitionData)
-			hasEntries = true
-		}
+		seededPaths := make(map[string]struct{}, len(args.existingDVs))
 
 		for batch, err := range args.itr {
 			if err != nil {
@@ -2522,7 +2508,23 @@ func positionDeleteRecordsToDataFilesDV(ctx context.Context, rootLocation string
 
 					return
 				}
-				if err := writer.AddPosition(filePath, positions.Value(int(i)), pCtx.specID, pCtx.partitionData); err != nil {
+				position := positions.Value(int(i))
+				if position < 0 {
+					yield(nil, fmt.Errorf("%w: invalid deletion position %d for %q: positions must be >= 0",
+						iceberg.ErrInvalidArgument, position, filePath))
+
+					return
+				}
+				if bitmap := args.existingDVs[filePath]; bitmap != nil && bitmap.Contains(uint64(position)) {
+					continue
+				}
+				if _, ok := seededPaths[filePath]; !ok {
+					if bitmap := args.existingDVs[filePath]; bitmap != nil {
+						writer.Load(filePath, bitmap, pCtx.specID, pCtx.partitionData)
+					}
+					seededPaths[filePath] = struct{}{}
+				}
+				if err := writer.AddPosition(filePath, position, pCtx.specID, pCtx.partitionData); err != nil {
 					yield(nil, err)
 
 					return

@@ -1025,17 +1025,21 @@ func (t *Transaction) writePositionDeletesForFiles(ctx context.Context, fs io.IO
 			}
 		}
 	}
-	for _, ref := range streamedPathOrder {
-		if _, ok := seen[ref]; !ok {
-			seen[ref] = struct{}{}
-			referenced = append(referenced, ref)
+	if meta.formatVersion < 3 {
+		for _, ref := range streamedPathOrder {
+			if _, ok := seen[ref]; !ok {
+				seen[ref] = struct{}{}
+				referenced = append(referenced, ref)
+			}
 		}
 	}
 
-	// Supersede the old DVs only after the merged replacements are staged, so a
-	// write failure above leaves the existing DVs untouched.
-	for _, dvFile := range existingDVs {
-		updater.removeDeletionVector(dvFile)
+	// Supersede an old DV only after a merged replacement was staged for its
+	// data file. A candidate file with no new positions keeps its old DV.
+	for dataFilePath, dvFile := range existingDVs {
+		if _, replaced := seen[dataFilePath]; replaced {
+			updater.removeDeletionVector(dvFile)
+		}
 	}
 
 	return referenced, nil
