@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"iter"
+	"maps"
 	"runtime"
 	"slices"
 	"strings"
@@ -984,9 +985,7 @@ func (t *Transaction) writePositionDeletesForFiles(ctx context.Context, fs io.IO
 	// once a DV applies to the data file.
 	existingDVs := make(map[string]iceberg.DataFile)
 	existingDVBitmaps := make(map[string]*dv.RoaringPositionBitmap, len(oldPositionDeletes.bitmaps)+len(dvs))
-	for path, bitmap := range oldPositionDeletes.bitmaps {
-		existingDVBitmaps[path] = bitmap
-	}
+	maps.Copy(existingDVBitmaps, oldPositionDeletes.bitmaps)
 	for _, df := range files {
 		entry, ok := dvs[df.FilePath()]
 		if !ok {
@@ -1165,6 +1164,7 @@ func (t *Transaction) makePositionDeleteRecordsForFilter(ctx context.Context, fs
 			bitmap, err := collectPosDeleteBitmap(positions)
 			if err != nil {
 				releasePerFilePosDeletes(deletesPerFile)
+
 				return nil, nil, fmt.Errorf("invalid existing position deletes for %s: %w", path, err)
 			}
 			if !bitmap.IsEmpty() {
