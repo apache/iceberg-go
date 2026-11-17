@@ -424,12 +424,7 @@ func (c *Catalog) isV0() bool { return c.schemaVersion == schemaV0 }
 //
 // SQLite callers that allow concurrent writers should configure WAL and a busy timeout in the driver DSN so the
 // settings apply to every pooled connection. NewCatalog does not mutate connection settings on the caller-owned db.
-func NewCatalog(name string, db *sql.DB, dialect SupportedDialect, props iceberg.Properties) (*Catalog, error) {
-	return NewCatalogWithOptions(name, db, dialect, props)
-}
-
-// NewCatalogWithOptions builds a SQL catalog with optional isolated FileIO wiring.
-func NewCatalogWithOptions(name string, db *sql.DB, dialect SupportedDialect, props iceberg.Properties, opts ...Option) (*Catalog, error) {
+func NewCatalog(name string, db *sql.DB, dialect SupportedDialect, props iceberg.Properties, opts ...Option) (*Catalog, error) {
 	d, err := getDialect(dialect)
 	if err != nil {
 		return nil, err
@@ -1710,7 +1705,7 @@ func (c *Catalog) CreateView(ctx context.Context, identifier table.Identifier, v
 		version.DefaultCatalog = c.name
 	}
 
-	createdView, err := view.CreateViewFromVersionWithRegistry(ctx, identifier, schema, version, loc, ioProps, cfg.Properties, c.ioRegistry)
+	createdView, err := view.CreateViewFromVersion(ctx, identifier, schema, version, loc, ioProps, cfg.Properties, view.WithIORegistry(c.ioRegistry))
 	if err != nil {
 		return nil, err
 	}
