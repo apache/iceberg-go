@@ -596,6 +596,30 @@ func validateDataFilesExist(cc *conflictContext, referencedPaths []string) error
 	return dataFilesMissingError(missing, "missing")
 }
 
+// validateNoConcurrentDVs returns an error wrapping ErrConflictingDeleteFiles
+// if a concurrently committed snapshot added a deletion vector for a data file
+// in targets. hint ends the error message. Errors reading the concurrent
+// snapshots' manifests are returned without ErrConflictingDeleteFiles.
+func validateNoConcurrentDVs(cc *conflictContext, targets map[string]struct{}, hint string) error {
+	if len(targets) == 0 {
+		return nil
+	}
+
+	return cc.forEachAddedEntry(iceberg.ManifestContentDeletes, func(snap Snapshot, entry iceberg.ManifestEntry) error {
+		df := entry.DataFile()
+		ref := explicitReferencedDataFile(df)
+		if !IsDeletionVector(df) || ref == "" {
+			return nil
+		}
+		if _, ok := targets[ref]; ok {
+			return fmt.Errorf("%w: cannot add a deletion vector for data file %s: concurrent snapshot %d committed a live deletion vector %s for it; %s",
+				ErrConflictingDeleteFiles, ref, snap.SnapshotID, df.FilePath(), hint)
+		}
+
+		return nil
+	})
+}
+
 // headDataFiles returns the paths in referenced that a delete staged next must still
 // find live on the branch head when the transaction commits (validateDataFilesExist).
 // It replays, oldest first, the data files added and removed by the staged snapshots
