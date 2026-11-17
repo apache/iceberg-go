@@ -272,8 +272,9 @@ func WithDeleteCaseInsensitive() DeleteOption {
 // On a v3 table, every data file the delete removes or rewrites takes its deletion vector with it.
 // A merge-on-read delete replaces the existing deletion vector of a file it deletes rows from.
 //
-// A commit that removes a deletion vector is not replayed: if another writer commits first,
-// it fails with ErrCommitFailed instead of refreshing and retrying, so reload the table and run the delete again.
+// A commit that removes a deletion vector or a legacy position-delete file is not
+// replayed: if another writer commits first, it fails with ErrCommitFailed instead
+// of refreshing and retrying, so reload the table and run the delete again.
 //
 // The concurrency parameter controls the level of parallelism for manifest processing and file rewriting and
 // can be overridden using the WithOverwriteConcurrency option. Defaults to runtime.GOMAXPROCS(0).
@@ -984,8 +985,8 @@ func (t *Transaction) writePositionDeletesForFiles(ctx context.Context, fs io.IO
 	// must include those positions because readers ignore position deletes
 	// once a DV applies to the data file.
 	existingDVs := make(map[string]iceberg.DataFile)
-	existingDVBitmaps := make(map[string]*dv.RoaringPositionBitmap, len(oldPositionDeletes.bitmaps)+len(dvs))
-	maps.Copy(existingDVBitmaps, oldPositionDeletes.bitmaps)
+	existingDeletes := make(map[string]*dv.RoaringPositionBitmap, len(oldPositionDeletes.bitmaps)+len(dvs))
+	maps.Copy(existingDeletes, oldPositionDeletes.bitmaps)
 	for _, df := range files {
 		entry, ok := dvs[df.FilePath()]
 		if !ok {
@@ -995,11 +996,11 @@ func (t *Transaction) writePositionDeletesForFiles(ctx context.Context, fs io.IO
 		if err != nil {
 			return nil, fmt.Errorf("failed to read existing deletion vector for %s: %w", df.FilePath(), err)
 		}
-		if oldPositions, ok := existingDVBitmaps[df.FilePath()]; ok {
+		if oldPositions, ok := existingDeletes[df.FilePath()]; ok {
 			bitmap.Or(oldPositions)
 		}
 		existingDVs[df.FilePath()] = entry.DataFile()
-		existingDVBitmaps[df.FilePath()] = bitmap
+		existingDeletes[df.FilePath()] = bitmap
 	}
 
 	posDeleteFiles := positionDeleteRecordsToDataFiles(ctx, meta.loc, meta, partitionContextByFilePath, recordWritingArgs{
@@ -1007,7 +1008,7 @@ func (t *Transaction) writePositionDeletesForFiles(ctx context.Context, fs io.IO
 		itr:         recordsWithPaths,
 		writeUUID:   &commitUUID,
 		fs:          wfs,
-		existingDVs: existingDVBitmaps,
+		existingDeletes: existingDeletes,
 	})
 
 	var referenced []string
