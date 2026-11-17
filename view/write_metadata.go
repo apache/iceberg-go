@@ -32,15 +32,6 @@ import (
 	"github.com/google/uuid"
 )
 
-// WriteMetadata writes a new view metadata file and returns its location and
-// filesystem. The directory comes from table.WriteMetadataPathKey, or defaults
-// to <view location>/metadata. Each file has a fresh view-<uuid>.metadata.json
-// name. ioProps configures the filesystem and is not persisted in the metadata.
-//
-// Failed writes and closes remove the incomplete file without inheriting
-// cancellation. After a successful write, the caller owns publication and may
-// use the returned filesystem to remove the file after a confirmed failed
-// commit. A commit with an unknown outcome must retain the file.
 // MetadataIOOption configures the filesystem used to write view metadata.
 // This is distinct from Option, which configures a loaded View.
 type MetadataIOOption func(*metadataIOOptions)
@@ -55,12 +46,22 @@ func WithIORegistry(registry *icebergio.Registry) MetadataIOOption {
 	return func(o *metadataIOOptions) { o.registry = registry }
 }
 
-// WriteMetadata writes view metadata through the configured FileIO registry.
+// WriteMetadata writes a new view metadata file and returns its location and
+// filesystem. The directory comes from table.WriteMetadataPathKey, or defaults
+// to <view location>/metadata. Each file has a fresh view-<uuid>.metadata.json
+// name. ioProps configures the filesystem and is not persisted in the metadata.
+//
+// Failed writes and closes remove the incomplete file without inheriting
+// cancellation. After a successful write, the caller owns publication and may
+// use the returned filesystem to remove the file after a confirmed failed
+// commit. A commit with an unknown outcome must retain the file.
+// WithIORegistry selects an isolated filesystem for this write.
 func WriteMetadata(ctx context.Context, metadata Metadata, ioProps iceberg.Properties, opts ...MetadataIOOption) (string, icebergio.WriteFileIO, error) {
 	var config metadataIOOptions
 	for _, opt := range opts {
 		opt(&config)
 	}
+
 	if err := ctx.Err(); err != nil {
 		return "", nil, err
 	}
