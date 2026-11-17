@@ -853,6 +853,8 @@ if err != nil { /* ... */ }
 newTbl, err := txn.Commit(ctx)
 ```
 
+Snapshot expiration requires complete snapshot history. REST catalogs using `snapshot-loading-mode=refs` cannot stage `Transaction.ExpireSnapshots`; use `snapshot-loading-mode=all` before expiring snapshots. If a retry or resumed commit reloads refs-only history, it returns `table.ErrTransactionUnusable`. Reload with all snapshots and start a new transaction.
+
 Pass `table.WithPostCommit(true)` to delete the unreferenced data and metadata files after the commit lands. The `iceberg expire-snapshots` CLI command wraps the same operation - see [CLI](./cli.md).
 
 ## Views
