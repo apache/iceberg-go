@@ -133,7 +133,7 @@ func TestPositionDeleteFilesSortedByPathAndPosition(t *testing.T) {
 	require.NoError(t, txn.SetProperties(iceberg.Properties{ParquetBatchSizeKey: "1"}))
 
 	files := []iceberg.DataFile{tasks[2].File, tasks[1].File, tasks[0].File}
-	records, err := txn.makePositionDeleteRecordsForFilter(t.Context(), fs, files,
+	records, _, err := txn.makePositionDeleteRecordsForFilter(t.Context(), fs, files,
 		iceberg.GreaterThanEqual(iceberg.Reference("id"), int64(0)), true, 3)
 	require.NoError(t, err)
 	meta, err := txn.txnMeta()
