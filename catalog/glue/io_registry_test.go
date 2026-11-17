@@ -61,6 +61,40 @@ func TestGlueLoadTableWithIsolatedIORegistry(t *testing.T) {
 	client.AssertExpectations(t)
 }
 
+func TestGlueRegisterTableUsesScopedIORegistry(t *testing.T) {
+	const scheme = "glue-register-private"
+	const metadataLocation = scheme + "://bucket/table/metadata/v1.metadata.json"
+	registry := &iceio.Registry{}
+	fs := iceio.NewMemFS()
+	require.NoError(t, registry.Register(scheme, func(context.Context, *url.URL, map[string]string) (iceio.IO, error) {
+		return fs, nil
+	}))
+	contents, err := os.ReadFile("../../table/testdata/TableMetadataV2Valid.json")
+	require.NoError(t, err)
+	require.NoError(t, fs.WriteFile(t.Context(), metadataLocation, contents))
+
+	client := &mockGlueClient{}
+	client.On("CreateTable", mock.Anything, mock.Anything, mock.Anything).
+		Return(&awsglue.CreateTableOutput{}, nil).Once()
+	client.On("GetTable", mock.Anything, mock.Anything, mock.Anything).
+		Return(&awsglue.GetTableOutput{Table: &types.Table{
+			Name: aws.String("tbl"), DatabaseName: aws.String("db"), TableType: aws.String(glueTableType),
+			Parameters: map[string]string{tableParamTableType: glueTypeIceberg, tableParamMetadataLocation: metadataLocation},
+		}}, nil).Once()
+
+	cat, err := NewCatalog(WithAWSConfig(aws.Config{Region: "us-east-1"}), WithIORegistry(registry))
+	require.NoError(t, err)
+	cat.glueSvc = client
+	registered, err := cat.RegisterTable(t.Context(), TableIdentifier("db", "tbl"), metadataLocation)
+	require.NoError(t, err)
+	loadedFS, err := registered.FS(t.Context())
+	require.NoError(t, err)
+	require.Same(t, fs, loadedFS)
+	_, err = iceio.LoadFS(t.Context(), nil, metadataLocation)
+	require.ErrorIs(t, err, iceio.ErrIOSchemeNotFound)
+	client.AssertExpectations(t)
+}
+
 func TestGlueCatalogsWithSameSchemeStayIsolated(t *testing.T) {
 	const scheme = "glue-shared-scheme"
 	const metadataLocation = scheme + "://bucket/table/metadata.json"
