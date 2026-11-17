@@ -37,6 +37,7 @@ import (
 	"github.com/apache/iceberg-go/internal/scanmetrics"
 	"github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/metrics"
+	tblutils "github.com/apache/iceberg-go/table/internal"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -123,11 +124,9 @@ func newKeyDefaultMapWrapErr[K comparable, V any](factory func(K) (V, error)) *k
 	}
 }
 
-type partitionRecord []any
-
-func (p partitionRecord) Size() int            { return len(p) }
-func (p partitionRecord) Get(pos int) any      { return p[pos] }
-func (p partitionRecord) Set(pos int, val any) { p[pos] = val }
+// partitionRecord is the positional partition record shared with the
+// metadata-table helpers in table/internal.
+type partitionRecord = tblutils.PartitionRecord
 
 // borrowedPartitionRecord exposes a DataFile's immutable partition map in
 // partition-field order without materializing a positional record or cloning
@@ -355,24 +354,10 @@ func flattenClassifiedManifestEntries(results []classifiedManifestEntries) *mani
 	return flattened
 }
 
-func newPartitionRecord(partitionData map[int]any, partitionType *iceberg.StructType) partitionRecord {
-	out := make(partitionRecord, partitionType.NumFields())
-	for i := range partitionType.NumFields() {
-		value := partitionData[partitionType.Field(i).ID]
-		if bytes, ok := value.([]byte); ok {
-			out[i] = slices.Clone(bytes)
-		} else {
-			out[i] = value
-		}
-	}
-
-	return out
-}
-
 // GetPartitionRecord converts a DataFile's partition map into a positional
 // record ordered by the fields of the given partition struct type.
 func GetPartitionRecord(dataFile iceberg.DataFile, partitionType *iceberg.StructType) iceberg.StructLike {
-	return newPartitionRecord(dataFilePartition(dataFile), partitionType)
+	return tblutils.NewPartitionRecord(dataFilePartition(dataFile), partitionType)
 }
 
 func openManifest(ctx context.Context, io io.IO, manifest iceberg.ManifestFile,
