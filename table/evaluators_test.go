@@ -1328,7 +1328,7 @@ func (p *ProjectionTestSuite) TestInvalidBuiltInMultiSourceFieldDoesNotPrune() {
 	// Reusing that summary with the malformed historical spec proves that the
 	// malformed field no longer produces the unsafe unary projection.
 	var excludedManifest iceberg.ManifestFile
-	for bucket := int32(0); bucket < 16; bucket++ {
+	for bucket := range int32(16) {
 		bound, err := iceberg.Int32Literal(bucket).MarshalBinary()
 		p.Require().NoError(err)
 		manifest := iceberg.NewManifestBuilder(2, "manifest.avro", 0, 1, 1).
