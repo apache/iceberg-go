@@ -85,7 +85,7 @@ func (c *Catalog) CreateTable(ctx context.Context, ident table.Identifier, sc *i
 	}
 
 	metaDir := c.metadataDir(ident)
-	if err := c.filesystem.MkdirAll(metaDir); err != nil {
+	if err := c.filesystem.MkdirAll(ctx, metaDir); err != nil {
 		return nil, fmt.Errorf("hadoop catalog: failed to create metadata directory: %w", err)
 	}
 
@@ -231,7 +231,7 @@ func (c *Catalog) CommitTable(ctx context.Context, ident table.Identifier, reqs 
 
 	// Step 7: Create metadata directory if needed (create-via-commit).
 	metaDir := c.metadataDir(ident)
-	if err := c.filesystem.MkdirAll(metaDir); err != nil {
+	if err := c.filesystem.MkdirAll(ctx, metaDir); err != nil {
 		return nil, "", fmt.Errorf("hadoop catalog: failed to create metadata directory: %w", err)
 	}
 
@@ -437,7 +437,7 @@ func (c *Catalog) DropTable(ctx context.Context, ident table.Identifier) error {
 
 	tablePath := c.tableToPath(ident)
 
-	return c.filesystem.RemoveAll(tablePath)
+	return c.filesystem.RemoveAll(ctx, tablePath)
 }
 
 func (c *Catalog) PurgeTable(ctx context.Context, identifier table.Identifier) error {
@@ -456,10 +456,10 @@ func (c *Catalog) PurgeTable(ctx context.Context, identifier table.Identifier) e
 	}
 
 	if !tbl.Metadata().Properties().GetBool("gc.enabled", true) {
-		return c.filesystem.RemoveAll(c.metadataDir(identifier))
+		return c.filesystem.RemoveAll(ctx, c.metadataDir(identifier))
 	}
 
-	return c.filesystem.RemoveAll(c.tableToPath(identifier))
+	return c.filesystem.RemoveAll(ctx, c.tableToPath(identifier))
 }
 
 func (c *Catalog) RenameTable(_ context.Context, _, _ table.Identifier) (*table.Table, error) {
