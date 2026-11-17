@@ -131,7 +131,7 @@ func newNamespaceRaceCatalog(t *testing.T) *Catalog {
 	// '#' (duplicate subtest names get a "#01" suffix), which a raw
 	// "file://" + path would turn into a fragment.
 	warehouse := filepath.Join(t.TempDir(), "warehouse")
-	cat, err := NewCatalog("default", db, SQLite, iceberg.Properties{
+	cat, err := NewCatalog(context.Background(), "default", db, SQLite, iceberg.Properties{
 		"warehouse": (&url.URL{Scheme: "file", Path: filepath.ToSlash(warehouse)}).String(),
 	})
 	require.NoError(t, err)

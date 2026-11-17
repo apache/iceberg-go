@@ -47,7 +47,7 @@ func newWriteLockCatalog(t *testing.T, busyTimeout time.Duration) (*Catalog, str
 	_, err = db.Exec("PRAGMA journal_mode=WAL")
 	require.NoError(t, err)
 
-	cat, err := NewCatalog("default", db, SQLite, iceberg.Properties{
+	cat, err := NewCatalog(t.Context(), "default", db, SQLite, iceberg.Properties{
 		"warehouse": "file://" + filepath.ToSlash(filepath.Join(t.TempDir(), "warehouse")),
 	})
 	require.NoError(t, err)
@@ -202,7 +202,7 @@ func TestWriteRetriesSharedCacheTableLock(t *testing.T) {
 	db, err := dbsql.Open(sqliteshim.ShimName, dsn)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
-	cat, err := NewCatalog("default", db, SQLite, iceberg.Properties{
+	cat, err := NewCatalog(t.Context(), "default", db, SQLite, iceberg.Properties{
 		"warehouse": "file://" + filepath.ToSlash(filepath.Join(t.TempDir(), "warehouse")),
 	})
 	require.NoError(t, err)
@@ -242,7 +242,7 @@ func TestReadOnlyDatabaseKeepsCatalogSentinels(t *testing.T) {
 
 	rw, err := dbsql.Open(sqliteshim.ShimName, dbPath)
 	require.NoError(t, err)
-	writable, err := NewCatalog("default", rw, SQLite, props)
+	writable, err := NewCatalog(ctx, "default", rw, SQLite, props)
 	require.NoError(t, err)
 	require.NoError(t, writable.CreateNamespace(ctx, ns, nil))
 	_, err = writable.CreateTable(ctx, tbl, schema)
@@ -253,7 +253,7 @@ func TestReadOnlyDatabaseKeepsCatalogSentinels(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = ro.Close() })
 	props[initCatalogTablesKey] = "false"
-	cat, err := NewCatalog("default", ro, SQLite, props)
+	cat, err := NewCatalog(ctx, "default", ro, SQLite, props)
 	require.NoError(t, err)
 
 	require.ErrorIs(t, cat.CreateNamespace(ctx, ns, nil), catalog.ErrNamespaceAlreadyExists)
