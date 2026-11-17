@@ -203,6 +203,11 @@ type Catalog struct {
 // is not created on construction; it is created implicitly by the first CreateNamespace
 // call. When using other schemes, the property `allow-unsafe-commits` must be set to
 // true since custom schemes and blob filesystems do not have the same atomicity guarantees.
+//
+// Pass WithIORegistry(registry) to use a catalog-specific filesystem registry.
+// A nil or omitted registry uses global FileIO; a non-nil empty registry does
+// not fall back to built-in schemes. The registry is shared, not copied, and
+// subsequent registry changes affect future FileIO resolutions.
 func NewCatalog(ctx context.Context, name, warehouse string, props iceberg.Properties, opts ...Option) (*Catalog, error) {
 	var config catalogOptions
 	for _, opt := range opts {
