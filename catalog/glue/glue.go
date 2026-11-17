@@ -203,12 +203,12 @@ func NewCatalog(opts ...Option) (*Catalog, error) {
 	}
 
 	cat := &Catalog{
+		name:       glueOps.name,
 		glueSvc:    glue.NewFromConfig(glueOps.awsConfig),
 		catalogId:  catalogId,
 		awsCfg:     &glueOps.awsConfig,
 		props:      iceberg.Properties(glueOps.awsProperties),
 		ioRegistry: glueOps.ioRegistry,
-		name:       glueOps.name,
 	}
 
 	// Resolve the metrics reporter once, up front. CachedReporter caches the
