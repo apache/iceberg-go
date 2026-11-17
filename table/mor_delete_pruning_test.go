@@ -437,6 +437,13 @@ func TestV3MergeOnReadUpgradePreservesPositionDeletes(t *testing.T) {
 			require.Equal(t, tt.wantV3, idsInTable(t, tbl),
 				"the first v3 DV must preserve previously deleted rows")
 			require.Equal(t, 1, liveDVCount(t, tbl))
+			if tt.shared {
+				require.Equal(t, 1, liveDeleteFileCount(t, tbl, iceberg.EntryContentPosDeletes),
+					"a shared legacy delete file must remain live")
+			} else {
+				require.Zero(t, liveDeleteFileCount(t, tbl, iceberg.EntryContentPosDeletes),
+					"file-scoped legacy deletes must be removed after their DV replacement")
+			}
 
 			tasks, err := tbl.Scan().PlanFiles(ctx)
 			require.NoError(t, err)
@@ -498,6 +505,8 @@ func TestV3MergeOnReadUpgradeMergesMultiplePositionDeleteFiles(t *testing.T) {
 	require.Equal(t, []int64{4, 5}, idsInTable(t, tbl),
 		"the first DV must include both older position-delete files")
 	require.Equal(t, 1, liveDVCount(t, tbl))
+	require.Zero(t, liveDeleteFileCount(t, tbl, iceberg.EntryContentPosDeletes),
+		"both file-scoped legacy delete files must be removed")
 
 	tasks, err = tbl.Scan().PlanFiles(ctx)
 	require.NoError(t, err)
@@ -592,6 +601,8 @@ func TestV3MergeOnReadUpgradePreservesPartitionedPositionDeletes(t *testing.T) {
 	require.Equal(t, []int64{3, 6}, idsInTable(t, tbl),
 		"each new DV must preserve deletes from its own partitioned data file")
 	require.Equal(t, 2, liveDVCount(t, tbl))
+	require.Zero(t, liveDeleteFileCount(t, tbl, iceberg.EntryContentPosDeletes),
+		"partitioned file-scoped deletes must be removed after DV replacement")
 
 	tasks, err = tbl.Scan().PlanFiles(ctx)
 	require.NoError(t, err)

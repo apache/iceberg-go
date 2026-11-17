@@ -983,8 +983,8 @@ func (t *Transaction) writePositionDeletesForFiles(ctx context.Context, fs io.IO
 	// must include those positions because readers ignore position deletes
 	// once a DV applies to the data file.
 	existingDVs := make(map[string]iceberg.DataFile)
-	existingDVBitmaps := make(map[string]*dv.RoaringPositionBitmap, len(oldPositionDeletes)+len(dvs))
-	for path, bitmap := range oldPositionDeletes {
+	existingDVBitmaps := make(map[string]*dv.RoaringPositionBitmap, len(oldPositionDeletes.bitmaps)+len(dvs))
+	for path, bitmap := range oldPositionDeletes.bitmaps {
 		existingDVBitmaps[path] = bitmap
 	}
 	for _, df := range files {
@@ -1034,8 +1034,17 @@ func (t *Transaction) writePositionDeletesForFiles(ctx context.Context, fs io.IO
 		}
 	}
 
-	// Supersede an old DV only after a merged replacement was staged for its
-	// data file. A candidate file with no new positions keeps its old DV.
+	// Supersede only deletes for files that received a replacement DV.
+	// File-scoped legacy position deletes are now represented by that DV;
+	// shared position-delete files must stay live for their other targets.
+	for dataFilePath, deleteFiles := range oldPositionDeletes.fileScoped {
+		if _, replaced := seen[dataFilePath]; !replaced {
+			continue
+		}
+		for _, deleteFile := range deleteFiles {
+			updater.removeDeleteFile(deleteFile)
+		}
+	}
 	for dataFilePath, dvFile := range existingDVs {
 		if _, replaced := seen[dataFilePath]; replaced {
 			updater.removeDeletionVector(dvFile)
@@ -1045,7 +1054,12 @@ func (t *Transaction) writePositionDeletesForFiles(ctx context.Context, fs io.IO
 	return referenced, nil
 }
 
-func (t *Transaction) makePositionDeleteRecordsForFilter(ctx context.Context, fs io.IO, files []iceberg.DataFile, filter iceberg.BooleanExpression, caseSensitive bool, concurrency int) (seq2 iter.Seq2[arrow.RecordBatch, error], oldPositionDeletes map[string]*dv.RoaringPositionBitmap, err error) {
+type legacyPositionDeletes struct {
+	bitmaps    map[string]*dv.RoaringPositionBitmap
+	fileScoped map[string][]iceberg.DataFile
+}
+
+func (t *Transaction) makePositionDeleteRecordsForFilter(ctx context.Context, fs io.IO, files []iceberg.DataFile, filter iceberg.BooleanExpression, caseSensitive bool, concurrency int) (seq2 iter.Seq2[arrow.RecordBatch, error], oldPositionDeletes *legacyPositionDeletes, err error) {
 	meta, err := t.txnMeta()
 	if err != nil {
 		return nil, nil, err
@@ -1141,11 +1155,12 @@ func (t *Transaction) makePositionDeleteRecordsForFilter(ctx context.Context, fs
 		return nil, nil, err
 	}
 
+	oldPositionDeletes = &legacyPositionDeletes{}
 	// Reuse the planner-matched position deletes when upgrading a v2 table to
 	// v3. They have already been read for filtering out previously deleted
 	// rows, so turning them into DV seeds does not require another file read.
-	if meta.formatVersion >= 3 && len(deletesPerFile) > 0 {
-		oldPositionDeletes = make(map[string]*dv.RoaringPositionBitmap, len(deletesPerFile))
+	if meta.formatVersion >= 3 {
+		oldPositionDeletes.bitmaps = make(map[string]*dv.RoaringPositionBitmap, len(deletesPerFile))
 		for path, positions := range deletesPerFile {
 			bitmap, err := collectPosDeleteBitmap(positions)
 			if err != nil {
@@ -1153,7 +1168,22 @@ func (t *Transaction) makePositionDeleteRecordsForFilter(ctx context.Context, fs
 				return nil, nil, fmt.Errorf("invalid existing position deletes for %s: %w", path, err)
 			}
 			if !bitmap.IsEmpty() {
-				oldPositionDeletes[path] = bitmap
+				oldPositionDeletes.bitmaps[path] = bitmap
+			}
+		}
+
+		// Java considers a position-delete file file-scoped when it has an
+		// explicit referenced_data_file or equal file_path bounds. Only such
+		// files can be removed once their target receives a replacement DV.
+		oldPositionDeletes.fileScoped = make(map[string][]iceberg.DataFile)
+		for _, task := range tasks {
+			path := task.File.FilePath()
+			for _, deleteFile := range task.DeleteFiles {
+				if deleteFile.ContentType() != iceberg.EntryContentPosDeletes ||
+					IsDeletionVector(deleteFile) || referencedDataFilePath(deleteFile) != path {
+					continue
+				}
+				oldPositionDeletes.fileScoped[path] = append(oldPositionDeletes.fileScoped[path], deleteFile)
 			}
 		}
 	}
