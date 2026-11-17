@@ -29,12 +29,12 @@ import (
 // UnifiedPartitionType returns the table-wide partition type for specs,
 // resolved against currentSchema. It contains the union of partition fields
 // from every spec, which lets metadata tables represent live files written
-// before partition evolution. specs is sorted in place, so callers pass a
-// copy such as Metadata.PartitionSpecs.
+// before partition evolution.
 func UnifiedPartitionType(
 	specs []iceberg.PartitionSpec,
 	currentSchema *iceberg.Schema,
 ) (*iceberg.StructType, error) {
+	specs = slices.Clone(specs)
 	sort.Slice(specs, func(left, right int) bool {
 		return specs[left].ID() > specs[right].ID()
 	})

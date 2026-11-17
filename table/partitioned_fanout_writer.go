@@ -82,9 +82,9 @@ type partitionExtractionPlan struct {
 }
 
 func partitionValuesEqual(left, right any) bool {
-	// Supported partition values are primitive literals; []byte is converted to
-	// a string key and float values are converted to comparable width-aware keys
-	// above. The default branch preserves comparable scalar values.
+	// Supported partition values are primitive literals. ComparablePartitionKey
+	// converts []byte to a string key and float values to comparable
+	// width-aware keys, and preserves other comparable scalar values.
 	return tblutils.ComparablePartitionKey(left) == tblutils.ComparablePartitionKey(right)
 }
 

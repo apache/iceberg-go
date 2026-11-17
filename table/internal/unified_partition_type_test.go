@@ -35,8 +35,11 @@ func TestUnifiedPartitionTypeUsesAllActiveSpecs(t *testing.T) {
 	newSpec := iceberg.NewPartitionSpecID(1, iceberg.PartitionField{
 		SourceIDs: []int{2}, FieldID: 1001, Name: "category", Transform: iceberg.IdentityTransform{},
 	})
-	partitionType, err := UnifiedPartitionType([]iceberg.PartitionSpec{oldSpec, newSpec}, schema)
+	specs := []iceberg.PartitionSpec{oldSpec, newSpec}
+	partitionType, err := UnifiedPartitionType(specs, schema)
 	require.NoError(t, err)
+	// UnifiedPartitionType sorts by spec ID internally; the caller's slice keeps its order.
+	require.Equal(t, []int{0, 1}, []int{specs[0].ID(), specs[1].ID()})
 	require.Equal(t, []int{1000, 1001}, []int{
 		partitionType.Field(0).ID,
 		partitionType.Field(1).ID,
