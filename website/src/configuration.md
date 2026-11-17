@@ -255,12 +255,12 @@ Source: [`catalog/glue/options.go`](https://github.com/apache/iceberg-go/blob/ma
 
 ### SQL (`catalog/sql`)
 
-Construct a SQL catalog with `NewCatalog`. Pass `sqlcat.WithIORegistry(registry)` as an optional final argument to select an isolated FileIO registry:
+Construct a SQL catalog with `NewCatalogWithOptions` and `sqlcat.WithIORegistry(registry)` to select isolated FileIO. The original `NewCatalog` retains its function signature:
 
 ```go
 db, _ := sql.Open(sqliteshim.ShimName, "file:catalog.db")
 registry := io.NewRegistry() // copy currently registered global schemes
-cat, err := sqlcat.NewCatalog("default", db, sqlcat.SQLite, iceberg.Properties{
+cat, err := sqlcat.NewCatalogWithOptions("default", db, sqlcat.SQLite, iceberg.Properties{
     "warehouse": "file:///tmp/warehouse",
 }, sqlcat.WithIORegistry(registry)) // omit option for global FileIO
 ```
@@ -461,14 +461,14 @@ fs, err := registry.LoadFS(ctx, props, "myfs://bucket/key")
 
 `io.NewRegistry()` copies schemes already registered globally (including blank-imported cloud backends) but keeps later registrations independent. `registry.Clone()` makes an isolated copy of another registry. `registry.Names()` lists the schemes registered in that instance. `registry.LoadFSFunc()` is the lazy factory equivalent. Global `io.LoadFS()` and `io.LoadFSFunc()` continue using the default registry.
 
-To use an isolated registry, pass `glue.WithIORegistry(registry)`, `hive.WithIORegistry(registry)`, or `rest.WithIORegistry(registry)` to those catalogs' constructors. Hadoop and SQL accept optional `hadoop.WithIORegistry(registry)` and `sql.WithIORegistry(registry)` arguments directly in their existing `NewCatalog` functions. For direct view metadata creation, pass `view.WithIORegistry(registry)` to `view.CreateView`, `view.CreateViewWithIOProperties`, `view.CreateViewFromVersion`, or `view.WriteMetadata`. Omitting the option (or passing nil) keeps the global registry. An empty non-nil registry does **not** fall back to global schemes. `catalog.Load` still uses the global registry through built-in catalog registrars.
+To use an isolated registry, pass `glue.WithIORegistry(registry)`, `hive.WithIORegistry(registry)`, or `rest.WithIORegistry(registry)` to those catalogs' constructors. Hadoop and SQL use `hadoop.NewCatalogWithOptions` and `sql.NewCatalogWithOptions` with `WithIORegistry(registry)`. For direct view metadata creation, pass `view.WithIORegistry(registry)` to `view.CreateViewWithOptions`, `view.CreateViewWithIOPropertiesAndOptions`, `view.CreateViewFromVersionWithOptions`, or `view.WriteMetadataWithOptions`. The original function signatures remain unchanged. Omitting the option (or passing nil) keeps the global registry. An empty non-nil registry does **not** fall back to global schemes. `catalog.Load` still uses the global registry through built-in catalog registrars.
 
 The registry is **shared by pointer**, not frozen or copied by the catalog:
 calling `registry.Register` or `registry.Unregister` afterward changes which
 factories future loads can use. `io.NewRegistry()` copies factories currently
 registered globally, whereas `&io.Registry{}` starts empty. Neither option
 changes the global registry or registers a catalog type with `catalog.Load`.
-Construct a scoped catalog directly with `NewCatalog` and its registry option.
+Construct a scoped Hadoop or SQL catalog directly with `NewCatalogWithOptions` and a registry option.
 The DynamoDB catalog is not currently wired for a scoped registry.
 
 View metadata creation accepts the same scoped registry option, but reading

@@ -35,7 +35,7 @@ func TestHadoopConstructorUsesIsolatedIORegistry(t *testing.T) {
 		return fs, nil
 	}))
 
-	cat, err := NewCatalog(t.Context(), "test", "hadoop-isolated://bucket/warehouse",
+	cat, err := NewCatalogWithOptions(t.Context(), "test", "hadoop-isolated://bucket/warehouse",
 		iceberg.Properties{"allow-unsafe-commits": "true"}, WithIORegistry(registry))
 	require.NoError(t, err)
 	require.Same(t, fs, cat.filesystem)
@@ -46,7 +46,7 @@ func TestHadoopConstructorUsesIsolatedIORegistry(t *testing.T) {
 }
 
 func TestHadoopEmptyRegistryCannotUseGlobalLocalBackend(t *testing.T) {
-	_, err := NewCatalog(t.Context(), "test", t.TempDir(), nil, WithIORegistry(&iceio.Registry{}))
+	_, err := NewCatalogWithOptions(t.Context(), "test", t.TempDir(), nil, WithIORegistry(&iceio.Registry{}))
 	require.ErrorIs(t, err, iceio.ErrIOSchemeNotFound)
 }
 
@@ -58,7 +58,7 @@ func TestHadoopRegistryUsedForTableCreateAndLoad(t *testing.T) {
 
 		return iceio.LocalFS{}, nil
 	}))
-	cat, err := NewCatalog(t.Context(), "test", t.TempDir(), nil, WithIORegistry(registry))
+	cat, err := NewCatalogWithOptions(t.Context(), "test", t.TempDir(), nil, WithIORegistry(registry))
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, cat.Close()) })
 	require.NoError(t, cat.CreateNamespace(t.Context(), []string{"db"}, nil))
@@ -97,7 +97,7 @@ func TestHadoopCatalogsWithSameSchemeStayIsolated(t *testing.T) {
 		require.NoError(t, registry.Register("hadoop-shared-scheme", func(context.Context, *url.URL, map[string]string) (iceio.IO, error) {
 			return fs, nil
 		}))
-		cat, err := NewCatalog(t.Context(), "test", warehouse,
+		cat, err := NewCatalogWithOptions(t.Context(), "test", warehouse,
 			iceberg.Properties{"allow-unsafe-commits": "true"}, WithIORegistry(registry))
 		require.NoError(t, err)
 		catalogs[i] = cat

@@ -425,11 +425,17 @@ func (c *Catalog) isV0() bool { return c.schemaVersion == schemaV0 }
 // SQLite callers that allow concurrent writers should configure WAL and a busy timeout in the driver DSN so the
 // settings apply to every pooled connection. NewCatalog does not mutate connection settings on the caller-owned db.
 //
-// Pass WithIORegistry(registry) to use isolated FileIO factories for table
+// Use NewCatalogWithOptions and WithIORegistry(registry) for isolated FileIO factories for table
 // and view metadata. Omitting this option or passing nil uses global FileIO.
 // The registry is shared, not copied; later changes affect future loads and
 // metadata writes. The caller continues to own db.
-func NewCatalog(name string, db *sql.DB, dialect SupportedDialect, props iceberg.Properties, opts ...Option) (*Catalog, error) {
+func NewCatalog(name string, db *sql.DB, dialect SupportedDialect, props iceberg.Properties) (*Catalog, error) {
+	return NewCatalogWithOptions(name, db, dialect, props)
+}
+
+// NewCatalogWithOptions creates a SQL catalog with optional configuration.
+// WithIORegistry selects a catalog-scoped FileIO registry; without it, global FileIO is used.
+func NewCatalogWithOptions(name string, db *sql.DB, dialect SupportedDialect, props iceberg.Properties, opts ...Option) (*Catalog, error) {
 	d, err := getDialect(dialect)
 	if err != nil {
 		return nil, err
@@ -1710,7 +1716,7 @@ func (c *Catalog) CreateView(ctx context.Context, identifier table.Identifier, v
 		version.DefaultCatalog = c.name
 	}
 
-	createdView, err := view.CreateViewFromVersion(ctx, identifier, schema, version, loc, ioProps, cfg.Properties, view.WithIORegistry(c.ioRegistry))
+	createdView, err := view.CreateViewFromVersionWithOptions(ctx, identifier, schema, version, loc, ioProps, cfg.Properties, view.WithIORegistry(c.ioRegistry))
 	if err != nil {
 		return nil, err
 	}
