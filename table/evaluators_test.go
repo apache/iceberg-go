@@ -1341,6 +1341,7 @@ func (p *ProjectionTestSuite) TestInvalidBuiltInMultiSourceFieldDoesNotPrune() {
 		p.Require().NoError(err)
 		if !matches {
 			excludedManifest = manifest
+
 			break
 		}
 	}
