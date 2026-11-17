@@ -194,7 +194,6 @@ func TestCaseInsensitiveFiltersRemainBoundAfterConcurrentAppend(t *testing.T) {
 	}
 	for _, tt := range tests {
 		for _, scenario := range scenarios {
-			tt, scenario := tt, scenario
 			t.Run(tt.name+"/"+scenario.name, func(t *testing.T) {
 				ctx := context.Background()
 				tbl := newCaseInsensitiveRetryTable(t, tt.writeDeleteMode)
@@ -246,7 +245,6 @@ func TestCaseInsensitiveConflictValidationUsesPartitionProjection(t *testing.T) 
 	}
 	for _, operation := range operations {
 		for _, scenario := range scenarios {
-			operation, scenario := operation, scenario
 			t.Run(operation.name+"/"+scenario.name, func(t *testing.T) {
 				ctx := context.Background()
 				tbl := newPartitionedCaseInsensitiveRetryTable(t, table.WriteModeMergeOnRead)
