@@ -595,10 +595,10 @@ func TestDynamicPartitionOverwriteKeepsDeleteForSurvivingOldSpecData(t *testing.
 	require.NotZero(t, fieldID)
 	nullPartition := map[int]any{fieldID: nil}
 
-	// A v2 position delete can target an old-spec data file even if its
-	// manifest stores it under a new partition tuple with a null value.
-	posDelete := newTestPosDeleteFileForSpec(t, currentSpec, "file://old-spec-delete.parquet",
-		nullPartition, oldData.FilePath())
+	// A v2 position delete for an old-spec data file carries that file's
+	// spec and partition; overwriting the new spec's partitions must keep it.
+	posDelete := newTestPosDeleteFileForSpec(t, oldSpec, "file://old-spec-delete.parquet",
+		map[int]any{1000: int32(1)}, oldData.FilePath())
 	addDelete := New(Identifier{"db", "tbl"}, evolved, "metadata.json", fsF, nil).NewTransaction()
 	require.NoError(t, addDelete.NewRowDelta(nil).AddDeletes(posDelete).Commit(ctx))
 	withDelete, err := addDelete.meta.Build()
@@ -768,10 +768,10 @@ func TestDynamicPartitionOverwritePrunedKeepsDeleteForSurvivingOldSpecData(t *te
 	require.NotZero(t, fieldID)
 	nullPartition := map[int]any{fieldID: nil}
 
-	// A v2 position delete can target an old-spec data file even if its
-	// manifest stores it under a new partition tuple with a null value.
-	posDelete := newTestPosDeleteFileForSpec(t, currentSpec, "file://old-spec-delete.parquet",
-		nullPartition, oldData.FilePath())
+	// A v2 position delete for an old-spec data file carries that file's
+	// spec and partition; overwriting the new spec's partitions must keep it.
+	posDelete := newTestPosDeleteFileForSpec(t, oldSpec, "file://old-spec-delete.parquet",
+		map[int]any{1000: int32(1)}, oldData.FilePath())
 	addDelete := New(Identifier{"db", "tbl"}, evolved, "metadata.json", fsF, nil).NewTransaction()
 	require.NoError(t, addDelete.NewRowDelta(nil).AddDeletes(posDelete).Commit(ctx))
 	withDelete, err := addDelete.meta.Build()
