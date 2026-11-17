@@ -217,7 +217,7 @@ iceberg expire-snapshots --older-than 7d --dry-run my_db.events
 iceberg expire-snapshots --older-than 7d --retain-last 5 my_db.events
 ```
 
-For REST catalogs, the `iceberg expire-snapshots` command requires complete snapshot history. Configure `snapshot-loading-mode=all` before running it; `snapshot-loading-mode=refs` omits history needed to enforce retention and causes expiration to fail.
+`iceberg expire-snapshots` fails when the REST server sets `snapshot-loading-mode=refs`; the CLI cannot override it. Configure the REST server to use `snapshot-loading-mode=all` before running the command.
 
 ### `clean-orphan-files`
 
@@ -311,9 +311,9 @@ This can discard the branch's current history from the branch head. The prompt
 shows both the previous and next snapshot IDs. Retention settings are preserved.
 Use `--yes` to skip confirmation.
 
-For both commands, REST catalogs using `snapshot-loading-mode=refs` may omit
-historical snapshots needed for ancestry checks or replacement. Use
-`snapshot-loading-mode=all` for these operations.
+For both commands, the REST server's `snapshot-loading-mode=refs` setting may omit
+historical snapshots needed for ancestry checks or replacement. The CLI cannot
+override this setting; configure the REST server with `snapshot-loading-mode=all`.
 
 ### `tag create`
 
