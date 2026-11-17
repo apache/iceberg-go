@@ -353,92 +353,124 @@ func TestProcessEqualityDeletesSingleBytesDictionaryAcrossBatches(t *testing.T) 
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
-			defer mem.AssertSize(t, 0)
-			ctx := compute.WithAllocator(t.Context(), mem)
+			for _, shape := range []struct {
+				valueType arrow.DataType
+				iceType   iceberg.Type
+			}{
+				{arrow.BinaryTypes.String, iceberg.PrimitiveTypes.String},
+				{arrow.BinaryTypes.LargeString, iceberg.PrimitiveTypes.String},
+				{arrow.BinaryTypes.Binary, iceberg.PrimitiveTypes.Binary},
+				{arrow.BinaryTypes.LargeBinary, iceberg.PrimitiveTypes.Binary},
+			} {
+				t.Run(shape.valueType.String(), func(t *testing.T) {
+					mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+					defer mem.AssertSize(t, 0)
+					ctx := compute.WithAllocator(t.Context(), mem)
 
-			dictionaries := make(map[string]arrow.Array, len(tt.dictionaries))
-			for name, values := range tt.dictionaries {
-				full, _, err := array.FromJSON(mem, arrow.BinaryTypes.String, strings.NewReader(values))
-				require.NoError(t, err)
-				dictionary := array.NewSlice(full, int64(tt.dictionaryOffset), int64(full.Len()))
-				full.Release()
-				defer dictionary.Release()
-				dictionaries[name] = dictionary
-			}
-			deleteSets := make([]*equalityDeleteSet, len(tt.sets))
-			for i, setKeys := range tt.sets {
-				keys := make(set[string], len(setKeys))
-				for _, key := range setKeys {
-					keys[key] = struct{}{}
-				}
-				deleteSets[i] = &equalityDeleteSet{keys: keys, fieldIDs: []int{2}, colNames: []string{"value"}}
-			}
-			fileSchema := iceberg.NewSchema(0,
-				iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
-				iceberg.NestedField{ID: 2, Name: "value", Type: iceberg.PrimitiveTypes.String},
-			)
-			process, err := processEqualityDeletesColumnarForFile(ctx, deleteSets, fileSchema, "data.parquet")
-			require.NoError(t, err)
+					dictionaries := make(map[string]arrow.Array, len(tt.dictionaries))
+					for name, values := range tt.dictionaries {
+						parsed, _, err := array.FromJSON(mem, arrow.BinaryTypes.String, strings.NewReader(values))
+						require.NoError(t, err)
+						valueBuilder := array.NewBuilder(mem, shape.valueType)
+						for i := range parsed.Len() {
+							appendEqualityBytesTestValue(t, valueBuilder, parsed.ValueStr(i), !parsed.IsNull(i))
+						}
+						full := valueBuilder.NewArray()
+						valueBuilder.Release()
+						parsed.Release()
+						dictionary := array.NewSlice(full, int64(tt.dictionaryOffset), int64(full.Len()))
+						full.Release()
+						defer dictionary.Release()
+						dictionaries[name] = dictionary
+					}
+					deleteSets := make([]*equalityDeleteSet, len(tt.sets))
+					for i, setKeys := range tt.sets {
+						keys := make(set[string], len(setKeys))
+						for _, key := range setKeys {
+							keys[key] = struct{}{}
+						}
+						deleteSets[i] = &equalityDeleteSet{keys: keys, fieldIDs: []int{2}, colNames: []string{"value"}}
+					}
+					fileSchema := iceberg.NewSchema(0,
+						iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+						iceberg.NestedField{ID: 2, Name: "value", Type: shape.iceType},
+					)
+					process, err := processEqualityDeletesColumnarForFile(ctx, deleteSets, fileSchema, "data.parquet")
+					require.NoError(t, err)
 
-			dictType := &arrow.DictionaryType{IndexType: arrow.PrimitiveTypes.Int16, ValueType: arrow.BinaryTypes.String}
-			schema := arrow.NewSchema([]arrow.Field{
-				{Name: "id", Type: arrow.PrimitiveTypes.Int64},
-				{Name: "value", Type: dictType, Nullable: true},
-			}, nil)
-			for i, b := range tt.batches {
-				indices, _, err := array.FromJSON(mem, arrow.PrimitiveTypes.Int16, strings.NewReader(b.indices))
-				require.NoError(t, err)
-				values := array.NewDictionaryArray(dictType, indices, dictionaries[b.dictionary])
-				indices.Release()
-				idBuilder := array.NewInt64Builder(mem)
-				for id := range values.Len() {
-					idBuilder.Append(int64(id + 1))
-				}
-				ids := idBuilder.NewArray()
-				idBuilder.Release()
-				full := array.NewRecordBatch(schema, []arrow.Array{ids, values}, int64(values.Len()))
-				ids.Release()
-				values.Release()
-				record := full.NewSlice(int64(b.offset), full.NumRows())
-				full.Release()
+					dictType := &arrow.DictionaryType{IndexType: arrow.PrimitiveTypes.Int16, ValueType: shape.valueType}
+					schema := arrow.NewSchema([]arrow.Field{
+						{Name: "id", Type: arrow.PrimitiveTypes.Int64},
+						{Name: "value", Type: dictType, Nullable: true},
+					}, nil)
+					for i, b := range tt.batches {
+						indices, _, err := array.FromJSON(mem, arrow.PrimitiveTypes.Int16, strings.NewReader(b.indices))
+						require.NoError(t, err)
+						values := array.NewDictionaryArray(dictType, indices, dictionaries[b.dictionary])
+						indices.Release()
+						idBuilder := array.NewInt64Builder(mem)
+						for id := range values.Len() {
+							idBuilder.Append(int64(id + 1))
+						}
+						ids := idBuilder.NewArray()
+						idBuilder.Release()
+						full := array.NewRecordBatch(schema, []arrow.Array{ids, values}, int64(values.Len()))
+						ids.Release()
+						values.Release()
+						record := full.NewSlice(int64(b.offset), full.NumRows())
+						full.Release()
 
-				got, err := process(record)
-				require.NoError(t, err)
-				assert.Equal(t, b.wantIDs, got.Column(0).(*array.Int64).Int64Values(), "batch %d", i)
-				got.Release()
+						got, err := process(record)
+						require.NoError(t, err)
+						assert.Equal(t, b.wantIDs, got.Column(0).(*array.Int64).Int64Values(), "batch %d", i)
+						got.Release()
+					}
+				})
 			}
 		})
 	}
 }
 
 func TestDictionaryEntryMemoKeepsResultsForSameDictionary(t *testing.T) {
-	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
-	defer mem.AssertSize(t, 0)
+	for _, valueType := range []arrow.DataType{
+		arrow.BinaryTypes.String,
+		arrow.BinaryTypes.LargeString,
+		arrow.BinaryTypes.Binary,
+		arrow.BinaryTypes.LargeBinary,
+	} {
+		t.Run(valueType.String(), func(t *testing.T) {
+			mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+			defer mem.AssertSize(t, 0)
 
-	deleteSet := &singleBytesEqualityDeleteSet{keys: set[string]{"apple": {}}}
-	dictType := &arrow.DictionaryType{IndexType: arrow.PrimitiveTypes.Int16, ValueType: arrow.BinaryTypes.String}
-	dictionary, _, err := array.FromJSON(mem, arrow.BinaryTypes.String, strings.NewReader(`["apple", "bob", "cherry"]`))
-	require.NoError(t, err)
-	defer dictionary.Release()
+			deleteSet := &singleBytesEqualityDeleteSet{keys: set[string]{"apple": {}}}
+			dictType := &arrow.DictionaryType{IndexType: arrow.PrimitiveTypes.Int16, ValueType: valueType}
+			valueBuilder := array.NewBuilder(mem, valueType)
+			appendEqualityBytesTestValue(t, valueBuilder, "apple", true)
+			appendEqualityBytesTestValue(t, valueBuilder, "bob", true)
+			appendEqualityBytesTestValue(t, valueBuilder, "cherry", true)
+			dictionary := valueBuilder.NewArray()
+			valueBuilder.Release()
+			defer dictionary.Release()
 
-	var memo dictionaryEntryMemo
-	apply := func(indices string) {
-		t.Helper()
-		idx, _, err := array.FromJSON(mem, arrow.PrimitiveTypes.Int16, strings.NewReader(indices))
-		require.NoError(t, err)
-		column := array.NewDictionaryArray(dictType, idx, dictionary)
-		idx.Release()
-		defer column.Release()
-		var mask equalityDeleteMask
-		defer mask.release()
-		require.True(t, memo.apply(&mask, column, deleteSet, mem))
+			var memo dictionaryEntryMemo
+			apply := func(indices string) {
+				t.Helper()
+				idx, _, err := array.FromJSON(mem, arrow.PrimitiveTypes.Int16, strings.NewReader(indices))
+				require.NoError(t, err)
+				column := array.NewDictionaryArray(dictType, idx, dictionary)
+				idx.Release()
+				defer column.Release()
+				var mask equalityDeleteMask
+				defer mask.release()
+				require.True(t, memo.apply(&mask, column, deleteSet, mem))
+			}
+
+			apply("[0]")
+			assert.Equal(t, []uint8{dictionaryEntryDeleted, dictionaryEntryUnknown, dictionaryEntryUnknown}, memo.results)
+			apply("[1]")
+			assert.Equal(t, []uint8{dictionaryEntryDeleted, dictionaryEntryKept, dictionaryEntryUnknown}, memo.results)
+		})
 	}
-
-	apply("[0]")
-	assert.Equal(t, []uint8{dictionaryEntryDeleted, dictionaryEntryUnknown, dictionaryEntryUnknown}, memo.results)
-	apply("[1]")
-	assert.Equal(t, []uint8{dictionaryEntryDeleted, dictionaryEntryKept, dictionaryEntryUnknown}, memo.results)
 }
 
 func buildBenchDeleteSetSingleString(numDeletes int, noMatch bool) *equalityDeleteSet {
