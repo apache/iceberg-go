@@ -588,6 +588,8 @@ func TestExpireSnapshotsRejectsRefsOnlySnapshotHistory(t *testing.T) {
 		WithRetainLast(1),
 		WithPostCommit(false),
 	)
+	require.ErrorIs(t, err, ErrInvalidOperation)
+	require.ErrorIs(t, err, errSnapshotHistoryIncompleteForExpiration)
 	require.ErrorContains(t, err, "snapshot-loading-mode=refs")
 	require.ErrorContains(t, err, "snapshot-loading-mode=all")
 }
