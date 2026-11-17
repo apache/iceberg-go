@@ -321,6 +321,9 @@
 <p><strong>Out-of-range nanosecond timestamp strings are rejected.</strong> String literals for <code>timestamp_ns</code> and <code>timestamptz_ns</code> outside the signed 64-bit nanosecond range now fail expression binding with <code>ErrBadCast</code>. Scans and <code>ExpressionEvaluator</code> return the error for these filters instead of comparing a wrapped value.</p>
 </li>
 <li>
+<p><strong><code>VisitBoundPredicateRef</code> is removed.</strong> It was meant only for evaluators inside iceberg-go. Visitors in other modules should call <code>VisitBoundPredicate</code>, which passes <code>VisitIn</code> and <code>VisitNotIn</code> a detached copy of the predicate's literal set, as before.</p>
+</li>
+<li>
 <p><strong>Empty string partition bounds are written as non-null bytes.</strong> New manifests preserve empty string lower and upper bounds, fixing filtered scans on identity partitions. Manifests written before this fix may retain null bounds for an empty string and can continue to skip matching rows until rewritten.</p>
 </li>
 <li>
@@ -388,6 +391,9 @@
 </li>
 <li>
 <p><strong>Hadoop catalog construction takes a context.</strong> <code>hadoop.NewCatalog(name, warehouse, props)</code> becomes <code>hadoop.NewCatalog(ctx, name, warehouse, props)</code>. The context bounds filesystem setup; the catalog's filesystem keeps its values but not its cancellation.</p>
+</li>
+<li>
+<p><strong>SQL and Hive catalog construction takes a context.</strong> <code>sql.NewCatalog(name, db, dialect, props)</code> becomes <code>sql.NewCatalog(ctx, name, db, dialect, props)</code>, and <code>hive.NewCatalog(props, opts...)</code> becomes <code>hive.NewCatalog(ctx, props, opts...)</code>. The context bounds the SQL table setup queries and is checked before the Hive metastore connect.</p>
 </li>
 <li>
 <p><strong>Config loading reports errors.</strong> <code>config.LoadConfig</code> now returns <code>([]byte, error)</code>, and <code>config.LoadConfigFile</code> is removed; call <code>LoadConfig</code> instead. A missing default <code>~/.iceberg-go.yaml</code> still returns no data and no error.</p>

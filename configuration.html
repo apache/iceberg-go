@@ -438,7 +438,7 @@ assume parity on it in multi-client deployments.</p>
 <h3 id="sql-catalogsql"><a class="header" href="#sql-catalogsql">SQL (<code>catalog/sql</code>)</a></h3>
 <p>The SQL catalog has no functional-option surface. Construct it with <code>NewCatalog</code>:</p>
 <pre><code class="language-go">db, _ := sql.Open(sqliteshim.ShimName, &quot;file:catalog.db&quot;)
-cat, err := sqlcat.NewCatalog(&quot;default&quot;, db, sqlcat.SQLite, iceberg.Properties{
+cat, err := sqlcat.NewCatalog(ctx, &quot;default&quot;, db, sqlcat.SQLite, iceberg.Properties{
     &quot;warehouse&quot;: &quot;file:///tmp/warehouse&quot;,
 })
 </code></pre>

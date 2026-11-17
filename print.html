@@ -342,7 +342,7 @@ func openCatalog(ctx context.Context) (*sqlcat.Catalog, error) {
     if err != nil {
         return nil, err
     }
-    return sqlcat.NewCatalog(&quot;default&quot;, db, sqlcat.SQLite, iceberg.Properties{
+    return sqlcat.NewCatalog(ctx, &quot;default&quot;, db, sqlcat.SQLite, iceberg.Properties{
         &quot;warehouse&quot;:            &quot;file:///tmp/iceberg-tutorial&quot;,
         &quot;init_catalog_tables&quot;:  &quot;true&quot;,
     })
@@ -728,7 +728,7 @@ assume parity on it in multi-client deployments.</p>
 <h3 id="sql-catalogsql"><a class="header" href="#sql-catalogsql">SQL (<code>catalog/sql</code>)</a></h3>
 <p>The SQL catalog has no functional-option surface. Construct it with <code>NewCatalog</code>:</p>
 <pre><code class="language-go">db, _ := sql.Open(sqliteshim.ShimName, &quot;file:catalog.db&quot;)
-cat, err := sqlcat.NewCatalog(&quot;default&quot;, db, sqlcat.SQLite, iceberg.Properties{
+cat, err := sqlcat.NewCatalog(ctx, &quot;default&quot;, db, sqlcat.SQLite, iceberg.Properties{
     &quot;warehouse&quot;: &quot;file:///tmp/warehouse&quot;,
 })
 </code></pre>
@@ -1399,7 +1399,7 @@ cat, err := rest.NewCatalog(context.Background(), &quot;rest&quot;, &quot;http:/
 
 db, err := sql.Open(sqliteshim.ShimName, &quot;file:catalog.db&quot;)
 // handle err
-cat, err := sqlcat.NewCatalog(&quot;default&quot;, db, sqlcat.SQLite, iceberg.Properties{
+cat, err := sqlcat.NewCatalog(context.Background(), &quot;default&quot;, db, sqlcat.SQLite, iceberg.Properties{
     &quot;warehouse&quot;: &quot;file:///tmp/warehouse&quot;,
 })
 </code></pre>
@@ -1419,7 +1419,7 @@ cat := glue.NewCatalog(glue.WithAWSConfig(awsCfg))
     &quot;github.com/apache/iceberg-go/catalog/hive&quot;
 )
 
-cat, err := hive.NewCatalog(iceberg.Properties{},
+cat, err := hive.NewCatalog(context.Background(), iceberg.Properties{},
     hive.WithURI(&quot;thrift://localhost:9083&quot;),
     hive.WithWarehouse(&quot;s3://my-bucket/warehouse&quot;))
 </code></pre>
@@ -3192,6 +3192,9 @@ make integration-external-rest
 <p><strong>Out-of-range nanosecond timestamp strings are rejected.</strong> String literals for <code>timestamp_ns</code> and <code>timestamptz_ns</code> outside the signed 64-bit nanosecond range now fail expression binding with <code>ErrBadCast</code>. Scans and <code>ExpressionEvaluator</code> return the error for these filters instead of comparing a wrapped value.</p>
 </li>
 <li>
+<p><strong><code>VisitBoundPredicateRef</code> is removed.</strong> It was meant only for evaluators inside iceberg-go. Visitors in other modules should call <code>VisitBoundPredicate</code>, which passes <code>VisitIn</code> and <code>VisitNotIn</code> a detached copy of the predicate's literal set, as before.</p>
+</li>
+<li>
 <p><strong>Empty string partition bounds are written as non-null bytes.</strong> New manifests preserve empty string lower and upper bounds, fixing filtered scans on identity partitions. Manifests written before this fix may retain null bounds for an empty string and can continue to skip matching rows until rewritten.</p>
 </li>
 <li>
@@ -3259,6 +3262,9 @@ make integration-external-rest
 </li>
 <li>
 <p><strong>Hadoop catalog construction takes a context.</strong> <code>hadoop.NewCatalog(name, warehouse, props)</code> becomes <code>hadoop.NewCatalog(ctx, name, warehouse, props)</code>. The context bounds filesystem setup; the catalog's filesystem keeps its values but not its cancellation.</p>
+</li>
+<li>
+<p><strong>SQL and Hive catalog construction takes a context.</strong> <code>sql.NewCatalog(name, db, dialect, props)</code> becomes <code>sql.NewCatalog(ctx, name, db, dialect, props)</code>, and <code>hive.NewCatalog(props, opts...)</code> becomes <code>hive.NewCatalog(ctx, props, opts...)</code>. The context bounds the SQL table setup queries and is checked before the Hive metastore connect.</p>
 </li>
 <li>
 <p><strong>Config loading reports errors.</strong> <code>config.LoadConfig</code> now returns <code>([]byte, error)</code>, and <code>config.LoadConfigFile</code> is removed; call <code>LoadConfig</code> instead. A missing default <code>~/.iceberg-go.yaml</code> still returns no data and no error.</p>

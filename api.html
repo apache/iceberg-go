@@ -259,7 +259,7 @@ cat, err := rest.NewCatalog(context.Background(), &quot;rest&quot;, &quot;http:/
 
 db, err := sql.Open(sqliteshim.ShimName, &quot;file:catalog.db&quot;)
 // handle err
-cat, err := sqlcat.NewCatalog(&quot;default&quot;, db, sqlcat.SQLite, iceberg.Properties{
+cat, err := sqlcat.NewCatalog(context.Background(), &quot;default&quot;, db, sqlcat.SQLite, iceberg.Properties{
     &quot;warehouse&quot;: &quot;file:///tmp/warehouse&quot;,
 })
 </code></pre>
@@ -279,7 +279,7 @@ cat := glue.NewCatalog(glue.WithAWSConfig(awsCfg))
     &quot;github.com/apache/iceberg-go/catalog/hive&quot;
 )
 
-cat, err := hive.NewCatalog(iceberg.Properties{},
+cat, err := hive.NewCatalog(context.Background(), iceberg.Properties{},
     hive.WithURI(&quot;thrift://localhost:9083&quot;),
     hive.WithWarehouse(&quot;s3://my-bucket/warehouse&quot;))
 </code></pre>
