@@ -1073,7 +1073,7 @@ func partitionFieldAllowsFloatWidening(
 		return false
 	}
 
-	for i := 0; i < spec.NumFields(); i++ {
+	for i := range spec.NumFields() {
 		field := spec.Field(i)
 		if field.FieldID != partitionFieldID ||
 			len(field.SourceIDs) != 1 ||
