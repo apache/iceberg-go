@@ -119,7 +119,7 @@ func TestHiveUpdateViewUsesScopedIORegistry(t *testing.T) {
 	version := &view.Version{Representations: []view.Representation{
 		view.NewRepresentation(view.Representation{SQL: "SELECT 1", Dialect: "hive"}),
 	}}
-	created, err := view.CreateViewFromVersionWithRegistry(t.Context(), ident, schema, version, location, nil, iceberg.Properties{}, registry)
+	created, err := view.CreateViewFromVersion(t.Context(), ident, schema, version, location, nil, iceberg.Properties{}, view.WithIORegistry(registry))
 	require.NoError(t, err)
 
 	client := &mockHiveClient{}
