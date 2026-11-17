@@ -231,6 +231,7 @@ Source: [`catalog/hive/options.go`](https://github.com/apache/iceberg-go/blob/ma
 - `WithURI(uri string)` - Thrift URI for the Hive Metastore (e.g. `thrift://127.0.0.1:9083`).
 - `WithWarehouse(warehouse string)`
 - `WithProperties(props iceberg.Properties)`
+- `WithIORegistry(registry *io.Registry)` - use a catalog-scoped FileIO registry.
 
 Lock-check catalog properties (passed via `WithProperties` / `catalog.Load` props):
 
@@ -250,10 +251,11 @@ Source: [`catalog/glue/options.go`](https://github.com/apache/iceberg-go/blob/ma
 
 - `WithAWSConfig(cfg aws.Config)` - AWS SDK v2 config; respects the AWS default credential chain.
 - `WithAWSProperties(props AWSProperties)` - catalog properties, such as `glue.id` and the `s3.*` FileIO keys. `NewCatalog` ignores the `glue.region`, endpoint, credential, and retry keys; only `catalog.Load` reads them.
+- `WithIORegistry(registry *io.Registry)` - use a catalog-scoped FileIO registry.
 
 ### SQL (`catalog/sql`)
 
-Construct a SQL catalog with `NewCatalog` or use `NewCatalogWithOptions` to select an isolated FileIO registry:
+Construct a SQL catalog with `NewCatalog`. Pass `sqlcat.WithIORegistry(registry)` as an optional final argument to select an isolated FileIO registry:
 
 ```go
 db, _ := sql.Open(sqliteshim.ShimName, "file:catalog.db")
@@ -458,7 +460,7 @@ fs, err := registry.LoadFS(ctx, props, "myfs://bucket/key")
 
 `io.NewRegistry()` copies schemes already registered globally (including blank-imported cloud backends) but keeps later registrations independent. `registry.Clone()` makes an isolated copy of another registry. `registry.Names()` lists the schemes registered in that instance. `registry.LoadFSFunc()` is the lazy factory equivalent. Global `io.LoadFS()` and `io.LoadFSFunc()` continue using the default registry.
 
-To use the registry with a catalog, pass `WithIORegistry(registry)` to `glue.NewCatalog` or `hive.NewCatalog`; call `hadoop.NewCatalogWithOptions(..., hadoop.WithIORegistry(registry))` or `sql.NewCatalogWithOptions(..., sql.WithIORegistry(registry))` for Hadoop and SQL. Direct view metadata writes can use `view.CreateViewWithIORegistry` or `view.CreateViewWithIOPropertiesAndRegistry`. The default remains global when no registry is specified. An empty non-nil registry does **not** fall back to global schemes. REST catalog support is tracked in [#2366](https://github.com/apache/iceberg-go/pull/2366).
+To use an isolated registry, pass `glue.WithIORegistry(registry)`, `hive.WithIORegistry(registry)`, or `rest.WithIORegistry(registry)` to those catalogs' constructors. Hadoop and SQL accept optional `hadoop.WithIORegistry(registry)` and `sql.WithIORegistry(registry)` arguments directly in their existing `NewCatalog` functions. For direct view metadata creation, pass `view.WithIORegistry(registry)` to `view.CreateView`, `view.CreateViewWithIOProperties`, `view.CreateViewFromVersion`, or `view.WriteMetadata`. Omitting the option (or passing nil) keeps the global registry. An empty non-nil registry does **not** fall back to global schemes. `catalog.Load` still uses the global registry through built-in catalog registrars.
 
 These FileIO options do not select a KMS implementation. `encryption.KMSRegistry` is separate; no catalog encryption path currently loads a KMS client.
 
