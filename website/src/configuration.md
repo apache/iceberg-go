@@ -259,9 +259,10 @@ Construct a SQL catalog with `NewCatalog`. Pass `sqlcat.WithIORegistry(registry)
 
 ```go
 db, _ := sql.Open(sqliteshim.ShimName, "file:catalog.db")
+registry := io.NewRegistry() // copy currently registered global schemes
 cat, err := sqlcat.NewCatalog("default", db, sqlcat.SQLite, iceberg.Properties{
     "warehouse": "file:///tmp/warehouse",
-})
+}, sqlcat.WithIORegistry(registry)) // omit option for global FileIO
 ```
 
 Supported dialects: `sqlcat.Postgres`, `sqlcat.MySQL`, `sqlcat.SQLite`, `sqlcat.MSSQL`, `sqlcat.Oracle` (`catalog/sql/sql.go:50`).
@@ -461,6 +462,20 @@ fs, err := registry.LoadFS(ctx, props, "myfs://bucket/key")
 `io.NewRegistry()` copies schemes already registered globally (including blank-imported cloud backends) but keeps later registrations independent. `registry.Clone()` makes an isolated copy of another registry. `registry.Names()` lists the schemes registered in that instance. `registry.LoadFSFunc()` is the lazy factory equivalent. Global `io.LoadFS()` and `io.LoadFSFunc()` continue using the default registry.
 
 To use an isolated registry, pass `glue.WithIORegistry(registry)`, `hive.WithIORegistry(registry)`, or `rest.WithIORegistry(registry)` to those catalogs' constructors. Hadoop and SQL accept optional `hadoop.WithIORegistry(registry)` and `sql.WithIORegistry(registry)` arguments directly in their existing `NewCatalog` functions. For direct view metadata creation, pass `view.WithIORegistry(registry)` to `view.CreateView`, `view.CreateViewWithIOProperties`, `view.CreateViewFromVersion`, or `view.WriteMetadata`. Omitting the option (or passing nil) keeps the global registry. An empty non-nil registry does **not** fall back to global schemes. `catalog.Load` still uses the global registry through built-in catalog registrars.
+
+The registry is **shared by pointer**, not frozen or copied by the catalog:
+calling `registry.Register` or `registry.Unregister` afterward changes which
+factories future loads can use. `io.NewRegistry()` copies factories currently
+registered globally, whereas `&io.Registry{}` starts empty. Neither option
+changes the global registry or registers a catalog type with `catalog.Load`.
+Construct a scoped catalog directly with `NewCatalog` and its registry option.
+The DynamoDB catalog is not currently wired for a scoped registry.
+
+View metadata creation accepts the same scoped registry option, but reading
+view metadata via `view.NewFromLocation` uses the filesystem factory explicitly
+passed by the caller. A catalog's own load and update methods supply their
+scoped factory. Passing credentials in `ioProps` configures the filesystem;
+only `metadataProps` are persisted in the view metadata.
 
 These FileIO options do not select a KMS implementation. `encryption.KMSRegistry` is separate; no catalog encryption path currently loads a KMS client.
 
