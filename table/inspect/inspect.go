@@ -15,7 +15,17 @@
 // specific language governing permissions and limitations
 // under the License.
 
-package table
+// Package inspect exposes a table's metadata (snapshots, history, manifests,
+// files, and so on) as queryable Arrow tables. It mirrors the metadata tables
+// offered by the Java, PyIceberg, and Rust clients.
+//
+// Each metadata table is a free function that takes the table as its second
+// argument, for example:
+//
+//	rr, err := inspect.Snapshots(ctx, tbl, inspect.WithAllocator(mem))
+//
+// The returned array.RecordReader must be released by the caller.
+package inspect
 
 import (
 	"cmp"
@@ -30,24 +40,19 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/table"
 )
 
-// InspectTable exposes a table's metadata (snapshots, history, manifests, and
-// so on) as queryable Arrow tables. It mirrors the metadata tables offered by
-// the Java, PyIceberg, and Rust clients.
-//
-// Obtain one via Table.Inspect. Metadata-table methods return an
-// array.RecordReader that the caller is responsible for releasing.
-type InspectTable struct {
-	tbl   Table
+// inspector holds a copy of the table, so a reader keeps seeing the table as
+// it was when the metadata-table function was called, even if the caller's
+// table is refreshed while the reader is still being consumed.
+type inspector struct {
+	tbl   table.Table
 	alloc memory.Allocator
 }
 
-// Inspect returns an InspectTable for reading this table's metadata tables,
-// allocating Arrow buffers from opts, if provided, otherwise the default
-// allocator.
-func (t Table) Inspect(opts ...InspectOption) InspectTable {
-	i := InspectTable{tbl: t, alloc: memory.DefaultAllocator}
+func newInspector(tbl *table.Table, opts ...Option) inspector {
+	i := inspector{tbl: *tbl, alloc: memory.DefaultAllocator}
 	for _, opt := range opts {
 		opt(&i)
 	}
@@ -55,14 +60,15 @@ func (t Table) Inspect(opts ...InspectOption) InspectTable {
 	return i
 }
 
-// InspectOption configures an InspectTable.
-type InspectOption func(*InspectTable)
+// Option configures how a metadata table is read.
+type Option func(*inspector)
 
-// WithInspectAllocator sets the Arrow memory allocator used to build
-// metadata-table records. Tests can pass a memory.CheckedAllocator to detect
-// leaks; callers with memory accounting can inject their own pool.
-func WithInspectAllocator(alloc memory.Allocator) InspectOption {
-	return func(i *InspectTable) {
+// WithAllocator sets the Arrow memory allocator used to build metadata-table
+// records. Tests can pass a memory.CheckedAllocator to detect leaks; callers
+// with memory accounting can inject their own pool. A nil allocator is
+// ignored.
+func WithAllocator(alloc memory.Allocator) Option {
+	return func(i *inspector) {
 		if alloc != nil {
 			i.alloc = alloc
 		}
@@ -89,8 +95,12 @@ func WithInspectAllocator(alloc memory.Allocator) InspectOption {
 // silent-truncation behavior of the Java, PyIceberg, and Rust clients.
 //
 // The returned reader holds a single record batch. The caller must Release it.
-func (i InspectTable) History(ctx context.Context) (array.RecordReader, error) {
-	arrowSchema, err := SchemaToArrowSchema(HistorySchema(), nil, true, false)
+func History(ctx context.Context, tbl *table.Table, opts ...Option) (array.RecordReader, error) {
+	return newInspector(tbl, opts...).history(ctx)
+}
+
+func (i inspector) history(ctx context.Context) (array.RecordReader, error) {
+	arrowSchema, err := table.SchemaToArrowSchema(HistorySchema(), nil, true, false)
 	if err != nil {
 		return nil, fmt.Errorf("inspect history: build arrow schema: %w", err)
 	}
@@ -101,7 +111,7 @@ func (i InspectTable) History(ctx context.Context) (array.RecordReader, error) {
 	// corrupt parent chain cannot hang the scan.
 	ancestors := make(map[int64]struct{})
 	if current := i.tbl.Metadata().CurrentSnapshot(); current != nil {
-		for _, snap := range AncestorsOf(current.SnapshotID, i.tbl.Metadata().SnapshotByID) {
+		for _, snap := range table.AncestorsOf(current.SnapshotID, i.tbl.Metadata().SnapshotByID) {
 			ancestors[snap.SnapshotID] = struct{}{}
 		}
 	}
@@ -177,8 +187,12 @@ func singleBatchReader(arrowSchema *arrow.Schema, bldr *array.RecordBuilder) (ar
 //     when the snapshot carries no summary
 //
 // The returned reader holds a single record batch. The caller must Release it.
-func (i InspectTable) Snapshots(ctx context.Context) (array.RecordReader, error) {
-	arrowSchema, err := SchemaToArrowSchema(SnapshotsSchema(), nil, true, false)
+func Snapshots(ctx context.Context, tbl *table.Table, opts ...Option) (array.RecordReader, error) {
+	return newInspector(tbl, opts...).snapshots(ctx)
+}
+
+func (i inspector) snapshots(ctx context.Context) (array.RecordReader, error) {
+	arrowSchema, err := table.SchemaToArrowSchema(SnapshotsSchema(), nil, true, false)
 	if err != nil {
 		return nil, fmt.Errorf("inspect snapshots: build arrow schema: %w", err)
 	}
@@ -223,7 +237,7 @@ func (i InspectTable) Snapshots(ctx context.Context) (array.RecordReader, error)
 			// Summary.MarshalJSON). Emit it alongside the extra properties so
 			// the table faithfully reflects the on-disk summary.
 			if snap.Summary.Operation != "" {
-				summaryKeys.Append(operationKey)
+				summaryKeys.Append("operation")
 				summaryValues.Append(string(snap.Summary.Operation))
 			}
 			for k, v := range snap.Summary.Properties {
@@ -255,9 +269,13 @@ func (i InspectTable) Snapshots(ctx context.Context) (array.RecordReader, error)
 // Manifests returns one row for each manifest in the current snapshot.
 // Partition summaries are exposed as the human-readable values used by the
 // other Iceberg clients.
-func (i InspectTable) Manifests(ctx context.Context) (array.RecordReader, error) {
+func Manifests(ctx context.Context, tbl *table.Table, opts ...Option) (array.RecordReader, error) {
+	return newInspector(tbl, opts...).manifests(ctx)
+}
+
+func (i inspector) manifests(ctx context.Context) (array.RecordReader, error) {
 	schema := ManifestsSchema()
-	arrowSchema, err := SchemaToArrowSchema(schema, nil, true, false)
+	arrowSchema, err := table.SchemaToArrowSchema(schema, nil, true, false)
 	if err != nil {
 		return nil, fmt.Errorf("inspect manifests: build arrow schema: %w", err)
 	}
@@ -282,7 +300,7 @@ func (i InspectTable) Manifests(ctx context.Context) (array.RecordReader, error)
 	return rr, nil
 }
 
-func (i InspectTable) appendManifestRows(
+func (i inspector) appendManifestRows(
 	ctx context.Context,
 	bldr *array.RecordBuilder,
 	manifests iter.Seq[iceberg.ManifestFile],
@@ -442,7 +460,7 @@ func appendManifestCount(builder *array.Int32Builder, version int, name string, 
 	return nil
 }
 
-func (i InspectTable) currentSnapshotManifests(ctx context.Context) (iter.Seq[iceberg.ManifestFile], error) {
+func (i inspector) currentSnapshotManifests(ctx context.Context) (iter.Seq[iceberg.ManifestFile], error) {
 	snapshot := i.tbl.Metadata().CurrentSnapshot()
 	if snapshot == nil {
 		return slices.Values([]iceberg.ManifestFile(nil)), nil
@@ -486,15 +504,19 @@ func appendManifestBound(builder *array.StringBuilder, typ iceberg.Type, transfo
 //   - max_snapshot_age_in_ms (long, optional): branch snapshot retention
 //
 // The returned reader holds a single record batch. The caller must Release it.
-func (i InspectTable) Refs(ctx context.Context) (array.RecordReader, error) {
-	arrowSchema, err := SchemaToArrowSchema(RefsSchema(), nil, true, false)
+func Refs(ctx context.Context, tbl *table.Table, opts ...Option) (array.RecordReader, error) {
+	return newInspector(tbl, opts...).refs(ctx)
+}
+
+func (i inspector) refs(ctx context.Context) (array.RecordReader, error) {
+	arrowSchema, err := table.SchemaToArrowSchema(RefsSchema(), nil, true, false)
 	if err != nil {
 		return nil, fmt.Errorf("inspect refs: build arrow schema: %w", err)
 	}
 
 	type refRow struct {
 		name string
-		ref  SnapshotRef
+		ref  table.SnapshotRef
 	}
 	var refs []refRow
 	for name, ref := range i.tbl.Metadata().Refs() {
@@ -568,15 +590,19 @@ func (i InspectTable) Refs(ctx context.Context) (array.RecordReader, error) {
 //   - latest_sequence_number (long, optional): sequence number of that snapshot
 //
 // The returned reader holds a single record batch. The caller must Release it.
-func (i InspectTable) MetadataLogEntries(ctx context.Context) (array.RecordReader, error) {
-	arrowSchema, err := SchemaToArrowSchema(MetadataLogEntriesSchema(), nil, true, false)
+func MetadataLogEntries(ctx context.Context, tbl *table.Table, opts ...Option) (array.RecordReader, error) {
+	return newInspector(tbl, opts...).metadataLogEntries(ctx)
+}
+
+func (i inspector) metadataLogEntries(ctx context.Context) (array.RecordReader, error) {
+	arrowSchema, err := table.SchemaToArrowSchema(MetadataLogEntriesSchema(), nil, true, false)
 	if err != nil {
 		return nil, fmt.Errorf("inspect metadata log entries: build arrow schema: %w", err)
 	}
 
 	entries := slices.Collect(i.tbl.Metadata().PreviousFiles())
 	if i.tbl.MetadataLocation() != "" {
-		entries = append(entries, MetadataLogEntry{
+		entries = append(entries, table.MetadataLogEntry{
 			MetadataFile: i.tbl.MetadataLocation(),
 			TimestampMs:  i.tbl.Metadata().LastUpdatedMillis(),
 		})
@@ -641,8 +667,8 @@ func (i InspectTable) MetadataLogEntries(ctx context.Context) (array.RecordReade
 // SnapshotUtil.snapshotIdAsOfTime; PyIceberg keeps the last entry instead.
 // The snapshot ID remains available when the snapshot itself has expired from
 // metadata.
-func latestSnapshotAt(metadata Metadata, timestampMs int64) (int64, *Snapshot, bool) {
-	entry, found := SnapshotLogEntryAsOf(metadata.SnapshotLogs(), timestampMs, true)
+func latestSnapshotAt(metadata table.Metadata, timestampMs int64) (int64, *table.Snapshot, bool) {
+	entry, found := table.SnapshotLogEntryAsOf(metadata.SnapshotLogs(), timestampMs, true)
 	if !found {
 		return 0, nil, false
 	}

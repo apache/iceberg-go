@@ -219,8 +219,8 @@ func (c *snapshotManifestCache) get(
 }
 
 // tryGetComplete returns a completed manifest list without starting or joining
-// a read. Inspect can use this to keep warm-cache traversal synchronous while
-// still prefetching cache misses concurrently.
+// a read. UniqueManifests uses this to keep warm-cache traversal synchronous
+// while still prefetching cache misses concurrently.
 func (c *snapshotManifestCache) tryGetComplete(snapshot Snapshot) (snapshotManifestSet, bool) {
 	if c == nil {
 		return snapshotManifestSet{}, false
@@ -361,12 +361,12 @@ func (p ManifestProvider) Manifests(ctx context.Context, snapshot Snapshot) (ite
 	return slices.Values(set.borrowAllManifests()), nil
 }
 
-// uniqueManifests yields the distinct manifest descriptors referenced by the
+// UniqueManifests yields the distinct manifest descriptors referenced by the
 // given snapshots, in first-seen order. It reads manifest lists but not the
 // manifest Avro files themselves. The caller must not modify snapshots during
 // iteration. It shares this provider's bounded cache and FileIO, with bounded
 // concurrent prefetch of historical lists. An error ends the sequence.
-func (p ManifestProvider) uniqueManifests(ctx context.Context, snapshots []Snapshot) iter.Seq2[iceberg.ManifestFile, error] {
+func (p ManifestProvider) UniqueManifests(ctx context.Context, snapshots []Snapshot) iter.Seq2[iceberg.ManifestFile, error] {
 	return func(yield func(iceberg.ManifestFile, error) bool) {
 		streamSnapshotManifests(ctx, snapshots, p.cachedSet, p.set, yield)
 	}

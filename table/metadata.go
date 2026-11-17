@@ -33,6 +33,7 @@ import (
 
 	"github.com/apache/iceberg-go"
 	iceinternal "github.com/apache/iceberg-go/internal"
+	tblutils "github.com/apache/iceberg-go/table/internal"
 	"github.com/google/uuid"
 )
 
@@ -1779,11 +1780,7 @@ func (b *MetadataBuilder) NameMapping() iceberg.NameMapping {
 }
 
 func validateNameMappingProperty(props iceberg.Properties, mapping iceberg.NameMapping) error {
-	if _, exists := props[DefaultNameMappingKey]; exists && mapping == nil {
-		return fmt.Errorf("%w: invalid %s", ErrInvalidMetadata, DefaultNameMappingKey)
-	}
-
-	return nil
+	return tblutils.ValidateNameMappingProperty(props, DefaultNameMappingKey, mapping, ErrInvalidMetadata)
 }
 
 func (b *MetadataBuilder) TrimMetadataLogs(maxEntries int) *MetadataBuilder {

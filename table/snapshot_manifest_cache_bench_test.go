@@ -114,9 +114,9 @@ func BenchmarkInspectSnapshotManifestCacheHit(b *testing.B) {
 	for _, manifestCount := range []int{1, 1000, 10000} {
 		b.Run(fmt.Sprintf("manifests=%d", manifestCount), func(b *testing.B) {
 			tbl := newRowLimitPlanningBenchmarkTable(b, manifestCount)
-			inspector := tbl.Inspect()
+			snapshot := *tbl.CurrentSnapshot()
 			ctx := b.Context()
-			manifests, err := inspector.currentSnapshotManifests(ctx)
+			manifests, err := tbl.ManifestProvider().Manifests(ctx, snapshot)
 			if err != nil {
 				b.Fatal(err)
 			}
@@ -125,7 +125,7 @@ func BenchmarkInspectSnapshotManifestCacheHit(b *testing.B) {
 			}
 			b.ReportAllocs()
 			for b.Loop() {
-				manifests, err := inspector.currentSnapshotManifests(ctx)
+				manifests, err := tbl.ManifestProvider().Manifests(ctx, snapshot)
 				if err != nil {
 					b.Fatal(err)
 				}

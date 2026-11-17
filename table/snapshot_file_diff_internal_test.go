@@ -161,7 +161,7 @@ func TestDiffSnapshotFilesV1EmbeddedManifests(t *testing.T) {
 	}
 	tbl := diffTestTable(t, 1, fs, first, second)
 
-	diff, err := tbl.Inspect().DiffSnapshotFiles(context.Background(), 1, 2)
+	diff, err := tbl.DiffSnapshotFiles(context.Background(), 1, 2)
 	require.NoError(t, err)
 	require.True(t, diff.HasChanges())
 	require.Equal(t, int64(1), diff.FromSnapshotID)
@@ -171,7 +171,7 @@ func TestDiffSnapshotFilesV1EmbeddedManifests(t *testing.T) {
 	require.Empty(t, diff.AddedDeleteFiles)
 	require.Empty(t, diff.RemovedDeleteFiles)
 
-	reverse, err := tbl.Inspect().DiffSnapshotFiles(context.Background(), 2, 1)
+	reverse, err := tbl.DiffSnapshotFiles(context.Background(), 2, 1)
 	require.NoError(t, err)
 	require.Equal(t, []string{b.FilePath()}, diffFilePaths(reverse.AddedDataFiles))
 	require.Equal(t, []string{c.FilePath()}, diffFilePaths(reverse.RemovedDataFiles))
@@ -200,7 +200,7 @@ func TestDiffSnapshotFilesV1ManifestLists(t *testing.T) {
 		Snapshot{SnapshotID: 1, TimestampMs: now, ManifestList: fromList},
 		Snapshot{SnapshotID: 2, TimestampMs: now + 1, ParentSnapshotID: &parent, ManifestList: toList})
 
-	diff, err := tbl.Inspect().DiffSnapshotFiles(context.Background(), 1, 2)
+	diff, err := tbl.DiffSnapshotFiles(context.Background(), 1, 2)
 	require.NoError(t, err)
 	require.Equal(t, []string{after.FilePath()}, diffFilePaths(diff.AddedDataFiles))
 	require.Equal(t, []string{before.FilePath()}, diffFilePaths(diff.RemovedDataFiles))
@@ -246,7 +246,7 @@ func TestDiffSnapshotFilesV2ManifestRewriteAndDeleteFiles(t *testing.T) {
 			ParentSnapshotID: &fromID, ManifestList: toList,
 		})
 
-	diff, err := tbl.Inspect().DiffSnapshotFiles(context.Background(), 1, 2)
+	diff, err := tbl.DiffSnapshotFiles(context.Background(), 1, 2)
 	require.NoError(t, err)
 	require.Equal(t, []string{added.FilePath()}, diffFilePaths(diff.AddedDataFiles))
 	require.Empty(t, diff.RemovedDataFiles, "manifest-only rewrite does not remove a data file")
@@ -303,7 +303,7 @@ func TestDiffSnapshotFilesV3DeletionVectorsSharePuffinFile(t *testing.T) {
 			ParentSnapshotID: &parent, ManifestList: toList, FirstRowID: &zero, AddedRows: &zero,
 		})
 
-	diff, err := tbl.Inspect().DiffSnapshotFiles(context.Background(), 1, 2)
+	diff, err := tbl.DiffSnapshotFiles(context.Background(), 1, 2)
 	require.NoError(t, err)
 	require.True(t, diff.HasChanges())
 	require.Empty(t, diff.AddedDataFiles)
@@ -342,7 +342,7 @@ func TestDiffSnapshotFilesUnrelatedSnapshotsAndSorting(t *testing.T) {
 			ManifestLocations: []string{right.FilePath()},
 		})
 
-	diff, err := tbl.Inspect().DiffSnapshotFiles(context.Background(), 10, 20)
+	diff, err := tbl.DiffSnapshotFiles(context.Background(), 10, 20)
 	require.NoError(t, err)
 	require.Equal(t, []string{dataB.FilePath()}, diffFilePaths(diff.AddedDataFiles))
 	require.Equal(t, []string{dataA.FilePath(), dataZ.FilePath()}, diffFilePaths(diff.RemovedDataFiles))
@@ -354,20 +354,20 @@ func TestDiffSnapshotFilesErrorsAndNoop(t *testing.T) {
 	tbl := diffTestTable(t, 1, fs,
 		Snapshot{SnapshotID: 1, TimestampMs: now, ManifestLocations: []string{}})
 
-	_, err := tbl.Inspect().DiffSnapshotFiles(context.Background(), 99, 1)
+	_, err := tbl.DiffSnapshotFiles(context.Background(), 99, 1)
 	require.ErrorIs(t, err, ErrSnapshotNotFound)
-	_, err = tbl.Inspect().DiffSnapshotFiles(context.Background(), 1, 99)
+	_, err = tbl.DiffSnapshotFiles(context.Background(), 1, 99)
 	require.ErrorIs(t, err, ErrSnapshotNotFound)
 
 	canceled, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, err = tbl.Inspect().DiffSnapshotFiles(canceled, 1, 1)
+	_, err = tbl.DiffSnapshotFiles(canceled, 1, 1)
 	require.ErrorIs(t, err, context.Canceled)
 
 	// Identical snapshot IDs are a no-op and must not need storage access.
 	noIO := *tbl
 	noIO.fsF = nil
-	diff, err := noIO.Inspect().DiffSnapshotFiles(context.Background(), 1, 1)
+	diff, err := noIO.DiffSnapshotFiles(context.Background(), 1, 1)
 	require.NoError(t, err)
 	require.False(t, diff.HasChanges())
 	require.Empty(t, diff.AddedDataFiles)
@@ -382,7 +382,7 @@ func TestDiffSnapshotFilesErrorsAndNoop(t *testing.T) {
 			SnapshotID: 2, TimestampMs: now + 1,
 			ManifestLocations: []string{},
 		})
-	_, err = missing.Inspect().DiffSnapshotFiles(context.Background(), 1, 2)
+	_, err = missing.DiffSnapshotFiles(context.Background(), 1, 2)
 	require.Error(t, err)
 	require.False(t, errors.Is(err, ErrSnapshotNotFound))
 	require.Contains(t, fmt.Sprint(err), "missing.avro")
@@ -438,7 +438,7 @@ func TestSnapshotDiffRejectsChangedContentTypeAtSamePath(t *testing.T) {
 		Snapshot{SnapshotID: 1, SequenceNumber: 1, TimestampMs: now, ManifestList: fromList},
 		Snapshot{SnapshotID: 2, SequenceNumber: 2, TimestampMs: now + 1, ManifestList: toList})
 
-	_, err := tbl.Inspect().DiffSnapshotFiles(t.Context(), 1, 2)
+	_, err := tbl.DiffSnapshotFiles(t.Context(), 1, 2)
 	require.ErrorIs(t, err, ErrInvalidMetadata)
 	require.ErrorContains(t, err, "changed type")
 }
@@ -655,7 +655,7 @@ func TestDiffSnapshotFilesV3DeletionVectorLengthChange(t *testing.T) {
 			ParentSnapshotID: &parent, ManifestList: toList, FirstRowID: &zero, AddedRows: &zero,
 		})
 
-	diff, err := tbl.Inspect().DiffSnapshotFiles(t.Context(), 1, 2)
+	diff, err := tbl.DiffSnapshotFiles(t.Context(), 1, 2)
 	require.NoError(t, err)
 	require.True(t, diff.HasChanges())
 	require.Empty(t, diff.AddedDataFiles)
