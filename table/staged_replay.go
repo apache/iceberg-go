@@ -52,6 +52,9 @@ func newStagedReplay(branch string, updates []Update, records []expirationRecord
 	}
 }
 
+// A staged expiration may have yielded no metadata updates but can produce
+// removals after a concurrent commit. Check the recorded operations, not the
+// length of staged updates, before replaying against incomplete history.
 func (r *stagedReplay) hasExpirationRecords() bool {
 	return r != nil && len(r.records) > 0
 }
