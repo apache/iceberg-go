@@ -424,6 +424,11 @@ func (c *Catalog) isV0() bool { return c.schemaVersion == schemaV0 }
 //
 // SQLite callers that allow concurrent writers should configure WAL and a busy timeout in the driver DSN so the
 // settings apply to every pooled connection. NewCatalog does not mutate connection settings on the caller-owned db.
+//
+// Pass WithIORegistry(registry) to use isolated FileIO factories for table
+// and view metadata. Omitting this option or passing nil uses global FileIO.
+// The registry is shared, not copied; later changes affect future loads and
+// metadata writes. The caller continues to own db.
 func NewCatalog(name string, db *sql.DB, dialect SupportedDialect, props iceberg.Properties, opts ...Option) (*Catalog, error) {
 	d, err := getDialect(dialect)
 	if err != nil {
