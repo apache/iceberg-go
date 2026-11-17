@@ -64,6 +64,82 @@ func TestHiveIsolatedIORegistry(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, file.Close())
 	require.NotContains(t, created.Properties(), "storage-key")
+
+	// Loading and dropping views must also use the scoped registry.
+	hiveView := constructHiveViewTable("db", "view", scheme+"://bucket/view",
+		created.MetadataLocation(), schema, "SELECT 1", nil)
+	client.On("GetTable", mock.Anything, "db", "view").Return(hiveView, nil).Twice()
+	loadedView, err := cat.LoadView(t.Context(), TableIdentifier("db", "view"))
+	require.NoError(t, err)
+	require.Equal(t, created.MetadataLocation(), loadedView.MetadataLocation())
+	client.On("DropTable", mock.Anything, "db", "view", false).Return(nil).Once()
+	require.NoError(t, cat.DropView(t.Context(), TableIdentifier("db", "view")))
+	_, err = fs.Open(t.Context(), created.MetadataLocation())
+	require.Error(t, err, "dropping a view must remove metadata through the scoped registry")
+	client.AssertExpectations(t)
+}
+
+func TestHiveRegisterTableUsesScopedIORegistry(t *testing.T) {
+	const scheme = "hive-register-private"
+	const metadataLocation = scheme + "://bucket/table/metadata/v1.metadata.json"
+	registry := &iceio.Registry{}
+	fs := iceio.NewMemFS()
+	require.NoError(t, registry.Register(scheme, func(context.Context, *url.URL, map[string]string) (iceio.IO, error) {
+		return fs, nil
+	}))
+	contents, err := os.ReadFile("../../table/testdata/TableMetadataV2Valid.json")
+	require.NoError(t, err)
+	require.NoError(t, fs.WriteFile(t.Context(), metadataLocation, contents))
+
+	client := &mockHiveClient{}
+	client.On("GetDatabase", mock.Anything, "db").Return(&hive_metastore.Database{Name: "db"}, nil).Once()
+	client.On("GetTable", mock.Anything, "db", "tbl").Return(nil, errNoSuchObject).Twice()
+	client.On("CreateTable", mock.Anything, mock.Anything).Return(nil).Once()
+	client.On("GetTable", mock.Anything, "db", "tbl").Return(&hive_metastore.Table{
+		DbName: "db", TableName: "tbl", TableType: TableTypeExternalTable,
+		Parameters: map[string]string{TableTypeKey: TableTypeIceberg, MetadataLocationKey: metadataLocation},
+	}, nil).Once()
+
+	cat := NewCatalogWithClient(client, nil, WithIORegistry(registry))
+	tbl, err := cat.RegisterTable(t.Context(), TableIdentifier("db", "tbl"), metadataLocation)
+	require.NoError(t, err)
+	loadedFS, err := tbl.FS(t.Context())
+	require.NoError(t, err)
+	require.Same(t, fs, loadedFS)
+	_, err = iceio.LoadFS(t.Context(), nil, metadataLocation)
+	require.ErrorIs(t, err, iceio.ErrIOSchemeNotFound)
+	client.AssertExpectations(t)
+}
+
+func TestHiveCommitTableUsesScopedIORegistry(t *testing.T) {
+	const scheme = "hive-commit-private"
+	location := scheme + "://bucket/table"
+	metadataLocation := location + "/metadata/v1.metadata.json"
+	registry := &iceio.Registry{}
+	fs := iceio.NewMemFS()
+	require.NoError(t, registry.Register(scheme, func(context.Context, *url.URL, map[string]string) (iceio.IO, error) {
+		return fs, nil
+	}))
+	writeHivePurgeTableMetadata(t, fs, location, metadataLocation, nil)
+
+	client := &mockHiveClient{}
+	expectImmediateTableLock(client, 1)
+	client.On("GetTable", mock.Anything, "test_database", "test_table").
+		Return(hivePurgeTable(metadataLocation, location), nil).Once()
+	client.On("AlterTable", mock.Anything, "test_database", "test_table",
+		mock.AnythingOfType("*hive_metastore.Table")).Return(nil).Once()
+
+	cat := NewCatalogWithClient(client, nil, WithIORegistry(registry))
+	_, updatedMetadataLocation, err := cat.CommitTable(t.Context(),
+		TableIdentifier("test_database", "test_table"), nil,
+		[]table.Update{table.NewSetPropertiesUpdate(iceberg.Properties{"changed": "true"})})
+	require.NoError(t, err)
+	require.NotEqual(t, metadataLocation, updatedMetadataLocation)
+	file, err := fs.Open(t.Context(), updatedMetadataLocation)
+	require.NoError(t, err)
+	require.NoError(t, file.Close())
+	_, err = iceio.LoadFS(t.Context(), nil, updatedMetadataLocation)
+	require.ErrorIs(t, err, iceio.ErrIOSchemeNotFound)
 	client.AssertExpectations(t)
 }
 
