@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-package table
+package internal
 
 import (
 	"math"
@@ -30,15 +30,15 @@ func TestPartitionAggregateTreeBinaryKeys(t *testing.T) {
 		iceberg.NestedField{ID: 1000, Name: "first", Type: iceberg.PrimitiveTypes.Binary},
 		iceberg.NestedField{ID: 1001, Name: "second", Type: iceberg.PrimitiveTypes.Binary},
 	)
-	tree := newPartitionAggregateTree()
+	tree := NewPartitionAggregateTree()
 
-	check := func(first, second any, want *partitionAggregate) {
+	check := func(first, second any, want *PartitionAggregate) {
 		t.Helper()
-		if got := tree.lookup(partitionRecord{first, second}); got != want {
+		if got := tree.Lookup(PartitionRecord{first, second}); got != want {
 			t.Fatalf("positional lookup (%v, %v) = %p, want %p", first, second, got, want)
 		}
 		partition := map[int]any{1000: first, 1001: second}
-		if got := tree.lookupPartition(partition, partitionType); got != want {
+		if got := tree.LookupPartition(partition, partitionType); got != want {
 			t.Fatalf("map lookup (%v, %v) = %p, want %p", first, second, got, want)
 		}
 	}
@@ -47,81 +47,81 @@ func TestPartitionAggregateTreeBinaryKeys(t *testing.T) {
 
 	first := []byte{0, 0xff}
 	second := []byte("x/y")
-	original := &partitionAggregate{}
-	tree.insert(partitionRecord{first, second}, original)
+	original := &PartitionAggregate{}
+	tree.Insert(PartitionRecord{first, second}, original)
 	first[0] = 1
 	second[0] = 'z'
 	check([]byte{0, 0xff}, []byte("x/y"), original)
 	check(first, second, nil)
 
-	nullFirst := &partitionAggregate{}
-	emptyFirst := &partitionAggregate{}
-	tree.insert(partitionRecord{nil, []byte("x")}, nullFirst)
-	tree.insert(partitionRecord{[]byte{}, []byte("x")}, emptyFirst)
+	nullFirst := &PartitionAggregate{}
+	emptyFirst := &PartitionAggregate{}
+	tree.Insert(PartitionRecord{nil, []byte("x")}, nullFirst)
+	tree.Insert(PartitionRecord{[]byte{}, []byte("x")}, emptyFirst)
 	check(nil, []byte("x"), nullFirst)
 	check([]byte{}, []byte("x"), emptyFirst)
 	check([]byte(nil), []byte("x"), emptyFirst)
 
-	binaryFirst := &partitionAggregate{}
-	stringFirst := &partitionAggregate{}
-	tree.insert(partitionRecord{[]byte("same"), []byte("tail")}, binaryFirst)
-	tree.insert(partitionRecord{"same", []byte("tail")}, stringFirst)
+	binaryFirst := &PartitionAggregate{}
+	stringFirst := &PartitionAggregate{}
+	tree.Insert(PartitionRecord{[]byte("same"), []byte("tail")}, binaryFirst)
+	tree.Insert(PartitionRecord{"same", []byte("tail")}, stringFirst)
 	check([]byte("same"), []byte("tail"), binaryFirst)
 	check("same", []byte("tail"), stringFirst)
 
-	otherNested := &partitionAggregate{}
-	tree.insert(partitionRecord{[]byte("same"), []byte("other")}, otherNested)
+	otherNested := &PartitionAggregate{}
+	tree.Insert(PartitionRecord{[]byte("same"), []byte("other")}, otherNested)
 	check([]byte("same"), []byte("other"), otherNested)
 	check([]byte("same"), []byte("tail"), binaryFirst)
 }
 
 func TestPartitionAggregateTreeMixedKeys(t *testing.T) {
-	tree := newPartitionAggregateTree()
-	negativeZero := &partitionAggregate{}
-	positiveZero := &partitionAggregate{}
-	nan := &partitionAggregate{}
+	tree := NewPartitionAggregateTree()
+	negativeZero := &PartitionAggregate{}
+	positiveZero := &PartitionAggregate{}
+	nan := &PartitionAggregate{}
 
-	tree.insert(partitionRecord{[]byte("scope"), math.Copysign(0, -1)}, negativeZero)
-	tree.insert(partitionRecord{[]byte("scope"), float64(0)}, positiveZero)
-	tree.insert(partitionRecord{[]byte("scope"), math.Float64frombits(0x7ff8000000000001)}, nan)
+	tree.Insert(PartitionRecord{[]byte("scope"), math.Copysign(0, -1)}, negativeZero)
+	tree.Insert(PartitionRecord{[]byte("scope"), float64(0)}, positiveZero)
+	tree.Insert(PartitionRecord{[]byte("scope"), math.Float64frombits(0x7ff8000000000001)}, nan)
 
 	for _, test := range []struct {
 		value float64
-		want  *partitionAggregate
+		want  *PartitionAggregate
 	}{
 		{math.Copysign(0, -1), negativeZero},
 		{0, positiveZero},
 		{math.Float64frombits(0x7ff8000000000002), nan},
 	} {
-		if got := tree.lookup(partitionRecord{[]byte("scope"), test.value}); got != test.want {
+		if got := tree.Lookup(PartitionRecord{[]byte("scope"), test.value}); got != test.want {
 			t.Fatalf("lookup (%v) = %p, want %p", test.value, got, test.want)
 		}
 	}
 }
 
 func TestPartitionAggregateTreeHandlesBinaryAndNaNValues(t *testing.T) {
-	tree := newPartitionAggregateTree()
-	aggregate := &partitionAggregate{specID: 1}
-	record := partitionRecord{[]byte{1, 2, 3}, math.NaN()}
-	tree.insert(record, aggregate)
+	tree := NewPartitionAggregateTree()
+	aggregate := &PartitionAggregate{SpecID: 1}
+	record := PartitionRecord{[]byte{1, 2, 3}, math.NaN()}
+	tree.Insert(record, aggregate)
 
-	require.Same(t, aggregate, tree.lookup(partitionRecord{[]byte{1, 2, 3}, math.NaN()}))
-	require.Nil(t, tree.lookup(partitionRecord{[]byte{1, 2, 4}, math.NaN()}))
+	require.Same(t, aggregate, tree.Lookup(PartitionRecord{[]byte{1, 2, 3}, math.NaN()}))
+	require.Nil(t, tree.Lookup(PartitionRecord{[]byte{1, 2, 4}, math.NaN()}))
 }
 
 func TestPartitionAggregateTreeDistinguishesFloatWidthsAndSignedZero(t *testing.T) {
-	tree := newPartitionAggregateTree()
-	float32Aggregate := &partitionAggregate{specID: 1}
-	float32Record := partitionRecord{math.Float32frombits(0xffc00001)}
-	tree.insert(float32Record, float32Aggregate)
+	tree := NewPartitionAggregateTree()
+	float32Aggregate := &PartitionAggregate{SpecID: 1}
+	float32Record := PartitionRecord{math.Float32frombits(0xffc00001)}
+	tree.Insert(float32Record, float32Aggregate)
 
-	require.Same(t, float32Aggregate, tree.lookup(partitionRecord{math.Float32frombits(0x7fc00002)}))
-	require.Nil(t, tree.lookup(partitionRecord{math.Float64frombits(0x7ff8000000000001)}))
+	require.Same(t, float32Aggregate, tree.Lookup(PartitionRecord{math.Float32frombits(0x7fc00002)}))
+	require.Nil(t, tree.Lookup(PartitionRecord{math.Float64frombits(0x7ff8000000000001)}))
 
-	negativeZeroAggregate := &partitionAggregate{specID: 2}
-	tree.insert(partitionRecord{math.Copysign(0, -1)}, negativeZeroAggregate)
-	require.Same(t, negativeZeroAggregate, tree.lookup(partitionRecord{math.Copysign(0, -1)}))
-	require.Nil(t, tree.lookup(partitionRecord{float64(0)}))
+	negativeZeroAggregate := &PartitionAggregate{SpecID: 2}
+	tree.Insert(PartitionRecord{math.Copysign(0, -1)}, negativeZeroAggregate)
+	require.Same(t, negativeZeroAggregate, tree.Lookup(PartitionRecord{math.Copysign(0, -1)}))
+	require.Nil(t, tree.Lookup(PartitionRecord{float64(0)}))
 }
 
 func TestPartitionAggregateTreeLookupPartition(t *testing.T) {
@@ -135,13 +135,13 @@ func TestPartitionAggregateTreeLookupPartition(t *testing.T) {
 		1001: []byte{1, 2, 3},
 		1002: math.NaN(),
 	}
-	record := newPartitionRecord(coercePartition(partition, partitionType), partitionType)
-	aggregate := &partitionAggregate{specID: 1}
-	tree := newPartitionAggregateTree()
-	tree.insert(record, aggregate)
+	record := NewPartitionRecord(CoercePartition(partition, partitionType), partitionType)
+	aggregate := &PartitionAggregate{SpecID: 1}
+	tree := NewPartitionAggregateTree()
+	tree.Insert(record, aggregate)
 
-	require.Same(t, aggregate, tree.lookupPartition(partition, partitionType))
-	require.Nil(t, tree.lookupPartition(map[int]any{
+	require.Same(t, aggregate, tree.LookupPartition(partition, partitionType))
+	require.Nil(t, tree.LookupPartition(map[int]any{
 		1000: int32(7),
 		1001: []byte{1, 2, 4},
 		1002: math.NaN(),
@@ -153,17 +153,17 @@ func TestPartitionAggregateTreeLookupPartition(t *testing.T) {
 		1000: int32(7),
 		1002: math.NaN(),
 	}
-	evolvedRecord := newPartitionRecord(coercePartition(evolvedPartition, partitionType), partitionType)
-	evolvedAggregate := &partitionAggregate{specID: 2}
-	tree.insert(evolvedRecord, evolvedAggregate)
+	evolvedRecord := NewPartitionRecord(CoercePartition(evolvedPartition, partitionType), partitionType)
+	evolvedAggregate := &PartitionAggregate{SpecID: 2}
+	tree.Insert(evolvedRecord, evolvedAggregate)
 
-	require.Same(t, evolvedAggregate, tree.lookupPartition(evolvedPartition, partitionType))
-	require.Same(t, evolvedAggregate, tree.lookup(evolvedRecord))
+	require.Same(t, evolvedAggregate, tree.LookupPartition(evolvedPartition, partitionType))
+	require.Same(t, evolvedAggregate, tree.Lookup(evolvedRecord))
 }
 
 func TestClonePartitionClonesBinaryValues(t *testing.T) {
 	value := []byte{1, 2, 3}
-	cloned := clonePartition(map[int]any{1000: value})
+	cloned := ClonePartition(map[int]any{1000: value})
 
 	value[0] = 4
 	require.Equal(t, []byte{1, 2, 3}, cloned[1000])

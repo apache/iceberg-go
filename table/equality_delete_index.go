@@ -27,6 +27,7 @@ import (
 
 	"github.com/apache/iceberg-go"
 	iceberginternal "github.com/apache/iceberg-go/internal"
+	tblutils "github.com/apache/iceberg-go/table/internal"
 	"github.com/google/uuid"
 )
 
@@ -345,10 +346,10 @@ func comparableEqualityDeletePartitionValue(value any) (any, error) {
 	case float32:
 		// Widen like integers so values decoded from manifests written before
 		// a float to double promotion share a key with newer ones.
-		return comparablePartitionKey(float64(value)), nil
+		return tblutils.ComparablePartitionKey(float64(value)), nil
 	case float64:
 		// Canonicalize NaNs and preserve signed zero.
-		return comparablePartitionKey(value), nil
+		return tblutils.ComparablePartitionKey(value), nil
 	case string:
 		return equalityDeleteStringPartitionValue(value), nil
 	case []byte:

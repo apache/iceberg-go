@@ -25,6 +25,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/iceberg-go"
+	tblutils "github.com/apache/iceberg-go/table/internal"
 )
 
 // AllManifests returns every manifest referenced by every snapshot currently
@@ -53,7 +54,7 @@ func (i InspectTable) AllManifests(ctx context.Context) (array.RecordReader, err
 
 		rows := 0
 		emitted := false
-		chunk := make([]iceberg.ManifestFile, 0, recordBatchSize)
+		chunk := make([]iceberg.ManifestFile, 0, tblutils.RecordBatchSize)
 		emit := func() bool {
 			if rows == 0 {
 				return true
@@ -90,7 +91,7 @@ func (i InspectTable) AllManifests(ctx context.Context) (array.RecordReader, err
 			}
 
 			// Gather manifests into a reused chunk so each record batch is
-			// filled to recordBatchSize across snapshot boundaries.
+			// filled to RecordBatchSize across snapshot boundaries.
 			referenceSnapshotID := snapshot.SnapshotID
 			appendChunk := func() bool {
 				if err := i.appendManifestRows(ctx, bldr, slices.Values(chunk), &referenceSnapshotID); err != nil {
@@ -105,7 +106,7 @@ func (i InspectTable) AllManifests(ctx context.Context) (array.RecordReader, err
 			}
 			for manifest := range manifests {
 				chunk = append(chunk, manifest)
-				if rows+len(chunk) < recordBatchSize {
+				if rows+len(chunk) < tblutils.RecordBatchSize {
 					continue
 				}
 				if !appendChunk() || !emit() {

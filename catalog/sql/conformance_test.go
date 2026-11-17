@@ -34,8 +34,7 @@ func TestSqlCatalogConformance(t *testing.T) {
 	catalogtest.RunCatalogTests(t, catalogtest.Config{
 		SupportsNamespaceProperties: true,
 		SupportsRenameTable:         true,
-		// SupportsNestedNamespaces stays off until #2388: listing returns the
-		// parent and every descendant, and dropping a parent orphans its children.
+		SupportsNestedNamespaces:    true,
 		NewCatalog: func(t *testing.T) catalog.Catalog {
 			warehouse := t.TempDir()
 
