@@ -203,13 +203,7 @@ type Catalog struct {
 // is not created on construction; it is created implicitly by the first CreateNamespace
 // call. When using other schemes, the property `allow-unsafe-commits` must be set to
 // true since custom schemes and blob filesystems do not have the same atomicity guarantees.
-func NewCatalog(ctx context.Context, name, warehouse string, props iceberg.Properties) (*Catalog, error) {
-	return NewCatalogWithOptions(ctx, name, warehouse, props)
-}
-
-// NewCatalogWithOptions allows a Hadoop catalog to use an isolated FileIO registry
-// without changing the existing NewCatalog API.
-func NewCatalogWithOptions(ctx context.Context, name, warehouse string, props iceberg.Properties, opts ...Option) (*Catalog, error) {
+func NewCatalog(ctx context.Context, name, warehouse string, props iceberg.Properties, opts ...Option) (*Catalog, error) {
 	var config catalogOptions
 	for _, opt := range opts {
 		opt(&config)
