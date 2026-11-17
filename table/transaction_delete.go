@@ -1038,24 +1038,30 @@ func (t *Transaction) writePositionDeletesForFiles(ctx context.Context, fs io.IO
 		}
 	}
 
-	// Supersede only deletes for files that received a replacement DV.
-	// File-scoped legacy position deletes are now represented by that DV;
-	// shared position-delete files must stay live for their other targets.
+	// Only replace old deletes for data files that actually received a DV.
+	supersedeDeletesForWrittenDVs(updater, seen, oldPositionDeletes, existingDVs)
+
+	return referenced, nil
+}
+
+// supersedeDeletesForWrittenDVs removes old deletes only for data files that
+// received a replacement DV. File-scoped legacy deletes are folded into the
+// new bitmap; shared position-delete files must remain live because another
+// data file can still need them.
+func supersedeDeletesForWrittenDVs(updater *snapshotProducer, replacedPaths map[string]struct{}, oldPositionDeletes *legacyPositionDeletes, oldDVs map[string]iceberg.DataFile) {
 	for dataFilePath, deleteFiles := range oldPositionDeletes.fileScoped {
-		if _, replaced := seen[dataFilePath]; !replaced {
+		if _, replaced := replacedPaths[dataFilePath]; !replaced {
 			continue
 		}
 		for _, deleteFile := range deleteFiles {
 			updater.removeDeleteFile(deleteFile)
 		}
 	}
-	for dataFilePath, dvFile := range existingDVs {
-		if _, replaced := seen[dataFilePath]; replaced {
+	for dataFilePath, dvFile := range oldDVs {
+		if _, replaced := replacedPaths[dataFilePath]; replaced {
 			updater.removeDeletionVector(dvFile)
 		}
 	}
-
-	return referenced, nil
 }
 
 // legacyPositionDeletes records applicable v2 position deletes for the
