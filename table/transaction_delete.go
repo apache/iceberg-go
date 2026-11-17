@@ -217,23 +217,8 @@ func (t *Transaction) performMergeOnReadDeletion(ctx context.Context, snapshotPr
 				if err := validateDataFilesExist(cc, referenced); err != nil {
 					return err
 				}
-				if len(dvTargets) == 0 {
-					return nil
-				}
 
-				return cc.forEachAddedEntry(iceberg.ManifestContentDeletes, func(snap Snapshot, entry iceberg.ManifestEntry) error {
-					file := entry.DataFile()
-					ref := explicitReferencedDataFile(file)
-					if !IsDeletionVector(file) || ref == "" {
-						return nil
-					}
-					if _, ok := dvTargets[ref]; ok {
-						return fmt.Errorf("%w: cannot add a deletion vector for data file %s: concurrent snapshot %d committed a live deletion vector %s for it; reload the table and retry the delete",
-							ErrConflictingDeleteFiles, ref, snap.SnapshotID, file.FilePath())
-					}
-
-					return nil
-				})
+				return validateNoConcurrentDVs(cc, dvTargets, "reload the table and retry the delete")
 			})
 		}
 	}
