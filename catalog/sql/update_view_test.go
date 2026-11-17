@@ -89,6 +89,24 @@ func TestUpdateViewVersionsAndRollback(t *testing.T) {
 	require.Len(t, rolledBack.Versions(), 2)
 }
 
+func TestUpdateViewRejectsDuplicateFieldIDs(t *testing.T) {
+	// A view schema with two fields at ID 0 would be written and then fail to
+	// load, so UpdateView must fail and leave the view unchanged.
+	cat := newNamespaceRaceCatalog(t)
+	created := createUpdateTestView(t, cat)
+
+	dup := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 0, Name: "a", Type: iceberg.PrimitiveTypes.Int32},
+		iceberg.NestedField{ID: 0, Name: "b", Type: iceberg.PrimitiveTypes.String})
+	_, err := cat.UpdateView(t.Context(), created.Identifier(), nil, []view.Update{view.NewAddSchemaUpdate(dup)})
+	require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+	require.ErrorContains(t, err, "multiple fields for id 0: a and b")
+
+	loaded, err := cat.LoadView(t.Context(), created.Identifier())
+	require.NoError(t, err)
+	require.Equal(t, created.MetadataLocation(), loaded.MetadataLocation())
+}
+
 func TestUpdateViewRequirementsAndNoop(t *testing.T) {
 	cat := newNamespaceRaceCatalog(t)
 	created := createUpdateTestView(t, cat)

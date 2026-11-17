@@ -4148,3 +4148,20 @@ func fillNonZero(v reflect.Value, seen map[reflect.Type]bool) bool {
 func fieldValue(f reflect.Value) reflect.Value {
 	return reflect.NewAt(f.Type(), unsafe.Pointer(f.UnsafeAddr())).Elem()
 }
+
+func TestAddSchemaRejectsDuplicateFieldIDs(t *testing.T) {
+	// Reading metadata rejects a schema with duplicate IDs, so the builder
+	// must not write one.
+	meta, err := ParseMetadataString(ExampleTableMetadataV2)
+	require.NoError(t, err)
+	b, err := MetadataBuilderFromBase(meta, "")
+	require.NoError(t, err)
+
+	sc := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 0, Name: "a", Type: iceberg.PrimitiveTypes.Int32},
+		iceberg.NestedField{ID: 0, Name: "b", Type: iceberg.PrimitiveTypes.String})
+
+	err = b.AddSchema(sc)
+	require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+	assert.ErrorContains(t, err, "multiple fields for id 0: a and b")
+}

@@ -953,6 +953,67 @@ func TestUnmarshalSchemaRejectsDuplicateFieldIDs(t *testing.T) {
 			}`,
 			contains: "multiple fields for id 0: id and inner",
 		},
+		{
+			name: "duplicate negative ids",
+			schema: `{
+				"type": "struct",
+				"fields": [
+					{"id": -1, "name": "a", "type": "int", "required": false},
+					{"id": -1, "name": "b", "type": "string", "required": false}
+				],
+				"schema-id": 0,
+				"identifier-field-ids": []
+			}`,
+			contains: "multiple fields for id -1: a and b",
+		},
+		{
+			name: "duplicate zero id on list element",
+			schema: `{
+				"type": "struct",
+				"fields": [
+					{"id": 0, "name": "id", "type": "long", "required": true},
+					{
+						"id": 1,
+						"name": "items",
+						"type": {
+							"type": "list",
+							"element-id": 0,
+							"element": "int",
+							"element-required": false
+						},
+						"required": false
+					}
+				],
+				"schema-id": 0,
+				"identifier-field-ids": []
+			}`,
+			contains: "multiple fields for id 0: id and element",
+		},
+		{
+			name: "duplicate zero id on map value",
+			schema: `{
+				"type": "struct",
+				"fields": [
+					{"id": 0, "name": "id", "type": "long", "required": true},
+					{
+						"id": 1,
+						"name": "props",
+						"type": {
+							"type": "map",
+							"key-id": 2,
+							"key": "string",
+							"value-id": 0,
+							"value": "int",
+							"value-required": false
+						},
+						"required": false
+					}
+				],
+				"schema-id": 0,
+				"identifier-field-ids": []
+			}`,
+			contains: "multiple fields for id 0: id and value",
+		},
 	}
 
 	for _, tt := range tests {
