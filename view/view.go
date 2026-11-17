@@ -134,6 +134,8 @@ func NewFromLocation(
 // Note: This function only supports creating new views with format version 1.
 // It does not support updating existing view metadata.
 // representation holds both SQL text and its dialect.
+// WithIORegistry selects a non-global filesystem for the metadata write;
+// the option does not persist filesystem credentials in the view.
 func CreateView(
 	ctx context.Context,
 	catalogName string,
@@ -150,7 +152,8 @@ func CreateView(
 
 // CreateViewWithIOProperties creates a view using ioProps to configure the
 // filesystem and metadataProps as the properties persisted in view metadata.
-// representation holds both SQL text and its dialect.
+// representation holds both SQL text and its dialect. WithIORegistry optionally
+// selects the registry used by the write without changing persisted metadata.
 func CreateViewWithIOProperties(
 	ctx context.Context,
 	catalogName string,
@@ -180,6 +183,7 @@ func CreateViewWithIOProperties(
 // CreateViewFromVersion creates a view whose first version is version, kept as
 // given apart from its IDs. A nil default namespace defaults to the view's
 // namespace, a nil summary to the engine name, and a zero timestamp to now.
+// WithIORegistry affects only filesystem resolution for the metadata write.
 func CreateViewFromVersion(
 	ctx context.Context,
 	viewIdent table.Identifier,
