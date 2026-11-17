@@ -201,6 +201,30 @@ func TestExpireReplayPlansWhereExpiryWasStaged(t *testing.T) {
 	})
 }
 
+// TestFailedRefsOnlyExpirationLeavesAppendUsable verifies that rejecting a
+// history-dependent operation does not poison an otherwise valid transaction.
+// Even a no-op expiration is unsafe to plan from refs-only metadata.
+func TestFailedRefsOnlyExpirationLeavesAppendUsable(t *testing.T) {
+	fs, cat, tbl := newExpireReplayTable(t, nil)
+	tbl.snapshotHistoryRefsOnly = true
+	tx := tbl.NewTransaction()
+
+	err := tx.ExpireSnapshots(WithOlderThan(0), WithPostCommit(false))
+	require.ErrorIs(t, err, ErrInvalidOperation)
+	require.ErrorIs(t, err, errSnapshotHistoryIncompleteForExpiration)
+	staged, err := tx.StagedTable()
+	require.NoError(t, err)
+	require.Empty(t, staged.Metadata().Snapshots(), "rejected expiration must not stage updates")
+
+	stageFiles(t, tx, "after-rejected-expiration")
+	committed, err := tx.Commit(t.Context())
+	require.NoError(t, err)
+	require.Len(t, committed.Metadata().Snapshots(), 1)
+	require.Equal(t, []string{"after-rejected-expiration"},
+		branchFiles(t, fs, committed.Metadata(), MainBranch))
+	require.Equal(t, int32(1), cat.attempts.Load(), "append should commit once")
+}
+
 func TestExpireReplayRejectsRefsOnlyHistoryAfterRetry(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		fs, inner, tbl := newExpireReplayTable(t, nil)
