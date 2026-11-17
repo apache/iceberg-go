@@ -393,6 +393,7 @@ func ExecuteOrphanCleanup(ctx context.Context, tbl *table.Table, plan OrphanClea
 	if cfg.dryRun {
 		return plan.result(), nil
 	}
+
 	return executeOrphanCleanupPlan(ctx, tbl, plan, cfg)
 }
 
