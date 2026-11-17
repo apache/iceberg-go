@@ -1322,6 +1322,8 @@ func TestBuildUpdatesSelectsAddedSchemaAfterConcurrentRegistration(t *testing.T)
 		otherFields []string
 	}{
 		{name: "different schema", otherFields: []string{"a", "b"}},
+		// Passes only on catalogs that keep the reused schema as last added, like MetadataBuilder.
+		// Java catalogs reject SetCurrentSchema(-1) here.
 		{name: "equivalent schema", otherFields: []string{"a", "c"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1335,6 +1337,8 @@ func TestBuildUpdatesSelectsAddedSchemaAfterConcurrentRegistration(t *testing.T)
 			updates, requirements, err := tbl.NewTransaction().UpdateSchema(true, false).
 				DeleteColumn([]string{"b"}).BuildUpdates()
 			require.NoError(t, err)
+			require.Len(t, updates, 2)
+			require.Equal(t, -1, updates[1].(*setCurrentSchemaUpdate).SchemaID)
 
 			otherFields := make([]iceberg.NestedField, 0, len(tc.otherFields))
 			for _, name := range tc.otherFields {
