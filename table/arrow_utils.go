@@ -2200,11 +2200,11 @@ type recordWritingArgs struct {
 	// channel capacity; non-positive uses the default (see
 	// rollingDataWriterQueueCapacity).
 	recordBatchBufferSize int
-	// existingDVs maps a data file path to the positions already recorded in
-	// its current deletion vector. On the v3 DV write path these are folded
-	// into the newly written DV so a data file that already had a DV ends up
-	// with a single merged vector (the caller removes the superseded one).
-	existingDVs map[string]*dv.RoaringPositionBitmap
+	// existingDeletes maps a data file path to positions deleted by earlier
+	// position-delete files or its current deletion vector. On v3 writes,
+	// the seed is included only when a new position needs a replacement DV.
+	// The caller then removes superseded file-scoped deletes and old DVs.
+	existingDeletes map[string]*dv.RoaringPositionBitmap
 }
 
 func checkPartitionSourceType(field iceberg.PartitionField, sourceType iceberg.Type) error {
@@ -2488,7 +2488,7 @@ func positionDeleteRecordsToDataFilesDV(ctx context.Context, rootLocation string
 		// already present in the seed before deciding that a replacement is
 		// needed.
 		hasEntries := false
-		seededPaths := make(map[string]struct{}, len(args.existingDVs))
+		seededPaths := make(map[string]struct{}, len(args.existingDeletes))
 
 		for batch, err := range args.itr {
 			if err != nil {
@@ -2515,11 +2515,11 @@ func positionDeleteRecordsToDataFilesDV(ctx context.Context, rootLocation string
 
 					return
 				}
-				if bitmap := args.existingDVs[filePath]; bitmap != nil && bitmap.Contains(uint64(position)) {
+				if bitmap := args.existingDeletes[filePath]; bitmap != nil && bitmap.Contains(uint64(position)) {
 					continue
 				}
 				if _, ok := seededPaths[filePath]; !ok {
-					if bitmap := args.existingDVs[filePath]; bitmap != nil {
+					if bitmap := args.existingDeletes[filePath]; bitmap != nil {
 						writer.Load(filePath, bitmap, pCtx.specID, pCtx.partitionData)
 					}
 					seededPaths[filePath] = struct{}{}
