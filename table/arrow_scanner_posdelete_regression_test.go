@@ -60,7 +60,7 @@ func TestPositionDeleteColumnIndices(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			filePathIndex, posIndex, err := positionDeleteColumnIndices(arrow.NewSchema(test.fields, nil))
+			filePathIndex, posIndex, err := internal.PositionDeleteColumnIndices(arrow.NewSchema(test.fields, nil))
 			if test.wantErr != "" {
 				require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
 				require.ErrorContains(t, err, test.wantErr)

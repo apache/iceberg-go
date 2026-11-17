@@ -28,6 +28,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
+	tblutils "github.com/apache/iceberg-go/table/internal"
 	"github.com/stretchr/testify/require"
 )
 
@@ -166,28 +167,28 @@ func TestMergeInspectPartitionAggregateTimestampTies(t *testing.T) {
 	const timestamp = int64(123000)
 	firstSnapshot := int64(10)
 	secondSnapshot := int64(20)
-	dst := &partitionAggregate{
-		dataRecordCount: 3, dataFileCount: 1, specID: 1,
-		lastUpdatedAt: new(timestamp), lastUpdatedSnapshot: &firstSnapshot,
+	dst := &tblutils.PartitionAggregate{
+		DataRecordCount: 3, DataFileCount: 1, SpecID: 1,
+		LastUpdatedAt: new(timestamp), LastUpdatedSnapshot: &firstSnapshot,
 	}
-	sameTime := &partitionAggregate{
-		dataRecordCount: 5, dataFileCount: 2, specID: 2,
-		lastUpdatedAt: new(timestamp), lastUpdatedSnapshot: &secondSnapshot,
+	sameTime := &tblutils.PartitionAggregate{
+		DataRecordCount: 5, DataFileCount: 2, SpecID: 2,
+		LastUpdatedAt: new(timestamp), LastUpdatedSnapshot: &secondSnapshot,
 	}
 	mergeInspectPartitionAggregate(dst, sameTime)
 
 	// The earlier manifest wins a timestamp tie, but counts still add up.
-	require.EqualValues(t, 8, dst.dataRecordCount)
-	require.EqualValues(t, 3, dst.dataFileCount)
-	require.EqualValues(t, 1, dst.specID)
-	require.Equal(t, firstSnapshot, *dst.lastUpdatedSnapshot)
+	require.EqualValues(t, 8, dst.DataRecordCount)
+	require.EqualValues(t, 3, dst.DataFileCount)
+	require.EqualValues(t, 1, dst.SpecID)
+	require.Equal(t, firstSnapshot, *dst.LastUpdatedSnapshot)
 
 	newerTime := timestamp + 1
-	newer := &partitionAggregate{
-		specID: 3, lastUpdatedAt: &newerTime, lastUpdatedSnapshot: &secondSnapshot,
+	newer := &tblutils.PartitionAggregate{
+		SpecID: 3, LastUpdatedAt: &newerTime, LastUpdatedSnapshot: &secondSnapshot,
 	}
 	mergeInspectPartitionAggregate(dst, newer)
-	require.EqualValues(t, 3, dst.specID)
-	require.Equal(t, newerTime, *dst.lastUpdatedAt)
-	require.Equal(t, secondSnapshot, *dst.lastUpdatedSnapshot)
+	require.EqualValues(t, 3, dst.SpecID)
+	require.Equal(t, newerTime, *dst.LastUpdatedAt)
+	require.Equal(t, secondSnapshot, *dst.LastUpdatedSnapshot)
 }
