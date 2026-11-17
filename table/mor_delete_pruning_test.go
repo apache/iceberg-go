@@ -144,6 +144,41 @@ func TestV3MergeOnReadDoubleDeleteMergesDeletionVector(t *testing.T) {
 		"both id=2 and id=4 must be deleted and no previously deleted row may resurrect")
 }
 
+// TestV3MergeOnReadDeleteWithoutNewPositionsKeepsDV checks that a delete
+// matching only already-deleted positions does not remove or rewrite its DV.
+// Stats may still select the file even when no live row matches.
+func TestV3MergeOnReadDeleteWithoutNewPositionsKeepsDV(t *testing.T) {
+	ctx := t.Context()
+	tbl := appendRows(t, newMergeOnReadTestTableVersion(t, "3"),
+		`[{"id":1,"data":"a"},{"id":2,"data":"b"},{"id":3,"data":"c"}]`)
+
+	var err error
+	tbl, err = tbl.Delete(ctx, iceberg.EqualTo(iceberg.Reference("id"), int64(1)), nil)
+	require.NoError(t, err)
+	require.Equal(t, []int64{2, 3}, idsInTable(t, tbl))
+	require.Equal(t, 1, liveDVCount(t, tbl))
+
+	tasks, err := tbl.Scan().PlanFiles(ctx)
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	require.Len(t, tasks[0].DeletionVectorFiles, 1)
+	originalDVPath := tasks[0].DeletionVectorFiles[0].FilePath()
+
+	// This filter only matches the row already deleted by the first DV.
+	tbl, err = tbl.Delete(ctx, iceberg.EqualTo(iceberg.Reference("id"), int64(1)), nil)
+	require.NoError(t, err)
+	require.Equal(t, []int64{2, 3}, idsInTable(t, tbl),
+		"an empty delete must not resurrect the originally deleted row")
+	require.Equal(t, 1, liveDVCount(t, tbl), "the existing DV must stay live")
+
+	tasks, err = tbl.Scan().PlanFiles(ctx)
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	require.Len(t, tasks[0].DeletionVectorFiles, 1)
+	require.Equal(t, originalDVPath, tasks[0].DeletionVectorFiles[0].FilePath(),
+		"an empty delete must not replace or drop the existing DV")
+}
+
 // TestV3MergeOnReadTripleDeleteMergesDeletionVector extends the double-delete
 // guard to a third delete. The second delete supersedes DV #1, leaving it as a
 // DELETED-status entry in the deleted-files manifest against the same data file.
