@@ -23,6 +23,9 @@ import (
 	"slices"
 )
 
+// Preserve a distinct cause for both staging and retry failures so callers
+// can match the public ErrInvalidOperation or ErrTransactionUnusable wrapper
+// without relying on the human-readable REST configuration hint.
 var errSnapshotHistoryIncompleteForExpiration = errors.New(
 	"cannot expire snapshots with incomplete history under REST snapshot-loading-mode=refs; reload with snapshot-loading-mode=all",
 )
