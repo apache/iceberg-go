@@ -297,6 +297,42 @@ func (u *UpdateSchema) findParentID(fieldID int) int {
 	return parentID
 }
 
+// checkNameAvailable returns an error if the struct with the given parent ID
+// already has a column called name, or will have one after this update. A
+// column that is deleted, or renamed to another name, in this update gives up
+// its name, so a new column may take it.
+func (u *UpdateSchema) checkNameAvailable(parentID int, name, fullName string) error {
+	for _, add := range u.adds[parentID] {
+		if u.sameName(add.Name, name) {
+			return fmt.Errorf("field already exists in adds: %s", fullName)
+		}
+	}
+
+	if field, ok := u.findField(fullName); ok && !u.isDeleted(field.ID) {
+		if upd, updated := u.updates[parentID][field.ID]; !updated || u.sameName(upd.Name, name) {
+			return fmt.Errorf("cannot add column, name already exists: %s", fullName)
+		}
+	}
+
+	// Another column in the same struct may be renamed to this name.
+	for _, upd := range u.updates[parentID] {
+		if u.sameName(upd.Name, name) {
+			return fmt.Errorf("field already exists: %s", fullName)
+		}
+	}
+
+	return nil
+}
+
+// sameName compares two column names using the case sensitivity of the update.
+func (u *UpdateSchema) sameName(a, b string) bool {
+	if u.caseSensitive {
+		return a == b
+	}
+
+	return strings.EqualFold(a, b)
+}
+
 func (u *UpdateSchema) AddColumn(path []string, fieldType iceberg.Type, doc string, required bool, defaultValue iceberg.Literal) *UpdateSchema {
 	u.ops = append(u.ops, func() error {
 		return u.addColumn(path, fieldType, doc, required, defaultValue)
@@ -355,21 +391,8 @@ func (u *UpdateSchema) addColumn(path []string, fieldType iceberg.Type, doc stri
 	}
 
 	name := path[len(path)-1]
-	for _, add := range u.adds[parentID] {
-		if add.Name == name {
-			return fmt.Errorf("field already exists in adds: %s", fullName)
-		}
-	}
-
-	// support add field with the same name as deleted field and renamed field
-	if field, ok := u.findField(fullName); ok {
-		if !u.isDeleted(field.ID) {
-			for _, upd := range u.updates[parentID] {
-				if upd.Name == name {
-					return fmt.Errorf("field already exists: %s", fullName)
-				}
-			}
-		}
+	if err := u.checkNameAvailable(parentID, name, fullName); err != nil {
+		return err
 	}
 
 	field := iceberg.NestedField{
@@ -819,21 +842,8 @@ func (u *UpdateSchema) unionAddColumn(path []string, newField iceberg.NestedFiel
 	}
 
 	name := path[len(path)-1]
-	for _, add := range u.adds[parentID] {
-		if add.Name == name {
-			return fmt.Errorf("field already exists in adds: %s", fullName)
-		}
-	}
-
-	// guard against colliding with a pending rename
-	if field, ok := u.findField(fullName); ok {
-		if !u.isDeleted(field.ID) {
-			for _, upd := range u.updates[parentID] {
-				if upd.Name == name {
-					return fmt.Errorf("field already exists: %s", fullName)
-				}
-			}
-		}
+	if err := u.checkNameAvailable(parentID, name, fullName); err != nil {
+		return err
 	}
 
 	if err := validateFieldDefaults(newField); err != nil {
