@@ -43,6 +43,7 @@ func orphanCleanupGCTestTable(t *testing.T, fs *iceio.MemFS, props iceberg.Prope
 
 	fsF := testFSF(fs)
 	catalog := &orphanCleanupTestCatalog{metadata: meta, location: metadataPath, fsF: fsF}
+
 	return table.New(table.Identifier{"db", "gc"}, meta, metadataPath, fsF, catalog), orphan
 }
 
