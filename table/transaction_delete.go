@@ -896,10 +896,13 @@ func isNullPositionDeletePath(values arrow.TypedArray[string], column arrow.Arra
 	return false
 }
 
-// writePositionDeletesForFiles writes position-delete files for the rows in
-// files that match filter, appends them to updater, and returns the distinct
-// data-file paths those deletes reference, including paths in v2 delete files
-// that cover more than one data file.
+// writePositionDeletesForFiles writes position deletes on v2 or DVs on v3.
+// It returns distinct data-file paths affected by the new deletes.
+// A v2 position-delete file may cover multiple data files, so those paths
+// must be collected from streamed records rather than its manifest entry.
+// On v3, only files with new positions receive replacement DVs. An unchanged
+// file must retain its prior deletes, and a shared legacy delete file cannot
+// be removed just because one of its targets now has a DV.
 func (t *Transaction) writePositionDeletesForFiles(ctx context.Context, fs io.IO, updater *snapshotProducer, dvs liveDeletionVectors, files []iceberg.DataFile, filter iceberg.BooleanExpression, caseSensitive bool, concurrency int, commitUUID uuid.UUID) ([]string, error) {
 	meta, err := t.txnMeta()
 	if err != nil {
@@ -981,9 +984,10 @@ func (t *Transaction) writePositionDeletesForFiles(ctx context.Context, fs io.IO
 	// removed. Without this a second delete on the same file would write a
 	// second live DV, corrupting the table (buildDVIndex rejects it).
 	// dvs is empty on v2.
-	// A v2 table upgraded to v3 may still have position deletes. A new DV
-	// must include those positions because readers ignore position deletes
-	// once a DV applies to the data file.
+	// A v2 table upgraded to v3 may still have position deletes. Seed
+	// those positions too: once a DV applies, readers ignore old position
+	// deletes for that data file. The writer only uses a seed after finding
+	// at least one position not already covered by it.
 	existingDVs := make(map[string]iceberg.DataFile)
 	existingDeletes := make(map[string]*dv.RoaringPositionBitmap, len(oldPositionDeletes.bitmaps)+len(dvs))
 	maps.Copy(existingDeletes, oldPositionDeletes.bitmaps)
@@ -1054,6 +1058,11 @@ func (t *Transaction) writePositionDeletesForFiles(ctx context.Context, fs io.IO
 	return referenced, nil
 }
 
+// legacyPositionDeletes records applicable v2 position deletes for the
+// current scan. bitmaps contains their row positions grouped by data-file
+// path, including positions from shared delete files. fileScoped contains
+// only delete files dedicated to one target; those may be removed when that
+// target receives a replacement DV. Shared delete files must stay live.
 type legacyPositionDeletes struct {
 	bitmaps    map[string]*dv.RoaringPositionBitmap
 	fileScoped map[string][]iceberg.DataFile
