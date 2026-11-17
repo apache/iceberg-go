@@ -92,6 +92,77 @@ func TestCreateViewWithEmptyRegistryDoesNotFallBackToGlobal(t *testing.T) {
 	require.ErrorIs(t, err, iceio.ErrIOSchemeNotFound)
 }
 
+// TestWriteMetadataUsesIsolatedRegistry directly exercises metadata writes,
+// not just the view-creation wrapper. Storage-only settings must reach FileIO
+// without becoming persisted view properties.
+func TestWriteMetadataUsesIsolatedRegistry(t *testing.T) {
+	const scheme = "isolated-view-metadata-write"
+	ctx := t.Context()
+	registry := &iceio.Registry{}
+	fs := iceio.NewMemFS()
+	var storageProps map[string]string
+	require.NoError(t, registry.Register(scheme, func(_ context.Context, _ *url.URL, props map[string]string) (iceio.IO, error) {
+		storageProps = props
+
+		return fs, nil
+	}))
+	created, err := CreateView(
+		ctx, "test", []string{"db", "view"}, newTestSchema(0),
+		Representation{SQL: "SELECT 1", Dialect: "spark"},
+		[]string{"db"}, scheme+"://bucket/view", iceberg.Properties{"persisted": "yes"},
+		WithIORegistry(registry),
+	)
+	require.NoError(t, err)
+
+	metadataLocation, writeFS, err := WriteMetadata(ctx, created.Metadata(),
+		iceberg.Properties{"storage-token": "private"}, WithIORegistry(registry))
+	require.NoError(t, err)
+	require.NotEqual(t, created.MetadataLocation(), metadataLocation)
+	require.Same(t, fs, writeFS)
+	require.Equal(t, "private", storageProps["storage-token"])
+	require.Equal(t, "yes", created.Properties()["persisted"])
+	require.NotContains(t, created.Properties(), "storage-token")
+	file, err := fs.Open(ctx, metadataLocation)
+	require.NoError(t, err)
+	require.NoError(t, file.Close())
+	_, err = iceio.LoadFS(ctx, nil, metadataLocation)
+	require.ErrorIs(t, err, iceio.ErrIOSchemeNotFound)
+}
+
+// TestViewMetadataIORegistryIsLive guards the supplied registry pointer
+// against being copied or silently replaced by the global registry.
+func TestViewMetadataIORegistryIsLive(t *testing.T) {
+	const scheme = "isolated-view-registry-live"
+	ctx := t.Context()
+	registry := &iceio.Registry{}
+	ident := []string{"db", "view"}
+	representation := Representation{SQL: "SELECT 1", Dialect: "spark"}
+	location := scheme + "://bucket/view"
+
+	_, err := CreateView(ctx, "test", ident, newTestSchema(0),
+		representation, []string{"db"}, location, nil, WithIORegistry(registry))
+	require.ErrorIs(t, err, iceio.ErrIOSchemeNotFound)
+
+	fs := iceio.NewMemFS()
+	require.NoError(t, registry.Register(scheme, func(context.Context, *url.URL, map[string]string) (iceio.IO, error) {
+		return fs, nil
+	}))
+	created, err := CreateView(ctx, "test", ident, newTestSchema(0),
+		representation, []string{"db"}, location, nil, WithIORegistry(registry))
+	require.NoError(t, err)
+	file, err := fs.Open(ctx, created.MetadataLocation())
+	require.NoError(t, err)
+	require.NoError(t, file.Close())
+
+	registry.Unregister(scheme)
+	_, _, err = WriteMetadata(ctx, created.Metadata(), nil, WithIORegistry(registry))
+	require.ErrorIs(t, err, iceio.ErrIOSchemeNotFound,
+		"unregistering the private scheme must not fall back to the global registry")
+	file, err = fs.Open(ctx, created.MetadataLocation())
+	require.NoError(t, err, "failed new metadata writes must not remove an existing view")
+	require.NoError(t, file.Close())
+}
+
 func TestCreateViewFromVersionPreservesMetadataWithIsolatedRegistry(t *testing.T) {
 	const scheme = "isolated-view-version"
 	registry := &iceio.Registry{}
