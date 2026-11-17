@@ -217,6 +217,8 @@ iceberg expire-snapshots --older-than 7d --dry-run my_db.events
 iceberg expire-snapshots --older-than 7d --retain-last 5 my_db.events
 ```
 
+For REST catalogs, the `iceberg expire-snapshots` command requires complete snapshot history. Configure `snapshot-loading-mode=all` before running it; `snapshot-loading-mode=refs` omits history needed to enforce retention and causes expiration to fail.
+
 ### `clean-orphan-files`
 
 Remove data files in the table location that are not referenced by any snapshot's manifests (e.g. left behind by failed writes).
