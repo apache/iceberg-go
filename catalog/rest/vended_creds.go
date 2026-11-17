@@ -552,7 +552,7 @@ func loadRegistryFS(ctx context.Context, registry *iceio.Registry, props iceberg
 // loadRegistryFSFunc preserves the global registry for lazy loads when none is configured.
 func loadRegistryFSFunc(registry *iceio.Registry, props iceberg.Properties, location string) func(context.Context) (iceio.IO, error) {
 	return func(ctx context.Context) (iceio.IO, error) {
-		fs, err := cataloginternal.LoadFSWithRegistry(ctx, registry, props, location)
+		fs, err := loadRegistryFS(ctx, registry, props, location)
 		if err != nil {
 			return nil, fmt.Errorf("failed to load metadata file at %s: %w", location, err)
 		}
