@@ -41,18 +41,26 @@ import (
 // cancellation. After a successful write, the caller owns publication and may
 // use the returned filesystem to remove the file after a confirmed failed
 // commit. A commit with an unknown outcome must retain the file.
-func WriteMetadata(ctx context.Context, metadata Metadata, ioProps iceberg.Properties) (string, icebergio.WriteFileIO, error) {
-	return WriteMetadataWithRegistry(ctx, metadata, ioProps, nil)
+// MetadataIOOption configures the filesystem used to write view metadata.
+// This is distinct from Option, which configures a loaded View.
+type MetadataIOOption func(*metadataIOOptions)
+
+type metadataIOOptions struct {
+	registry *icebergio.Registry
 }
 
-// WriteMetadataWithRegistry writes a new view metadata file through the
-// selected FileIO registry. A nil registry uses the process-wide default.
-// The registry pointer is shared; later Register and Unregister calls are
-// visible to this write.
-func WriteMetadataWithRegistry(
-	ctx context.Context, metadata Metadata, ioProps iceberg.Properties,
-	registry *icebergio.Registry,
-) (string, icebergio.WriteFileIO, error) {
+// WithIORegistry uses a catalog-scoped FileIO registry to write view metadata.
+// A nil registry uses the process-wide default. The registry is shared, not copied.
+func WithIORegistry(registry *icebergio.Registry) MetadataIOOption {
+	return func(o *metadataIOOptions) { o.registry = registry }
+}
+
+// WriteMetadata writes view metadata through the configured FileIO registry.
+func WriteMetadata(ctx context.Context, metadata Metadata, ioProps iceberg.Properties, opts ...MetadataIOOption) (string, icebergio.WriteFileIO, error) {
+	var config metadataIOOptions
+	for _, opt := range opts {
+		opt(&config)
+	}
 	if err := ctx.Err(); err != nil {
 		return "", nil, err
 	}
@@ -71,8 +79,8 @@ func WriteMetadataWithRegistry(
 		return "", nil, fmt.Errorf("failed to marshal view metadata: %w", err)
 	}
 	loadFS := icebergio.LoadFS
-	if registry != nil {
-		loadFS = registry.LoadFS
+	if config.registry != nil {
+		loadFS = config.registry.LoadFS
 	}
 	fs, err := loadFS(ctx, ioProps, location)
 	if err != nil {
