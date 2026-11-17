@@ -1552,6 +1552,36 @@ func (r *RestCatalogSuite) TestCreateTableRejectsMultiSourceBuiltInPartitionFiel
 	r.False(serverHit, "create POST must not be sent with a built-in transform that has multiple sources")
 }
 
+func (r *RestCatalogSuite) TestCreateTableRejectsIncompatiblePartitionSourceType() {
+	var serverHit bool
+	r.mux.HandleFunc("/v1/namespaces/fokko/tables", func(w http.ResponseWriter, req *http.Request) {
+		serverHit = true
+		w.Write([]byte(createTableRestExample))
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.String, Required: true},
+	)
+	spec := iceberg.NewPartitionSpecID(1, iceberg.PartitionField{
+		SourceIDs: []int{1},
+		FieldID:   1000,
+		Name:      "id_day",
+		Transform: iceberg.DayTransform{},
+	})
+	_, err = cat.CreateTable(
+		context.Background(),
+		catalog.ToIdentifier("fokko", "fokko2"),
+		schema,
+		catalog.WithPartitionSpec(&spec),
+	)
+
+	r.ErrorIs(err, iceberg.ErrInvalidPartitionSpec)
+	r.False(serverHit, "create POST must not be sent with an incompatible partition source type")
+}
+
 func (r *RestCatalogSuite) TestCreateTableStagedInvalidAddSpecDoesNotCreateStagedTable() {
 	var createCalled bool
 	r.mux.HandleFunc("/v1/namespaces/db/tables", func(w http.ResponseWriter, req *http.Request) {
