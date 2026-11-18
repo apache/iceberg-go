@@ -1049,16 +1049,11 @@ func (t *Transaction) writePositionDeletesForFiles(ctx context.Context, fs io.IO
 // new bitmap; shared position-delete files must remain live because another
 // data file can still need them.
 func supersedeDeletesForWrittenDVs(updater *snapshotProducer, replacedPaths map[string]struct{}, oldPositionDeletes *legacyPositionDeletes, oldDVs map[string]iceberg.DataFile) {
-	for dataFilePath, deleteFiles := range oldPositionDeletes.fileScoped {
-		if _, replaced := replacedPaths[dataFilePath]; !replaced {
-			continue
-		}
-		for _, deleteFile := range deleteFiles {
+	for dataFilePath := range replacedPaths {
+		for _, deleteFile := range oldPositionDeletes.fileScoped[dataFilePath] {
 			updater.removeDeleteFile(deleteFile)
 		}
-	}
-	for dataFilePath, dvFile := range oldDVs {
-		if _, replaced := replacedPaths[dataFilePath]; replaced {
+		if dvFile, ok := oldDVs[dataFilePath]; ok {
 			updater.removeDeletionVector(dvFile)
 		}
 	}
