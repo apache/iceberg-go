@@ -112,6 +112,40 @@ func TestSQLCatalogIORegistriesAreIsolated(t *testing.T) {
 	}
 }
 
+func TestSQLCatalogMissingScopedSchemeDoesNotPublishTable(t *testing.T) {
+	ctx := t.Context()
+	warehouse := (&url.URL{Scheme: "file", Path: filepath.ToSlash(t.TempDir())}).String()
+	db, err := sql.Open(sqliteshim.ShimName, filepath.Join(t.TempDir(), "catalog.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+
+	registry := &iceio.Registry{}
+	cat, err := sqlcat.NewCatalog(ctx, "isolated", db, sqlcat.SQLite,
+		iceberg.Properties{"warehouse": warehouse}, sqlcat.WithIORegistry(registry))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, cat.Close()) })
+	require.NoError(t, cat.CreateNamespace(ctx, []string{"db"}, nil))
+
+	ident := table.Identifier{"db", "tbl"}
+	schema := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32})
+	_, err = cat.CreateTable(ctx, ident, schema)
+	require.ErrorIs(t, err, iceio.ErrIOSchemeNotFound, "an empty registry must not use the global file scheme")
+	exists, err := cat.CheckTableExists(ctx, ident)
+	require.NoError(t, err)
+	require.False(t, exists, "a failed metadata write must not publish a catalog entry")
+
+	fs := iceio.NewMemFS()
+	require.NoError(t, registry.Register("file", func(context.Context, *url.URL, map[string]string) (iceio.IO, error) {
+		return fs, nil
+	}))
+	created, err := cat.CreateTable(ctx, ident, schema)
+	require.NoError(t, err)
+	metadata, err := fs.Open(ctx, created.MetadataLocation())
+	require.NoError(t, err)
+	require.NoError(t, metadata.Close())
+}
+
 func TestSQLViewUsesCatalogIOPropertiesWithIsolatedRegistry(t *testing.T) {
 	const scheme = "sql-view-private-registry"
 	registry := &iceio.Registry{}
