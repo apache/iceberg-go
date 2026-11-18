@@ -213,10 +213,10 @@ func TestComputeNDVsSkipsGeospatialColumns(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, map[int]int64{1: 2}, ndvValues(got))
 
-	for _, name := range []string{"geom", "geog"} {
+	for name, typ := range map[string]string{"geom": geom.String(), "geog": geog.String()} {
 		_, err = tbl.ComputeNDVs(ctx, 0, name)
 		require.ErrorIs(t, err, iceberg.ErrInvalidArgument, name)
-		assert.ErrorContains(t, err, "geospatial", name)
+		assert.ErrorContains(t, err, "can't compute stats on "+typ+" column: "+name)
 	}
 }
 
@@ -234,6 +234,9 @@ func TestComputeNDVsTypes(t *testing.T) {
 	u2 := uuid.MustParse("00000000-0000-0000-0000-000000000001")
 
 	const ts1, ts2 = int64(1_600_000_000_000_000), int64(1_700_000_000_123_456)
+	// Nanosecond values that differ only below the microsecond, so truncating
+	// to micros would collapse them.
+	const tsNs1, tsNs2 = int64(1_700_000_000_123_456_001), int64(1_700_000_000_123_456_002)
 
 	tests := []struct {
 		name string
@@ -292,6 +295,16 @@ func TestComputeNDVsTypes(t *testing.T) {
 			[]iceberg.Literal{iceberg.NewLiteral(iceberg.Timestamp(ts1)), iceberg.NewLiteral(iceberg.Timestamp(ts2))},
 		},
 		{
+			"timestamp_ns", iceberg.PrimitiveTypes.TimestampNs,
+			[]string{strconv.FormatInt(tsNs1, 10), strconv.FormatInt(tsNs2, 10)},
+			[]iceberg.Literal{iceberg.NewLiteral(iceberg.TimestampNano(tsNs1)), iceberg.NewLiteral(iceberg.TimestampNano(tsNs2))},
+		},
+		{
+			"timestamptz_ns", iceberg.PrimitiveTypes.TimestampTzNs,
+			[]string{strconv.FormatInt(tsNs1, 10), strconv.FormatInt(tsNs2, 10)},
+			[]iceberg.Literal{iceberg.NewLiteral(iceberg.TimestampNano(tsNs1)), iceberg.NewLiteral(iceberg.TimestampNano(tsNs2))},
+		},
+		{
 			"decimal", dec,
 			[]string{`"1.23"`, `"-0.01"`, `"9999999.99"`},
 			[]iceberg.Literal{
@@ -336,7 +349,15 @@ func TestComputeNDVsTypes(t *testing.T) {
 				want.Add(b)
 			}
 
-			tbl, ctx := createNDVTable(t, "ndv_type_"+tc.name, sc, rows)
+			// Nanosecond timestamps need a V3 table; they are read through the
+			// separate TimestampNano conversion branch.
+			var props iceberg.Properties
+			switch tc.typ.(type) {
+			case iceberg.TimestampNsType, iceberg.TimestampTzNsType:
+				props = iceberg.Properties{table.PropertyFormatVersion: "3"}
+			}
+			tbl, ctx := newNDVTable(t, "ndv_type_"+tc.name, sc, props)
+			tbl = appendNDVRows(t, ctx, tbl, rows)
 			got, err := tbl.ComputeNDVs(ctx, 0)
 			require.NoError(t, err)
 			require.Contains(t, got.Columns, 1)
@@ -645,4 +666,49 @@ func TestComputeNDVsMatchesJavaFixtures(t *testing.T) {
 			assert.Equal(t, slices.Collect(java.All()), slices.Collect(ours.All()), "retained hashes")
 		})
 	}
+}
+
+func TestComputeNDVsSkipsUnknownColumns(t *testing.T) {
+	sc := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{ID: 2, Name: "v", Type: iceberg.PrimitiveTypes.Unknown},
+	)
+	tbl, ctx := newNDVTable(t, "ndv_unknown_type", sc, iceberg.Properties{table.PropertyFormatVersion: "3"})
+	tbl = appendNDVRows(t, ctx, tbl, []string{`{"id": 1, "v": null}`, `{"id": 2, "v": null}`})
+
+	// An unknown column holds only nulls and is read as an Arrow Null array,
+	// so there is nothing to sketch. The default set leaves it out instead of
+	// failing the whole call.
+	got, err := tbl.ComputeNDVs(ctx, 0)
+	require.NoError(t, err)
+	assert.Equal(t, map[int]int64{1: 2}, ndvValues(got))
+
+	_, err = tbl.ComputeNDVs(ctx, 0, "v")
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	assert.ErrorContains(t, err, "can't compute stats on unknown column: v")
+}
+
+func TestComputeNDVsUsesSnapshotSchema(t *testing.T) {
+	tbl, ctx := ndvTestTable(t, "ndv_schema_without_snapshot")
+	snap := tbl.CurrentSnapshot()
+
+	// A schema change creates no snapshot. The current snapshot's sketches must
+	// follow that snapshot's schema, so the new column is not reported for a
+	// snapshot that doesn't have it.
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.UpdateSchema(true, false).
+		AddColumn([]string{"extra"}, iceberg.PrimitiveTypes.Int32, "", false, nil).
+		Commit())
+	tbl, err := tx.Commit(ctx)
+	require.NoError(t, err)
+	require.Equal(t, snap.SnapshotID, tbl.CurrentSnapshot().SnapshotID)
+
+	got, err := tbl.ComputeNDVs(ctx, 0)
+	require.NoError(t, err)
+	assert.Equal(t, snap.SnapshotID, got.Snapshot.SnapshotID)
+	assert.Equal(t, map[int]int64{1: 100, 2: 3}, ndvValues(got))
+
+	// The new column is not in the analyzed snapshot's schema.
+	_, err = tbl.ComputeNDVs(ctx, 0, "extra")
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
 }

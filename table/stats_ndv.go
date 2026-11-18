@@ -54,15 +54,17 @@ type NDVResult struct {
 //
 // When snapshotID is 0 the current snapshot is used; a table without a
 // snapshot yields an empty result, as in Iceberg-Java's ComputeTableStats.
-// When columns is empty every top-level primitive column is analyzed except
-// geometry and geography columns, which have no single-value serialization
-// to hash. Naming an unknown column, a non-primitive column, a geospatial
-// column, or a column nested inside a struct is an error.
+// Columns are resolved against the analyzed snapshot's schema. When columns
+// is empty every top-level primitive column is analyzed except geometry and
+// geography columns, which have no single-value serialization to hash, and
+// columns of type unknown, which hold only nulls. Naming a missing column, a
+// non-primitive column, a geospatial or unknown-typed column, or a column
+// nested inside a struct is an error.
 //
 // Values are fed to the sketch using Iceberg's single-value serialization (the
 // same encoding used for manifest bounds), so estimates are comparable with
 // sketches produced by other Iceberg implementations. Null values are not
-// counted.
+// counted, and neither are empty string or binary values.
 func (t Table) ComputeNDVs(ctx context.Context, snapshotID int64, columns ...string) (NDVStats, error) {
 	base := t.Scan(WithSnapshotID(snapshotID))
 
@@ -74,7 +76,11 @@ func (t Table) ComputeNDVs(ctx context.Context, snapshotID int64, columns ...str
 		return NDVStats{Columns: map[int]NDVResult{}}, nil
 	}
 
-	schema, err := base.Projection()
+	// Pin the resolved snapshot so names are resolved against its schema, as
+	// Iceberg-Java does. With snapshotID 0 the scan would use the current
+	// schema, which may have columns the snapshot doesn't.
+	pinned := WithSnapshotID(snap.SnapshotID)
+	schema, err := t.Scan(pinned).Projection()
 	if err != nil {
 		return NDVStats{}, fmt.Errorf("compute NDVs: %w", err)
 	}
@@ -96,7 +102,7 @@ func (t Table) ComputeNDVs(ctx context.Context, snapshotID int64, columns ...str
 		names = append(names, f.Name)
 	}
 
-	arrowSchema, records, err := t.Scan(WithSnapshotID(snapshotID), WithSelectedFields(names...)).
+	arrowSchema, records, err := t.Scan(pinned, WithSelectedFields(names...)).
 		ToArrowRecords(ctx)
 	if err != nil {
 		return NDVStats{}, fmt.Errorf("compute NDVs: %w", err)
@@ -164,8 +170,8 @@ func ndvFields(schema *iceberg.Schema, columns []string) ([]iceberg.NestedField,
 				iceberg.ErrInvalidArgument, name, f.Type)
 		}
 		if !ndvSketchable(f.Type) {
-			return nil, fmt.Errorf("%w: can't compute stats on geospatial column: %s (%s)",
-				iceberg.ErrInvalidArgument, name, f.Type)
+			return nil, fmt.Errorf("%w: can't compute stats on %s column: %s",
+				iceberg.ErrInvalidArgument, f.Type, name)
 		}
 		if !slices.ContainsFunc(schema.Fields(), func(top iceberg.NestedField) bool { return top.ID == f.ID }) {
 			return nil, fmt.Errorf("%w: can't compute stats on nested column: %s",
@@ -182,10 +188,11 @@ func ndvFields(schema *iceberg.Schema, columns []string) ([]iceberg.NestedField,
 // ndvSketchable reports whether values of typ can be hashed into a sketch.
 // Geometry and geography are primitive, but Iceberg defines no single-value
 // serialization for their values (only for their bounds), so there is no
-// encoding shared with other implementations to hash.
+// encoding shared with other implementations to hash. Unknown columns hold
+// only nulls and are read as an Arrow Null array, so there is nothing to hash.
 func ndvSketchable(typ iceberg.Type) bool {
 	switch typ.(type) {
-	case iceberg.GeometryType, iceberg.GeographyType:
+	case iceberg.GeometryType, iceberg.GeographyType, iceberg.UnknownType:
 		return false
 	case iceberg.PrimitiveType:
 		return true
