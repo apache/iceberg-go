@@ -1102,7 +1102,7 @@ func (u *UpdateSchema) BuildUpdates() ([]Update, []Requirement, error) {
 				updates,
 				NewAddSchemaUpdate(newSchema),
 				// -1 selects the last added schema; the catalog may assign newSchema a different ID.
-				// Matches Java. Java catalogs reject it if a concurrent writer added an equivalent schema.
+				// Java's SchemaUpdate sends the same pair; Java catalogs reject -1 when a concurrent writer already added an equivalent schema.
 				NewSetCurrentSchemaUpdate(-1),
 			)
 		} else {
