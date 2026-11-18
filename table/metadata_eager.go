@@ -26,8 +26,8 @@ import (
 	"unicode/utf8"
 )
 
-// parseEagerMetadataV2 recognizes the ordinary v2 snapshot histories.
-// Individual snapshots can fall back to the general decoder.
+// parseEagerMetadataV2 recognizes the ordinary v2 snapshot and log layouts.
+// Individual snapshots and logs can fall back to the general decoder.
 func parseEagerMetadataV2(data []byte) (*metadataV2, bool) {
 	if len(data) < 4096 {
 		return nil, false
@@ -49,6 +49,9 @@ func parseEagerMetadataV2(data []byte) (*metadataV2, bool) {
 
 	skeleton := make([]byte, 0, 1024)
 	var snapshots []Snapshot
+	var snapshotLog []SnapshotLogEntry
+	var metadataLog []MetadataLogEntry
+	var sawSnapshotLog, sawMetadataLog bool
 	previousEnd := 0
 	for {
 		key, ok := cursor.objectField()
@@ -62,8 +65,27 @@ func parseEagerMetadataV2(data []byte) (*metadataV2, bool) {
 				return nil, false
 			}
 			snapshots, ok = readMetadataArray(&cursor, readEagerSnapshot)
+		case "snapshot-log":
+			if sawSnapshotLog {
+				return nil, false
+			}
+			sawSnapshotLog = true
+			snapshotLog, ok = readEagerLogArray(&cursor, readEagerSnapshotLog)
+			if snapshotLog == nil {
+				valueAt = -1
+			}
+		case "metadata-log":
+			if sawMetadataLog {
+				return nil, false
+			}
+			sawMetadataLog = true
+			metadataLog, ok = readEagerLogArray(&cursor, readEagerMetadataLog)
+			if metadataLog == nil {
+				valueAt = -1
+			}
 		default:
-			if bytes.EqualFold(key, []byte("snapshots")) || !cursor.skipValue(1) {
+			if bytes.EqualFold(key, []byte("snapshots")) || bytes.EqualFold(key, []byte("snapshot-log")) ||
+				bytes.EqualFold(key, []byte("metadata-log")) || !cursor.skipValue(1) {
 				return nil, false
 			}
 			valueAt = -1
@@ -101,6 +123,12 @@ func parseEagerMetadataV2(data []byte) (*metadataV2, bool) {
 		return nil, false
 	}
 	next.SnapshotList = snapshots
+	if snapshotLog != nil {
+		next.SnapshotLog = snapshotLog
+	}
+	if metadataLog != nil {
+		next.MetadataLog = metadataLog
+	}
 	if err := next.finishUnmarshal(); err != nil {
 		return nil, false
 	}
@@ -383,4 +411,79 @@ func readEagerSummary(c *metadataJSONCursor) (*Summary, bool) {
 	}
 
 	return &summary, true
+}
+
+func readEagerLogArray[T any](c *metadataJSONCursor, read func(*metadataJSONCursor) (T, bool)) ([]T, bool) {
+	c.pos = skipJSONSpace(c.data, c.pos)
+	if bytes.HasPrefix(c.data[c.pos:], []byte("null")) {
+		c.pos += len("null")
+
+		return nil, true
+	}
+
+	return readMetadataArray(c, read)
+}
+
+func readEagerSnapshotLog(c *metadataJSONCursor) (SnapshotLogEntry, bool) {
+	var entry SnapshotLogEntry
+	ok := readEagerLogEntry(c, "snapshot-id", func(c *metadataJSONCursor) bool {
+		var ok bool
+		entry.SnapshotID, ok = c.integer()
+
+		return ok
+	}, &entry.TimestampMs)
+
+	return entry, ok
+}
+
+func readEagerMetadataLog(c *metadataJSONCursor) (MetadataLogEntry, bool) {
+	var entry MetadataLogEntry
+	ok := readEagerLogEntry(c, "metadata-file", func(c *metadataJSONCursor) bool {
+		var ok bool
+		var value []byte
+		value, ok = c.stringBytes()
+		entry.MetadataFile = string(value)
+
+		return ok
+	}, &entry.TimestampMs)
+
+	return entry, ok
+}
+
+func readEagerLogEntry(c *metadataJSONCursor, field string, read func(*metadataJSONCursor) bool, timestamp *int64) bool {
+	if !c.take('{') {
+		return false
+	}
+	seen := 0
+	for range 2 {
+		key, ok := c.objectField()
+		if !ok {
+			return false
+		}
+		switch string(key) {
+		case field:
+			if seen&1 != 0 || !read(c) {
+				return false
+			}
+			seen |= 1
+		case "timestamp-ms":
+			if seen&2 != 0 {
+				return false
+			}
+			if *timestamp, ok = c.integer(); !ok {
+				return false
+			}
+			seen |= 2
+		default:
+			return false
+		}
+		if seen == 3 {
+			return c.take('}')
+		}
+		if !c.take(',') {
+			return false
+		}
+	}
+
+	return false
 }

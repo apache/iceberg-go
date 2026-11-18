@@ -48,6 +48,13 @@ func TestEagerMetadataV2Parity(t *testing.T) {
 		{name: "root trailing comma", old: `"snapshots":`, new: `"unknown":{"value":1,},"snapshots":`},
 		{name: "summary trailing comma", old: `"summary":{"operation":"append"}`, new: `"summary":{"operation":"append",}`},
 		{name: "control character", old: `"append"`, new: "\"ap\x01pend\""},
+		{name: "escaped metadata log filename", old: `"metadata-file":"s3://bucket/metadata/v1.json"`, new: `"metadata-file":"s3://bucket/metadata/v\u0031.json"`, fast: true},
+		{name: "null metadata log", old: `"metadata-log":[{"metadata-file":"s3://bucket/metadata/v1.json","timestamp-ms":0}]`, new: `"metadata-log":null`, fast: true},
+		{name: "empty metadata log", old: `"metadata-log":[{"metadata-file":"s3://bucket/metadata/v1.json","timestamp-ms":0}]`, new: `"metadata-log":[]`, fast: true},
+		{name: "invalid metadata log literal", old: `"metadata-log":[{"metadata-file":"s3://bucket/metadata/v1.json","timestamp-ms":0}]`, new: `"metadata-log":nullx`},
+		{name: "unknown snapshot log field", old: `"snapshot-log":[{`, new: `"snapshot-log":[{"unknown":"value",`, fast: true},
+		{name: "missing metadata log timestamp", old: `"metadata-log":[{"metadata-file":"s3://bucket/metadata/v1.json","timestamp-ms":0}]`, new: `"metadata-log":[{"metadata-file":"s3://bucket/metadata/v1.json"}]`},
+		{name: "duplicate metadata log", old: `"metadata-log":`, new: `"metadata-log":[],"metadata-log":`},
 		{name: "invalid utf8", old: `"append"`, new: "\"ap\xffpend\""},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -130,7 +137,7 @@ func TestEagerMetadataV2LargeDocumentOwnership(t *testing.T) {
 
 func TestEagerMetadataV2HistoryDepth(t *testing.T) {
 	fixture := benchmarkMetadataJSON(1, 1, 64, 16, 0)
-	for _, field := range []string{"snapshots"} {
+	for _, field := range []string{"snapshots", "snapshot-log", "metadata-log"} {
 		t.Run(field, func(t *testing.T) {
 			entryStart := []byte(`"` + field + `":[{`)
 			for _, depth := range []int{9997, 9998} {
