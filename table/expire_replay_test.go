@@ -63,6 +63,21 @@ func (c *refsOnlyReloadCatalog) LoadTable(_ context.Context, ident Identifier) (
 	return New(ident, c.partial, "", nil, c, WithSnapshotHistoryLimitedToRefs(true)), nil
 }
 
+type fullHistoryReloadCatalog struct {
+	*refsOnlyReloadCatalog
+	location  string
+	fullLoads int
+}
+
+func (c *fullHistoryReloadCatalog) LoadTableWithFullSnapshotHistory(ctx context.Context, ident Identifier) (*Table, error) {
+	c.fullLoads++
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	return New(ident, c.metadata, c.location, nil, c), nil
+}
+
 func refsOnlySnapshotMetadata(t *testing.T, meta Metadata, keepIDs ...int64) Metadata {
 	t.Helper()
 	keep := make(map[int64]struct{}, len(keepIDs))
@@ -230,6 +245,135 @@ func TestFailedRefsOnlyExpirationLeavesAppendUsable(t *testing.T) {
 	require.Equal(t, int32(1), cat.attempts.Load(), "append should commit once")
 }
 
+func TestExpireSnapshotsLoadsFullHistoryWithStagedAppend(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		fs, inner, tbl := newExpireReplayTable(t, nil)
+		tbl, old := appendOnBranch(t, tbl, MainBranch, "old")
+		tbl, head := appendOnBranch(t, tbl, MainBranch, "head")
+		cat := &fullHistoryReloadCatalog{
+			refsOnlyReloadCatalog: &refsOnlyReloadCatalog{
+				reqValidatingCatalog: inner,
+				partial:              refsOnlySnapshotMetadata(t, inner.metadata, head),
+			},
+			location: "mem://default/table-location/metadata/partial.json",
+		}
+		partial := New(tbl.Identifier(), cat.partial, cat.location, tbl.fsF, cat,
+			WithSnapshotHistoryLimitedToRefs(true))
+		tx := partial.NewTransaction()
+		stageFiles(t, tx, "staged")
+		stagedID := stagedHead(t, tx, MainBranch)
+		time.Sleep(time.Second)
+
+		opts := []ExpireSnapshotsOpt{WithOlderThan(0), WithRetainLast(2), WithPostCommit(false)}
+		require.NoError(t, tx.ExpireSnapshots(opts...))
+		require.NoError(t, tx.ExpireSnapshotsWithContext(t.Context(), opts...))
+		staged, err := tx.StagedTable()
+		require.NoError(t, err)
+		require.Equal(t, sortedIDs(head, stagedID), survivors(staged.Metadata()))
+		require.Equal(t, sortedIDs(old, head), survivors(tx.tbl.Metadata()))
+		require.Equal(t, []int64{head}, survivors(partial.Metadata()))
+		require.True(t, partial.snapshotHistoryRefsOnly)
+		require.Equal(t, 1, cat.fullLoads)
+		require.Zero(t, cat.loads)
+
+		committed, err := tx.Commit(t.Context())
+		require.NoError(t, err)
+		require.Equal(t, sortedIDs(head, stagedID), survivors(committed.Metadata()))
+		require.Equal(t, []string{"head", "old", "staged"}, branchFiles(t, fs, committed.Metadata(), MainBranch))
+	})
+}
+
+func TestExpireSnapshotsFullHistoryLoadFailurePreservesStagedState(t *testing.T) {
+	for _, name := range []string{"metadata revision changed", "context canceled"} {
+		t.Run(name, func(t *testing.T) {
+			fs, inner, tbl := newExpireReplayTable(t, nil)
+			tbl, head := appendOnBranch(t, tbl, MainBranch, "head")
+			partial := refsOnlySnapshotMetadata(t, inner.metadata, head)
+			cat := &fullHistoryReloadCatalog{
+				refsOnlyReloadCatalog: &refsOnlyReloadCatalog{reqValidatingCatalog: inner, partial: partial},
+				location:              "mem://default/table-location/metadata/base.json",
+			}
+			original := New(tbl.Identifier(), partial, cat.location, tbl.fsF, cat,
+				WithSnapshotHistoryLimitedToRefs(true))
+			tx := original.NewTransaction()
+			require.NoError(t, tx.SetProperties(iceberg.Properties{"staged": "kept"}))
+			before := tx.meta
+
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			if name == "context canceled" {
+				cancel()
+			} else {
+				cat.location = "mem://default/table-location/metadata/replaced.json"
+			}
+
+			err := tx.ExpireSnapshotsWithContext(ctx, WithPostCommit(false))
+			require.ErrorIs(t, err, ErrInvalidOperation)
+			if name == "context canceled" {
+				require.ErrorIs(t, err, context.Canceled)
+			} else {
+				require.ErrorContains(t, err, "metadata revision")
+			}
+			require.Same(t, before, tx.meta)
+			require.True(t, tx.tbl.snapshotHistoryRefsOnly)
+			require.Empty(t, tx.expirations)
+			require.Equal(t, 1, cat.fullLoads)
+
+			stageFiles(t, tx, "append")
+			committed, err := tx.Commit(t.Context())
+			require.NoError(t, err)
+			require.Equal(t, "kept", committed.Properties()["staged"])
+			require.Equal(t, []string{"append", "head"}, branchFiles(t, fs, committed.Metadata(), MainBranch))
+		})
+	}
+}
+
+func TestExpireReplayLoadsFullHistoryForNoOpExpiration(t *testing.T) {
+	for _, tc := range []struct {
+		name, retries string
+		resume        bool
+	}{
+		{name: "retry", retries: "3"},
+		{name: "resume", retries: "0", resume: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				fs, inner, tbl := newExpireReplayTable(t, iceberg.Properties{CommitNumRetriesKey: tc.retries})
+				tbl, first := appendOnBranch(t, tbl, MainBranch, "first")
+				_, head := appendOnBranch(t, tbl, MainBranch, "head")
+				cat := &fullHistoryReloadCatalog{
+					refsOnlyReloadCatalog: &refsOnlyReloadCatalog{reqValidatingCatalog: inner},
+				}
+				tx := newOCCTable(t, inner.metadata, fs, cat).NewTransaction()
+				time.Sleep(time.Second)
+				require.NoError(t, tx.ExpireSnapshots(WithOlderThan(0), WithRetainLast(2), WithPostCommit(false)))
+				require.Len(t, tx.expirations, 1)
+				require.Zero(t, tx.expirations[0].count)
+				stageFiles(t, tx, "ours")
+				ours := stagedHead(t, tx, MainBranch)
+
+				peer := peerAppend(t, fs, inner, MainBranch, "peer")
+				cat.partial = refsOnlySnapshotMetadata(t, inner.metadata, peer)
+				attemptsBefore := inner.attempts.Load()
+				if tc.resume {
+					_, err := tx.Commit(t.Context())
+					require.ErrorIs(t, err, ErrCommitFailed)
+					require.Zero(t, cat.fullLoads)
+				}
+				committed, err := tx.Commit(t.Context())
+				require.NoError(t, err)
+				require.Equal(t, attemptsBefore+2, inner.attempts.Load())
+				require.Equal(t, 1, cat.fullLoads)
+				require.Zero(t, cat.loads)
+				require.Equal(t, sortedIDs(head, peer, ours), survivors(committed.Metadata()))
+				require.Nil(t, committed.Metadata().SnapshotByID(first))
+				require.Equal(t, peer, parentOf(t, committed.Metadata(), ours))
+				require.Equal(t, []string{"first", "head", "ours", "peer"}, branchFiles(t, fs, committed.Metadata(), MainBranch))
+			})
+		})
+	}
+}
+
 func TestExpireReplayRejectsRefsOnlyHistoryOnRetryOrResume(t *testing.T) {
 	stage := func(t *testing.T, numRetries string) (*reqValidatingCatalog, *refsOnlyReloadCatalog, *Transaction, [4]int64, int64) {
 		t.Helper()
@@ -336,7 +480,9 @@ func TestRefsOnlyReloadDoesNotBlockAppendReplay(t *testing.T) {
 		fs, inner, tbl := newExpireReplayTable(t, nil)
 		tbl, first := appendOnBranch(t, tbl, MainBranch, "first")
 		appendOnBranch(t, tbl, MainBranch, "head")
-		cat := &refsOnlyReloadCatalog{reqValidatingCatalog: inner}
+		cat := &fullHistoryReloadCatalog{
+			refsOnlyReloadCatalog: &refsOnlyReloadCatalog{reqValidatingCatalog: inner},
+		}
 		tx := newOCCTable(t, inner.metadata, fs, cat).NewTransaction()
 		stageFiles(t, tx, "ours")
 
@@ -348,6 +494,7 @@ func TestRefsOnlyReloadDoesNotBlockAppendReplay(t *testing.T) {
 		committed, err := tx.Commit(t.Context())
 		require.NoError(t, err)
 		assert.Equal(t, 1, cat.loads)
+		assert.Zero(t, cat.fullLoads)
 		assert.Equal(t, peer, parentOf(t, committed.Metadata(), refHead(t, committed.Metadata(), MainBranch)))
 	})
 }

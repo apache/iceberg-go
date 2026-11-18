@@ -19,14 +19,67 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"testing"
+	"time"
 
+	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/catalog"
 	"github.com/apache/iceberg-go/table"
 	"github.com/pterm/pterm"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type expirationPreviewCatalog struct {
+	catalog.Catalog
+	full *table.Table
+}
+
+func (c expirationPreviewCatalog) LoadTableWithFullSnapshotHistory(context.Context, table.Identifier) (*table.Table, error) {
+	return c.full, nil
+}
+
+type expirationPreviewOutput struct {
+	Output
+	result ExpireSnapshotsResult
+}
+
+func (o *expirationPreviewOutput) ExpireSnapshotsResult(result ExpireSnapshotsResult) {
+	o.result = result
+}
+
+func TestExpireSnapshotsDryRunPreviewsFullHistory(t *testing.T) {
+	location := t.TempDir()
+	meta, err := table.NewMetadata(iceberg.NewSchema(0), iceberg.UnpartitionedSpec, table.UnsortedSortOrder, location, nil)
+	require.NoError(t, err)
+	builder, err := table.MetadataBuilderFromBase(meta, "")
+	require.NoError(t, err)
+	require.NoError(t, builder.AddSnapshot(&table.Snapshot{
+		SnapshotID: 1, SequenceNumber: 1, TimestampMs: time.Now().Add(-10 * time.Second).UnixMilli(),
+		ManifestList: location + "/old.avro", Summary: &table.Summary{Operation: table.OpAppend},
+	}))
+	require.NoError(t, builder.AddSnapshot(&table.Snapshot{
+		SnapshotID: 2, ParentSnapshotID: new(int64(1)), SequenceNumber: 2, TimestampMs: time.Now().Add(-5 * time.Second).UnixMilli(),
+		ManifestList: location + "/head.avro", Summary: &table.Summary{Operation: table.OpAppend},
+	}))
+	require.NoError(t, builder.SetSnapshotRef(table.MainBranch, 2, table.BranchRef))
+	meta, err = builder.Build()
+	require.NoError(t, err)
+
+	cat := expirationPreviewCatalog{
+		full: table.New(table.Identifier{"db", "tbl"}, meta, location+"/metadata.json", nil, nil),
+	}
+	out := &expirationPreviewOutput{}
+	runExpireSnapshots(t.Context(), out, cat, &ExpireSnapshotsCmd{
+		TableID: "db.tbl", DryRun: true, OlderThan: "0s", RetainLast: new(1),
+	})
+	require.True(t, out.result.DryRun)
+	require.Equal(t, 1, out.result.ExpiredSnapshotCount)
+	require.Len(t, out.result.ExpiredSnapshots, 1)
+	require.Equal(t, int64(1), out.result.ExpiredSnapshots[0].SnapshotID)
+}
 
 func TestDiffSnapshots(t *testing.T) {
 	before := []table.Snapshot{

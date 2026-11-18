@@ -217,7 +217,8 @@ iceberg expire-snapshots --older-than 7d --dry-run my_db.events
 iceberg expire-snapshots --older-than 7d --retain-last 5 my_db.events
 ```
 
-`iceberg expire-snapshots` fails when the REST server sets `snapshot-loading-mode=refs`; the CLI cannot override it. Configure the REST server to use `snapshot-loading-mode=all` before running the command.
+For REST catalogs, expiration and `--dry-run` load full snapshot history.
+The catalog's snapshot loading mode still applies to other commands.
 
 ### `clean-orphan-files`
 

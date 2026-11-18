@@ -2050,6 +2050,16 @@ func (r *Catalog) LoadTable(ctx context.Context, identifier table.Identifier) (*
 	return r.loadTableWithMode(ctx, identifier, r.snapshotMode)
 }
 
+// LoadTableWithFullSnapshotHistory requests all valid snapshots for this load.
+// The catalog's configured mode still applies to regular LoadTable calls.
+func (r *Catalog) LoadTableWithFullSnapshotHistory(ctx context.Context, identifier table.Identifier) (*table.Table, error) {
+	if r.snapshotMode != SnapshotModeRefs {
+		return r.LoadTable(ctx, identifier)
+	}
+
+	return r.loadTableWithMode(ctx, identifier, SnapshotModeAll)
+}
+
 func (r *Catalog) loadTableWithMode(ctx context.Context, identifier table.Identifier, mode SnapshotMode) (*table.Table, error) {
 	if err := r.endpoints.check(endpointLoadTable); err != nil {
 		return nil, err
