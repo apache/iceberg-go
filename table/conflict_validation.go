@@ -143,8 +143,10 @@ func readIsolationLevel(props iceberg.Properties, key string, defVal IsolationLe
 var ErrCommitDiverged = errors.New("commit diverged: base snapshot is no longer on the branch")
 
 // ErrConflictingDataFiles is returned when a concurrent commit added data
-// files that satisfy the committer's filter. It wraps ErrCommitFailed: a
-// new transaction built from a reloaded table may succeed.
+// files that satisfy the committer's filter, or, for AddDataFiles and
+// AddDataFilesByPath, a data file with a path the committer is adding.
+// It wraps ErrCommitFailed: a new transaction built from a reloaded table
+// may succeed.
 var ErrConflictingDataFiles = fmt.Errorf("%w: concurrent data files added", ErrCommitFailed)
 
 // ErrConflictingDeleteFiles is returned when a concurrent commit added
@@ -843,6 +845,19 @@ func validateAddedDataFilesMatchingFilter(cc *conflictContext, filter iceberg.Bo
 	}
 
 	return nil
+}
+
+// validateNoConcurrentDuplicateDataFiles returns an error if a concurrent
+// snapshot added a data file whose path is already in paths.
+func validateNoConcurrentDuplicateDataFiles(cc *conflictContext, paths map[string]struct{}) error {
+	return cc.forEachAddedEntry(iceberg.ManifestContentData, func(snap Snapshot, entry iceberg.ManifestEntry) error {
+		if _, ok := paths[entry.DataFile().FilePath()]; ok {
+			return fmt.Errorf("%w: snapshot %d already added data file %s",
+				ErrConflictingDataFiles, snap.SnapshotID, entry.DataFile().FilePath())
+		}
+
+		return nil
+	})
 }
 
 // validateNoConflictingDataFiles is the serializable-isolation check

@@ -1652,6 +1652,8 @@ func WithoutAutoNameMapping() WriteOption {
 // table. For tables with many manifests this scan can be expensive because
 // each manifest must be read from storage. Use this option when the caller
 // can guarantee that the files being added are not already in the table.
+// It also disables the commit-time check against files that concurrent
+// commits added.
 func WithoutDuplicateCheck() WriteOption {
 	return func(cfg *dataFileCfg) {
 		cfg.skipDuplicateCheck = true
@@ -1697,6 +1699,10 @@ func (t *Transaction) ensureNameMapping() error {
 // properties if one does not already exist. Pass [WithoutAutoNameMapping] to
 // disable this behavior, for example when working with catalogs that reject
 // the name mapping property.
+//
+// Unless [WithoutDuplicateCheck] is passed, it fails if a file path is already
+// in the table, and the commit fails with ErrConflictingDataFiles if a
+// concurrent commit added one of the same paths first.
 //
 // Callers are responsible for ensuring each DataFile is valid and consistent with the table.
 // Supplying incorrect DataFile metadata can produce an invalid snapshot and break reads.
@@ -1770,7 +1776,17 @@ func (t *Transaction) AddDataFiles(ctx context.Context, dataFiles []iceberg.Data
 		return err
 	}
 
-	return t.apply(updates, reqs)
+	if err := t.apply(updates, reqs); err != nil {
+		return err
+	}
+
+	if !cfg.skipDuplicateCheck {
+		t.addValidator(func(cc *conflictContext) error {
+			return validateNoConcurrentDuplicateDataFiles(cc, setToAdd)
+		})
+	}
+
+	return nil
 }
 
 // ReplaceDataFiles replaces files using pre-built DataFile objects.
@@ -2403,6 +2419,10 @@ func WithAddDataFilesByPathPartitionValues(values map[string]map[int]any) AddDat
 // Unlike AddDataFiles, it opens each file to read its schema and statistics.
 // Use WithAddDataFilesByPathPartitionValues for partition transforms whose
 // values cannot be inferred from column statistics (for example, bucket[N]).
+//
+// Unless ignoreDuplicates is set, it fails if a path is already in the table,
+// and the commit fails with ErrConflictingDataFiles if a concurrent commit
+// added one of the same paths first.
 func (t *Transaction) AddDataFilesByPath(ctx context.Context, filePaths []string, snapshotProps iceberg.Properties, ignoreDuplicates bool, opts ...AddDataFilesByPathOption) error {
 	meta, err := t.txnMeta()
 	if err != nil {
@@ -2490,7 +2510,17 @@ func (t *Transaction) AddDataFilesByPath(ctx context.Context, filePaths []string
 		return err
 	}
 
-	return t.apply(updates, reqs)
+	if err := t.apply(updates, reqs); err != nil {
+		return err
+	}
+
+	if !ignoreDuplicates && len(set) > 0 {
+		t.addValidator(func(cc *conflictContext) error {
+			return validateNoConcurrentDuplicateDataFiles(cc, set)
+		})
+	}
+
+	return nil
 }
 
 // OverwriteTable overwrites the table data using an Arrow Table.

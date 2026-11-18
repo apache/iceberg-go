@@ -172,7 +172,9 @@ func (fa *fastAppendFiles) parentDependentManifests(ctx context.Context, parent 
 // resulting manifest list. Two concurrent fast-appends adding the
 // same file path is a writer-side error (paths are expected to be
 // unique, normally via UUID-stamped filenames); detecting it here
-// is out of Java parity scope.
+// is out of Java parity scope. AddDataFiles and AddDataFilesByPath,
+// which take caller-supplied paths, register their own duplicate-path
+// validator on the transaction instead.
 func (fa *fastAppendFiles) validate(_ *conflictContext) error {
 	return nil
 }
