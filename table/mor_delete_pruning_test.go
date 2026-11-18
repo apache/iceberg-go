@@ -501,6 +501,73 @@ func TestV3MergeOnReadUpgradePreservesPositionDeletes(t *testing.T) {
 	}
 }
 
+func TestV3MergeOnReadUpgradeUsesBranchPositionDeletes(t *testing.T) {
+	ctx := t.Context()
+	tbl := newBranchPlanningTable(t, iceberg.Properties{table.WriteDeleteModeKey: table.WriteModeMergeOnRead})
+	tbl = appendRowsOnRef(t, tbl, table.MainBranch, 1, 2, 3, 4)
+	tbl = appendRowsOnRef(t, tbl, branchPlanningRef, 5)
+
+	tbl, err := tbl.Delete(ctx, iceberg.EqualTo(iceberg.Reference("id"), int64(1)), nil)
+	require.NoError(t, err)
+	tx, err := tbl.NewTransactionOnBranch(branchPlanningRef)
+	require.NoError(t, err)
+	require.NoError(t, tx.Delete(ctx, iceberg.EqualTo(iceberg.Reference("id"), int64(2)), nil))
+	tbl, err = tx.Commit(ctx)
+	require.NoError(t, err)
+	require.Equal(t, []int64{2, 3, 4}, idsOnRef(t, tbl, table.MainBranch))
+	require.Equal(t, []int64{1, 3, 4, 5}, idsOnRef(t, tbl, branchPlanningRef))
+
+	upgrade := tbl.NewTransaction()
+	require.NoError(t, upgrade.UpgradeFormatVersion(3))
+	tbl, err = upgrade.Commit(ctx)
+	require.NoError(t, err)
+	_, mainDeletes := liveFilesOnRef(t, tbl, table.MainBranch)
+	require.Len(t, mainDeletes, 1)
+
+	tx, err = tbl.NewTransactionOnBranch(branchPlanningRef)
+	require.NoError(t, err)
+	require.NoError(t, tx.Delete(ctx, iceberg.EqualTo(iceberg.Reference("id"), int64(3)), nil))
+	tbl, err = tx.Commit(ctx)
+	require.NoError(t, err)
+
+	require.Equal(t, []int64{1, 4, 5}, idsOnRef(t, tbl, branchPlanningRef))
+	require.Equal(t, 1, liveDVCountOnRef(t, tbl, branchPlanningRef))
+	_, branchDeletes := liveFilesOnRef(t, tbl, branchPlanningRef)
+	require.Len(t, branchDeletes, 1, "the branch's legacy delete should be replaced by its DV")
+	require.Equal(t, []int64{2, 3, 4}, idsOnRef(t, tbl, table.MainBranch))
+	_, remainingMainDeletes := liveFilesOnRef(t, tbl, table.MainBranch)
+	require.Equal(t, mainDeletes, remainingMainDeletes)
+}
+
+func TestV3MergeOnReadUpgradeKeepsEqualityDeletes(t *testing.T) {
+	ctx := t.Context()
+	tbl := appendRows(t, newMergeOnReadTestTable(t),
+		`[{"id":1,"data":"a"},{"id":2,"data":"b"},{"id":3,"data":"c"},{"id":4,"data":"d"}]`)
+	tbl, err := tbl.Delete(ctx, iceberg.EqualTo(iceberg.Reference("id"), int64(1)), nil)
+	require.NoError(t, err)
+	tbl = appendEqualityDelete(t, tbl, []int{1}, `[{"id":2}]`)
+	require.Equal(t, []int64{3, 4}, idsInTable(t, tbl))
+
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.UpgradeFormatVersion(3))
+	tbl, err = tx.Commit(ctx)
+	require.NoError(t, err)
+	tbl, err = tbl.Delete(ctx, iceberg.EqualTo(iceberg.Reference("id"), int64(3)), nil)
+	require.NoError(t, err)
+	require.Equal(t, []int64{4}, idsInTable(t, tbl))
+
+	scan := tbl.Scan()
+	defer scan.Close()
+	tasks, err := scan.PlanFiles(ctx)
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	require.Len(t, tasks[0].DeletionVectorFiles, 1)
+	require.EqualValues(t, 2, tasks[0].DeletionVectorFiles[0].Count(),
+		"the DV should carry the old position and the newly deleted row")
+	require.Empty(t, tasks[0].DeleteFiles)
+	require.Len(t, tasks[0].EqualityDeleteFiles, 1, "the equality delete still applies independently")
+}
+
 // TestV3MergeOnReadUpgradeKeepsUntouchedFileScopedDeletes ensures a DV
 // supersedes only legacy files for its own target. An old position-delete file
 // for another data file must stay live until that file is rewritten as a DV.
