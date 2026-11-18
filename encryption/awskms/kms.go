@@ -27,8 +27,8 @@ import (
 	"fmt"
 	"slices"
 
+	"github.com/apache/iceberg-go/awsconfig"
 	"github.com/apache/iceberg-go/encryption"
-	"github.com/apache/iceberg-go/utils"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/kms"
@@ -59,7 +59,7 @@ func NewClient(cfg aws.Config, optFns ...func(*kms.Options)) *Client {
 func init() {
 	encryption.MustRegisterKMS("aws", func(ctx context.Context, props map[string]string) (encryption.KeyManagementClient, error) {
 		var cfg aws.Config
-		if supplied := utils.GetAWSConfig(ctx); supplied != nil {
+		if supplied := awsconfig.GetAWSConfig(ctx); supplied != nil {
 			cfg = supplied.Copy()
 		} else {
 			var err error

@@ -33,9 +33,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/apache/iceberg-go/awsconfig"
 	"github.com/apache/iceberg-go/internal/remotesigning"
 	"github.com/apache/iceberg-go/io"
-	"github.com/apache/iceberg-go/utils"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/aws/retry"
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
@@ -114,7 +114,7 @@ func TestRemoteSigningFileIO(t *testing.T) {
 
 		return aws.Credentials{}, errors.New("unexpected credentials")
 	})}
-	ctx := utils.WithAWSConfig(t.Context(), shared)
+	ctx := awsconfig.WithAWSConfig(t.Context(), shared)
 	props := map[string]string{io.S3EndpointURL: storage.URL, io.S3RemoteSigningEnabled: "true", remotesigning.EndpointProperty: signer.URL, remotesigning.ConfigProperty: settings, "token": "ignored"}
 	parsed, _ := url.Parse("s3://bucket")
 	bucket, err := createS3Bucket(ctx, parsed, props)
@@ -354,7 +354,7 @@ func TestRemoteSigningRejectsClientsWithUncontrolledRedirects(t *testing.T) {
 	custom := &wrappedHTTPClient{Client: &http.Client{}}
 	props := map[string]string{io.S3RemoteSigningEnabled: "true", remotesigning.EndpointProperty: "https://signer.example/sign"}
 	shared := &aws.Config{Region: "us-east-1", HTTPClient: custom}
-	ctx := utils.WithAWSConfig(t.Context(), shared)
+	ctx := awsconfig.WithAWSConfig(t.Context(), shared)
 	parsed, err := url.Parse("s3://bucket")
 	require.NoError(t, err)
 	_, err = createS3Bucket(ctx, parsed, props)

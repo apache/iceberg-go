@@ -28,9 +28,9 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/apache/iceberg-go/awsconfig"
 	internalaws "github.com/apache/iceberg-go/internal/awsconfig"
 	"github.com/apache/iceberg-go/io"
-	"github.com/apache/iceberg-go/utils"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -184,7 +184,7 @@ func resolveS3AWSConfig(ctx context.Context, props map[string]string) (*aws.Conf
 		base *aws.Config
 		err  error
 	)
-	if v := utils.GetAWSConfig(ctx); v != nil {
+	if v := awsconfig.GetAWSConfig(ctx); v != nil {
 		base = v
 	} else if base, err = ParseAWSConfig(ctx, props); err != nil {
 		return nil, err

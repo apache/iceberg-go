@@ -29,9 +29,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/apache/iceberg-go/awsconfig"
 	internalaws "github.com/apache/iceberg-go/internal/awsconfig"
 	"github.com/apache/iceberg-go/io"
-	"github.com/apache/iceberg-go/utils"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	"github.com/aws/aws-sdk-go-v2/credentials"
@@ -56,7 +56,7 @@ func TestResolveS3AWSConfigCredentialPrecedence(t *testing.T) {
 	}
 
 	ctxCfg := aws.Config{Credentials: credentials.NewStaticCredentialsProvider("CTX", "ctxsecret", "")}
-	ctxWith := utils.WithAWSConfig(context.Background(), &ctxCfg)
+	ctxWith := awsconfig.WithAWSConfig(context.Background(), &ctxCfg)
 
 	// Explicit s3.* creds win over an ambient context config, without mutating it.
 	t.Run("explicit props override ctx config", func(t *testing.T) {
@@ -91,7 +91,7 @@ func TestResolveS3AWSConfigCredentialPrecedence(t *testing.T) {
 	t.Run("never mutates the shared ctx config", func(t *testing.T) {
 		t.Parallel()
 		shared := &aws.Config{Credentials: credentials.NewStaticCredentialsProvider("CTX", "ctxsecret", "")}
-		cfg, err := resolveS3AWSConfig(utils.WithAWSConfig(context.Background(), shared), map[string]string{})
+		cfg, err := resolveS3AWSConfig(awsconfig.WithAWSConfig(context.Background(), shared), map[string]string{})
 		require.NoError(t, err)
 		require.NotSame(t, shared, cfg)
 
@@ -111,7 +111,7 @@ func TestResolveS3AWSConfigCredentialPrecedence(t *testing.T) {
 	t.Run("explicit region overrides ctx config", func(t *testing.T) {
 		t.Parallel()
 		shared := &aws.Config{Region: "ctx-region", Credentials: credentials.NewStaticCredentialsProvider("CTX", "s", "")}
-		cfg, err := resolveS3AWSConfig(utils.WithAWSConfig(context.Background(), shared), map[string]string{io.S3Region: "props-region"})
+		cfg, err := resolveS3AWSConfig(awsconfig.WithAWSConfig(context.Background(), shared), map[string]string{io.S3Region: "props-region"})
 		require.NoError(t, err)
 		assert.Equal(t, "props-region", cfg.Region)
 		assert.Equal(t, "ctx-region", shared.Region, "shared ctx config must not be mutated")

@@ -29,11 +29,11 @@ import (
 	"time"
 
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/awsconfig"
 	"github.com/apache/iceberg-go/catalog"
 	icebergio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/metrics"
 	"github.com/apache/iceberg-go/table"
-	"github.com/apache/iceberg-go/utils"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
@@ -76,7 +76,7 @@ var (
 func init() {
 	catalog.MustRegister("dynamodb", catalog.RegistrarFunc(func(ctx context.Context, name string, props iceberg.Properties) (catalog.Catalog, error) {
 		var cfg aws.Config
-		if supplied := utils.GetAWSConfig(ctx); supplied != nil {
+		if supplied := awsconfig.GetAWSConfig(ctx); supplied != nil {
 			cfg = supplied.Copy()
 		} else {
 			var err error
@@ -263,7 +263,7 @@ func properties(entry item) iceberg.Properties {
 
 func (c *Catalog) fileSystem(props iceberg.Properties, location string) table.FSysF {
 	return func(ctx context.Context) (icebergio.IO, error) {
-		return icebergio.LoadFS(utils.WithAWSConfig(ctx, &c.awsConfig), props, location)
+		return icebergio.LoadFS(awsconfig.WithAWSConfig(ctx, &c.awsConfig), props, location)
 	}
 }
 
