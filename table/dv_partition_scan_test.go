@@ -65,15 +65,17 @@ func TestLocalScanValidatesDeletionVectorPartitionsAcrossSchemaPromotion(t *test
 			const currentManifestListPath = location + "/metadata/snap-2.avro"
 
 			oldSchema := iceberg.NewSchema(0,
-				iceberg.NestedField{ID: 1, Name: "id", Type: tt.oldType, Required: true})
+				iceberg.NestedField{ID: 1, Name: "id", Type: tt.oldType, Required: true},
+				iceberg.NestedField{ID: 2, Name: "payload", Type: iceberg.PrimitiveTypes.String})
 			promotedSchema := iceberg.NewSchema(1,
-				iceberg.NestedField{ID: 1, Name: "id", Type: tt.promotedType, Required: true})
+				iceberg.NestedField{ID: 1, Name: "id", Type: tt.promotedType, Required: true},
+				iceberg.NestedField{ID: 2, Name: "payload", Type: iceberg.PrimitiveTypes.String})
 			spec := iceberg.NewPartitionSpecID(0, iceberg.PartitionField{
 				SourceIDs: []int{1}, FieldID: 1000, Name: "id", Transform: iceberg.IdentityTransform{},
 			})
 
 			meta, err := NewMetadata(oldSchema, &spec, UnsortedSortOrder, location,
-				iceberg.Properties{PropertyFormatVersion: "3"})
+				iceberg.Properties{PropertyFormatVersion: "3", WriteDeleteModeKey: WriteModeCopyOnWrite})
 			require.NoError(t, err)
 
 			dataFile, err := iceberg.NewDataFileBuilder(spec, iceberg.EntryContentData, dataPath,
@@ -172,6 +174,17 @@ func TestLocalScanValidatesDeletionVectorPartitionsAcrossSchemaPromotion(t *test
 						require.ErrorContains(t, err, fmt.Sprintf("map[1000:%v]", tt.dvValue))
 						require.ErrorContains(t, err, fmt.Sprintf("map[1000:%v]", tt.dataValue))
 					}
+				})
+			}
+			if tt.mismatch {
+				t.Run("copy-on-write delete", func(t *testing.T) {
+					// A non-partition predicate without file bounds requires a
+					// row rewrite. The invalid DV must fail before file reads.
+					filter := iceberg.EqualTo(iceberg.Reference("payload"), "remove")
+					err := tbl.NewTransaction().Delete(t.Context(), filter, nil)
+					require.ErrorIs(t, err, ErrInvalidMetadata)
+					require.ErrorContains(t, err, dvPath)
+					require.ErrorContains(t, err, dataPath)
 				})
 			}
 		})
