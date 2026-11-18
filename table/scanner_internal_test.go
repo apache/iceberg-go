@@ -396,7 +396,8 @@ func TestEqualityDeletePartitionKeyNormalizesValues(t *testing.T) {
 	}{
 		{name: "integer widths", left: int32(7), right: int64(7), equal: true},
 		{name: "date and integer", left: iceberg.Date(7), right: int32(7), equal: true},
-		{name: "float widths", left: float32(1.5), right: float64(1.5)},
+		{name: "float widths", left: float32(1.5), right: float64(1.5), equal: true},
+		{name: "float widths differ", left: float32(4.5), right: float64(4.6)},
 		{
 			name:  "float32 NaN payloads",
 			left:  math.Float32frombits(0x7fc00001),
@@ -410,9 +411,15 @@ func TestEqualityDeletePartitionKeyNormalizesValues(t *testing.T) {
 			equal: true,
 		},
 		{
-			name:  "float widths keep NaNs distinct",
+			name:  "float NaN across widths",
 			left:  math.Float32frombits(0x7fc00001),
 			right: math.Float64frombits(0x7ff8000000000001),
+			equal: true,
+		},
+		{
+			name:  "signed zero across widths",
+			left:  float32(math.Copysign(0, -1)),
+			right: float64(0),
 		},
 		{
 			name:  "float32 signed zero",
@@ -481,9 +488,15 @@ func TestEqualityDeleteIndexUsesFloatSemantics(t *testing.T) {
 			match:           true,
 		},
 		{
-			name:            "float widths stay distinct",
+			name:            "float widened to double matches",
 			dataPartition:   float32(1.5),
 			deletePartition: float64(1.5),
+			match:           true,
+		},
+		{
+			name:            "float widened to double differs",
+			dataPartition:   float32(4.5),
+			deletePartition: float64(4.6),
 		},
 		{
 			name:            "float32 signed zero stays distinct",
@@ -738,7 +751,13 @@ func TestPartitionsMatchUsesFloatSemantics(t *testing.T) {
 		{name: "float64 NaN payloads", left: math.Float64frombits(0x7ff8000000000001), right: math.Float64frombits(0x7ff8000000000002), match: true},
 		{name: "float32 signed zero", left: float32(math.Copysign(0, -1)), right: float32(0), match: false},
 		{name: "float64 signed zero", left: math.Copysign(0, -1), right: float64(0), match: false},
-		{name: "float widths differ", left: float32(1), right: float64(1), match: false},
+		{name: "float widened to double", left: float32(1), right: float64(1), match: true},
+		{name: "float widened to double differs", left: float32(4.5), right: 4.6, match: false},
+		{name: "float NaN across widths", left: float32(math.NaN()), right: math.NaN(), match: true},
+		{name: "signed zero across widths", left: float32(math.Copysign(0, -1)), right: float64(0), match: false},
+		{name: "int widened to long", left: int32(7), right: int64(7), match: true},
+		{name: "int widened to long differs", left: int32(7), right: int64(8), match: false},
+		{name: "int and double not widened", left: int32(1), right: float64(1), match: false},
 		{name: "pass-through integer", left: int64(42), right: int64(42), match: true},
 		{name: "pass-through strings differ", left: "a", right: "b", match: false},
 		{name: "nil values", left: nil, right: nil, match: true},

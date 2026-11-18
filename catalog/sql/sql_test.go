@@ -1946,6 +1946,53 @@ func (s *SqliteCatalogTestSuite) TestStaleSchemaUpdateIsRefusedOnRecommit() {
 	s.Equal(peerMeta.MetadataLocation(), current.MetadataLocation(), "nothing may be committed")
 }
 
+// The peer's add and drop leave the schema ID unchanged, so only
+// last-assigned-field-id stops the stale writer from reusing field ID 2.
+func (s *SqliteCatalogTestSuite) TestStaleSchemaUpdateDoesNotReuseDroppedFieldID() {
+	ctx := context.Background()
+	cat := s.getCatalogSqlite()
+	defer cat.Close()
+	tblID := s.createStringTable(ctx, cat, nil)
+
+	stale, err := cat.LoadTable(ctx, tblID)
+	s.Require().NoError(err)
+	tx := s.addStringColumn(ctx, stale, "x")
+
+	peer, err := cat.LoadTable(ctx, tblID)
+	s.Require().NoError(err)
+	peer, err = s.addStringColumn(ctx, peer, "y").Commit(ctx)
+	s.Require().NoError(err)
+
+	arrowSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "foo", Type: arrow.BinaryTypes.String},
+		{Name: "y", Type: arrow.BinaryTypes.String, Nullable: true},
+	}, nil)
+	rec, _, err := array.RecordFromJSON(memory.DefaultAllocator, arrowSchema,
+		strings.NewReader(`[{"foo": "seed", "y": "42"}]`))
+	s.Require().NoError(err)
+	defer rec.Release()
+	arrTable := array.NewTableFromRecords(arrowSchema, []arrow.RecordBatch{rec})
+	defer arrTable.Release()
+	appendTx := peer.NewTransaction()
+	s.Require().NoError(appendTx.AppendTable(ctx, arrTable, 1024, nil))
+	peer, err = appendTx.Commit(ctx)
+	s.Require().NoError(err)
+
+	dropTx := peer.NewTransaction()
+	s.Require().NoError(dropTx.UpdateSchema(true, false).DeleteColumn([]string{"y"}).Commit())
+	peer, err = dropTx.Commit(ctx)
+	s.Require().NoError(err)
+	s.Require().Equal(stale.Metadata().CurrentSchema().ID, peer.Metadata().CurrentSchema().ID)
+	s.Require().Equal(2, peer.Metadata().LastColumnID())
+
+	_, err = tx.Commit(ctx)
+	s.Require().ErrorIs(err, table.ErrCommitFailed)
+
+	current, err := cat.LoadTable(ctx, tblID)
+	s.Require().NoError(err)
+	s.Require().Equal(peer.MetadataLocation(), current.MetadataLocation(), "nothing may be committed")
+}
+
 func (s *SqliteCatalogTestSuite) TestRejectedUpdateResumesThenEndsWhenReplayCannotApply() {
 	ctx := context.Background()
 	cat := s.getCatalogSqlite()
