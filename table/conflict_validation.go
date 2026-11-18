@@ -143,9 +143,15 @@ func readIsolationLevel(props iceberg.Properties, key string, defVal IsolationLe
 var ErrCommitDiverged = errors.New("commit diverged: base snapshot is no longer on the branch")
 
 // ErrConflictingDataFiles is returned when a concurrent commit added data
-// files that satisfy the committer's filter. It wraps ErrCommitFailed: a
-// new transaction built from a reloaded table may succeed.
+// files that satisfy the committer's conflict filter. It wraps ErrCommitFailed:
+// a new transaction built from a reloaded table may succeed.
 var ErrConflictingDataFiles = fmt.Errorf("%w: concurrent data files added", ErrCommitFailed)
+
+// ErrDuplicateDataFiles is returned when a RowDelta adds the same data file
+// path twice or when a retry finds a concurrent addition of that path still
+// live. It does not wrap ErrCommitFailed: refreshing the table alone cannot
+// resolve a collision. The caller must use a different data file path.
+var ErrDuplicateDataFiles = errors.New("duplicate data file path")
 
 // ErrConflictingDeleteFiles is returned when a concurrent commit added
 // delete files that could mask rows the committer is writing or replacing.
@@ -475,49 +481,68 @@ func newConflictContext(ctx context.Context, base, current Metadata, branch stri
 	}, nil
 }
 
-// forEachAddedEntry visits every ManifestEntry with status ADDED
-// whose snapshot id equals one of the concurrent snapshots. This
-// matches Java's per-entry filter: an ADDED entry is attributed to
-// the snapshot that produced it, independent of which manifest
-// happens to carry it today — a manifest-rewrite (e.g. the merging
-// append producer) can carry ADDED entries from a prior snapshot
-// into a newer manifest whose added-snapshot-id is the committing
-// one, so per-manifest filtering alone would miss or mis-attribute
-// entries. Filtering on entry.SnapshotID() is the only attribution
-// that survives manifest rewrites.
+// forEachEntryInSnapshot visits entries in the selected manifest content
+// whose status matches includeStatus and whose entry snapshot ID matches
+// snap. Entry snapshot IDs provide attribution across manifest rewrites,
+// which may carry entries from an earlier snapshot in a newer manifest.
 //
 // The visitor returns early if the callback returns a non-nil error.
-func (c *conflictContext) forEachAddedEntry(content iceberg.ManifestContent, visit func(Snapshot, iceberg.ManifestEntry) error) error {
-	for _, snap := range c.concurrent {
-		manifests, err := c.manifestsFor(snap)
-		if err != nil {
-			return fmt.Errorf("loading entries for concurrent snapshot %d: %w", snap.SnapshotID, err)
+func (c *conflictContext) forEachEntryInSnapshot(
+	snap Snapshot,
+	content iceberg.ManifestContent,
+	includeStatus func(iceberg.ManifestEntryStatus) bool,
+	visit func(Snapshot, iceberg.ManifestEntry) error,
+) error {
+	manifests, err := c.manifestsFor(snap)
+	if err != nil {
+		return fmt.Errorf("loading entries for concurrent snapshot %d: %w", snap.SnapshotID, err)
+	}
+	for _, mf := range manifests {
+		if content >= 0 && mf.ManifestContent() != content {
+			continue
 		}
-		for _, mf := range manifests {
-			if content >= 0 && mf.ManifestContent() != content {
+
+		for entry, err := range mf.Entries(c.ctx, c.manifestReadIO(), false) {
+			if err != nil {
+				return fmt.Errorf("loading entries for concurrent snapshot %d: %w", snap.SnapshotID, err)
+			}
+			if entry.SnapshotID() != snap.SnapshotID || !includeStatus(entry.Status()) {
 				continue
 			}
-
-			for entry, err := range mf.Entries(c.ctx, c.manifestReadIO(), false) {
-				if err != nil {
-					return fmt.Errorf("loading entries for concurrent snapshot %d: %w", snap.SnapshotID, err)
-				}
-				if entry.Status() != iceberg.EntryStatusADDED {
-					continue
-				}
-				if entry.SnapshotID() != snap.SnapshotID {
-					// Entry was inherited from a prior snapshot and is
-					// not attributable to this concurrent commit.
-					continue
-				}
-				if err := visit(snap, entry); err != nil {
-					return err
-				}
+			if err := visit(snap, entry); err != nil {
+				return err
 			}
 		}
 	}
 
 	return nil
+}
+
+// forEachAddedEntry visits every ADDED entry attributed to a concurrent
+// snapshot. A manifest rewrite may carry an entry from an earlier snapshot,
+// so attribution uses the entry snapshot ID instead of the manifest snapshot ID.
+func (c *conflictContext) forEachAddedEntry(content iceberg.ManifestContent, visit func(Snapshot, iceberg.ManifestEntry) error) error {
+	for _, snap := range c.concurrent {
+		if err := c.forEachEntryInSnapshot(snap, content,
+			func(status iceberg.ManifestEntryStatus) bool { return status == iceberg.EntryStatusADDED }, visit); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// forEachChangedEntryInSnapshot visits ADDED and DELETED entries attributed
+// to snap. Both statuses are needed when resolving whether a path added by a
+// concurrent snapshot remains live.
+func (c *conflictContext) forEachChangedEntryInSnapshot(
+	snap Snapshot,
+	content iceberg.ManifestContent,
+	visit func(Snapshot, iceberg.ManifestEntry) error,
+) error {
+	return c.forEachEntryInSnapshot(snap, content, func(status iceberg.ManifestEntryStatus) bool {
+		return status == iceberg.EntryStatusADDED || status == iceberg.EntryStatusDELETED
+	}, visit)
 }
 
 // validateDataFilesExist verifies that every file path in
