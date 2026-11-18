@@ -20,6 +20,7 @@ package sql_test
 import (
 	"context"
 	"database/sql"
+	"io/fs"
 	"net/url"
 	"path/filepath"
 	"testing"
@@ -37,6 +38,12 @@ import (
 
 func TestSQLCatalogIORegistriesAreIsolated(t *testing.T) {
 	const scheme = "sql-private-registry"
+	globalFS := iceio.NewMemFS()
+	iceio.Register(scheme, func(context.Context, *url.URL, map[string]string) (iceio.IO, error) {
+		return globalFS, nil
+	})
+	t.Cleanup(func() { iceio.Unregister(scheme) })
+
 	type catalogCase struct {
 		cat *sqlcat.Catalog
 		fs  *iceio.MemFS
@@ -86,8 +93,11 @@ func TestSQLCatalogIORegistriesAreIsolated(t *testing.T) {
 		_, err = cases[1-i].fs.Open(t.Context(), created.MetadataLocation())
 		require.Error(t, err)
 
-		_, err = iceio.LoadFS(t.Context(), nil, created.MetadataLocation())
-		require.ErrorIs(t, err, iceio.ErrIOSchemeNotFound)
+		defaultFS, err := iceio.LoadFS(t.Context(), nil, created.MetadataLocation())
+		require.NoError(t, err)
+		require.Same(t, globalFS, defaultFS)
+		_, err = globalFS.Open(t.Context(), created.MetadataLocation())
+		require.ErrorIs(t, err, fs.ErrNotExist)
 
 		// CommitTable stages and writes new metadata, not just the initial create.
 		_, updatedLocation, err := tc.cat.CommitTable(t.Context(), ident, nil,
@@ -97,8 +107,8 @@ func TestSQLCatalogIORegistriesAreIsolated(t *testing.T) {
 		newMetadata, err := tc.fs.Open(t.Context(), updatedLocation)
 		require.NoError(t, err)
 		require.NoError(t, newMetadata.Close())
-		_, err = iceio.LoadFS(t.Context(), nil, updatedLocation)
-		require.ErrorIs(t, err, iceio.ErrIOSchemeNotFound)
+		_, err = globalFS.Open(t.Context(), updatedLocation)
+		require.ErrorIs(t, err, fs.ErrNotExist)
 	}
 }
 
