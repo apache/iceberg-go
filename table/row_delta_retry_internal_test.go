@@ -73,6 +73,24 @@ func TestRowDeltaChecksDuplicateDataPathsOnRetry(t *testing.T) {
 		})
 	})
 
+	t.Run("ignores files added to the builder after staging", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			fs, cat, tbl := newExpireReplayTable(t, nil)
+			tbl, _ = appendOnBranch(t, tbl, MainBranch, "base")
+
+			tx := tbl.NewTransaction()
+			delta := tx.NewRowDelta(nil).AddRows(retryCleanupFile(t, "writer"))
+			require.NoError(t, delta.Commit(t.Context()))
+			delta.AddRows(retryCleanupFile(t, "peer"))
+			peerAppend(t, fs, cat, MainBranch, "peer")
+
+			committed, err := tx.Commit(t.Context())
+			require.NoError(t, err)
+			assert.Equal(t, []string{"base", "peer", "writer"},
+				branchFiles(t, fs, committed.Metadata(), MainBranch))
+		})
+	})
+
 	t.Run("allows the path after a later concurrent deletion", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
 			fs, cat, tbl := newExpireReplayTable(t, nil)

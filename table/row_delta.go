@@ -356,8 +356,11 @@ func (rd *RowDelta) Commit(ctx context.Context) error {
 	// suppressed above; RowDelta semantics (pos-delete references,
 	// eq-delete predicate) require a dedicated check that
 	// snapshot_producers does not know about.
+	// Capture the staged file lists. Builder methods append to those lists,
+	// and a later call must not change what this validator checks.
+	staged := *rd
 	rd.txn.addValidator(func(cc *conflictContext) error {
-		return rd.validate(cc, referenced)
+		return staged.validate(cc, referenced)
 	})
 
 	return rd.txn.apply(updates, reqs)
