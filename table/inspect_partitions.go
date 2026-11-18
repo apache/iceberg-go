@@ -28,7 +28,9 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/scalar"
 	"github.com/apache/iceberg-go"
+	iceinternal "github.com/apache/iceberg-go/internal"
 	iceio "github.com/apache/iceberg-go/io"
+	tblutils "github.com/apache/iceberg-go/table/internal"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -36,7 +38,7 @@ import (
 // files from the current snapshot. Files from evolved specs are coerced into
 // the table-wide partition type before grouping.
 func (i InspectTable) Partitions(ctx context.Context) (array.RecordReader, error) {
-	partitionType, err := unifiedPartitionType(i.tbl.Metadata())
+	partitionType, err := tblutils.UnifiedPartitionType(i.tbl.Metadata().PartitionSpecs(), i.tbl.Schema())
 	if err != nil {
 		return nil, fmt.Errorf("inspect partitions: %w", err)
 	}
@@ -54,14 +56,14 @@ func (i InspectTable) Partitions(ctx context.Context) (array.RecordReader, error
 	return i.partitionAggregateReader(ctx, arrowSchema, partitionType, aggregates), nil
 }
 
-// partitionAggregateReader encodes at most recordBatchSize partitions per
+// partitionAggregateReader encodes at most RecordBatchSize partitions per
 // Arrow batch. Aggregate discovery is eager, but the Arrow buffers are bounded
 // and released as each record is consumed.
 func (i InspectTable) partitionAggregateReader(
 	ctx context.Context,
 	arrowSchema *arrow.Schema,
 	partitionType *iceberg.StructType,
-	aggregates []*partitionAggregate,
+	aggregates []*tblutils.PartitionAggregate,
 ) array.RecordReader {
 	return array.ReaderFromIter(arrowSchema, func(yield func(arrow.RecordBatch, error) bool) {
 		bldr := array.NewRecordBuilder(i.alloc, arrowSchema)
@@ -80,7 +82,7 @@ func (i InspectTable) partitionAggregateReader(
 
 				return
 			}
-			if (index+1)%recordBatchSize == 0 {
+			if (index+1)%tblutils.RecordBatchSize == 0 {
 				if !yield(bldr.NewRecordBatch(), nil) {
 					return
 				}
@@ -89,7 +91,7 @@ func (i InspectTable) partitionAggregateReader(
 
 		// Match the prior single-batch API for empty tables, but do not emit
 		// an extra empty batch after an exact multiple of the batch size.
-		if len(aggregates) == 0 || len(aggregates)%recordBatchSize != 0 {
+		if len(aggregates) == 0 || len(aggregates)%tblutils.RecordBatchSize != 0 {
 			_ = yield(bldr.NewRecordBatch(), nil)
 		}
 	})
@@ -99,7 +101,7 @@ func (i InspectTable) partitionAggregateReader(
 // per-manifest partition aggregation state.
 const inspectPartitionManifestConcurrency = 8
 
-func (i InspectTable) partitionAggregates(ctx context.Context, partitionType *iceberg.StructType) ([]*partitionAggregate, error) {
+func (i InspectTable) partitionAggregates(ctx context.Context, partitionType *iceberg.StructType) ([]*tblutils.PartitionAggregate, error) {
 	snapshot := i.tbl.Metadata().CurrentSnapshot()
 	if snapshot == nil {
 		return nil, nil
@@ -120,8 +122,8 @@ func (i InspectTable) partitionAggregates(ctx context.Context, partitionType *ic
 		snapshotTimes[snapshot.SnapshotID] = snapshot.TimestampMs
 	}
 
-	aggregates := make([]*partitionAggregate, 0)
-	aggregateTree := newPartitionAggregateTree()
+	aggregates := make([]*tblutils.PartitionAggregate, 0)
+	aggregateTree := tblutils.NewPartitionAggregateTree()
 
 	// Buffer only a bounded number of manifests. Workers group their entries
 	// independently, then their results are merged in manifest order.
@@ -132,11 +134,11 @@ func (i InspectTable) partitionAggregates(ctx context.Context, partitionType *ic
 				snapshotTimes, aggregateTree, &aggregates)
 		}
 
-		partial := make([][]*partitionAggregate, len(batch))
+		partial := make([][]*tblutils.PartitionAggregate, len(batch))
 		g, gctx := errgroup.WithContext(ctx)
 		for index, manifest := range batch {
 			g.Go(func() error {
-				localTree := newPartitionAggregateTree()
+				localTree := tblutils.NewPartitionAggregateTree()
 
 				return i.foldInspectPartitionManifest(gctx, fs, manifest, partitionType,
 					snapshotTimes, localTree, &partial[index])
@@ -157,10 +159,10 @@ func (i InspectTable) partitionAggregates(ctx context.Context, partitionType *ic
 					}
 				}
 				merged++
-				aggregate := aggregateTree.lookupPartition(local.partition, partitionType)
+				aggregate := aggregateTree.LookupPartition(local.Partition, partitionType)
 				if aggregate == nil {
 					aggregates = append(aggregates, local)
-					aggregateTree.insert(newPartitionRecord(local.partition, partitionType), local)
+					aggregateTree.Insert(tblutils.NewPartitionRecord(local.Partition, partitionType), local)
 
 					continue
 				}
@@ -192,7 +194,7 @@ func (i InspectTable) partitionAggregates(ctx context.Context, partitionType *ic
 	}
 
 	sort.Slice(aggregates, func(left, right int) bool {
-		return aggregates[left].orderingKey < aggregates[right].orderingKey
+		return aggregates[left].OrderingKey < aggregates[right].OrderingKey
 	})
 
 	return aggregates, nil
@@ -206,8 +208,8 @@ func (i InspectTable) foldInspectPartitionManifest(
 	manifest iceberg.ManifestFile,
 	partitionType *iceberg.StructType,
 	snapshotTimes map[int64]int64,
-	aggregateTree *partitionAggregateTree,
-	aggregates *[]*partitionAggregate,
+	aggregateTree *tblutils.PartitionAggregateTree,
+	aggregates *[]*tblutils.PartitionAggregate,
 ) error {
 	// Avoid opening remote manifest files after the caller has canceled.
 	if err := ctx.Err(); err != nil {
@@ -227,30 +229,30 @@ func (i InspectTable) foldInspectPartitionManifest(
 		entryIndex++
 
 		file := entry.DataFile()
-		partitionValues := dataFilePartition(file)
-		aggregate := aggregateTree.lookupPartition(partitionValues, partitionType)
+		partitionValues := iceinternal.BorrowedDataFilePartition(file)
+		aggregate := aggregateTree.LookupPartition(partitionValues, partitionType)
 		if aggregate == nil {
-			partition := coercePartition(partitionValues, partitionType)
-			record := newPartitionRecord(partition, partitionType)
-			aggregate = &partitionAggregate{
-				partition:   clonePartition(partition),
-				orderingKey: inspectPartitionKey(partition),
+			partition := tblutils.CoercePartition(partitionValues, partitionType)
+			record := tblutils.NewPartitionRecord(partition, partitionType)
+			aggregate = &tblutils.PartitionAggregate{
+				Partition:   tblutils.ClonePartition(partition),
+				OrderingKey: inspectPartitionKey(partition),
 			}
 			*aggregates = append(*aggregates, aggregate)
-			aggregateTree.insert(record, aggregate)
+			aggregateTree.Insert(record, aggregate)
 		}
 
 		switch file.ContentType() {
 		case iceberg.EntryContentData:
-			aggregate.dataRecordCount += file.Count()
-			aggregate.dataFileCount++
-			aggregate.dataFileSize += file.FileSizeBytes()
+			aggregate.DataRecordCount += file.Count()
+			aggregate.DataFileCount++
+			aggregate.DataFileSize += file.FileSizeBytes()
 		case iceberg.EntryContentPosDeletes:
-			aggregate.positionDeleteCount += file.Count()
-			aggregate.positionDeleteFiles++
+			aggregate.PositionDeleteCount += file.Count()
+			aggregate.PositionDeleteFiles++
 		case iceberg.EntryContentEqDeletes:
-			aggregate.equalityDeleteCount += file.Count()
-			aggregate.equalityDeleteFiles++
+			aggregate.EqualityDeleteCount += file.Count()
+			aggregate.EqualityDeleteFiles++
 		}
 
 		if file.ContentType() == iceberg.EntryContentData ||
@@ -263,25 +265,25 @@ func (i InspectTable) foldInspectPartitionManifest(
 	return ctx.Err()
 }
 
-func mergeInspectPartitionAggregate(dst, src *partitionAggregate) {
-	dst.dataRecordCount += src.dataRecordCount
-	dst.dataFileCount += src.dataFileCount
-	dst.dataFileSize += src.dataFileSize
-	dst.positionDeleteCount += src.positionDeleteCount
-	dst.positionDeleteFiles += src.positionDeleteFiles
-	dst.equalityDeleteCount += src.equalityDeleteCount
-	dst.equalityDeleteFiles += src.equalityDeleteFiles
+func mergeInspectPartitionAggregate(dst, src *tblutils.PartitionAggregate) {
+	dst.DataRecordCount += src.DataRecordCount
+	dst.DataFileCount += src.DataFileCount
+	dst.DataFileSize += src.DataFileSize
+	dst.PositionDeleteCount += src.PositionDeleteCount
+	dst.PositionDeleteFiles += src.PositionDeleteFiles
+	dst.EqualityDeleteCount += src.EqualityDeleteCount
+	dst.EqualityDeleteFiles += src.EqualityDeleteFiles
 
-	if src.lastUpdatedAt != nil &&
-		(dst.lastUpdatedAt == nil || *src.lastUpdatedAt > *dst.lastUpdatedAt) {
-		dst.lastUpdatedAt = src.lastUpdatedAt
-		dst.lastUpdatedSnapshot = src.lastUpdatedSnapshot
-		dst.specID = src.specID
+	if src.LastUpdatedAt != nil &&
+		(dst.LastUpdatedAt == nil || *src.LastUpdatedAt > *dst.LastUpdatedAt) {
+		dst.LastUpdatedAt = src.LastUpdatedAt
+		dst.LastUpdatedSnapshot = src.LastUpdatedSnapshot
+		dst.SpecID = src.SpecID
 	}
 }
 
 func (i InspectTable) updatePartitionTimestamp(
-	aggregate *partitionAggregate,
+	aggregate *tblutils.PartitionAggregate,
 	snapshotTimes map[int64]int64,
 	snapshotID int64,
 	specID int32,
@@ -294,13 +296,13 @@ func (i InspectTable) updatePartitionTimestamp(
 		return
 	}
 	timestamp := timestampMs * 1000
-	if aggregate.lastUpdatedAt != nil && timestamp <= *aggregate.lastUpdatedAt {
+	if aggregate.LastUpdatedAt != nil && timestamp <= *aggregate.LastUpdatedAt {
 		return
 	}
-	aggregate.lastUpdatedAt = &timestamp
+	aggregate.LastUpdatedAt = &timestamp
 	id := snapshotID
-	aggregate.lastUpdatedSnapshot = &id
-	aggregate.specID = specID
+	aggregate.LastUpdatedSnapshot = &id
+	aggregate.SpecID = specID
 }
 
 func inspectPartitionKey(partition map[int]any) string {
@@ -388,7 +390,7 @@ func PartitionsSchema(partitionType *iceberg.StructType) *iceberg.Schema {
 	)
 }
 
-func appendPartitionAggregate(bldr *array.RecordBuilder, partitionType *iceberg.StructType, aggregate partitionAggregate) error {
+func appendPartitionAggregate(bldr *array.RecordBuilder, partitionType *iceberg.StructType, aggregate tblutils.PartitionAggregate) error {
 	idx := 0
 	if partitionType != nil && partitionType.NumFields() > 0 {
 		partition := bldr.Field(idx).(*array.StructBuilder)
@@ -396,13 +398,13 @@ func appendPartitionAggregate(bldr *array.RecordBuilder, partitionType *iceberg.
 		partition.Append(true)
 		for fieldIndex := range partitionType.NumFields() {
 			field := partitionType.Field(fieldIndex)
-			value := aggregate.partition[field.ID]
+			value := aggregate.Partition[field.ID]
 			if value == nil {
 				partition.FieldBuilder(fieldIndex).AppendNull()
 
 				continue
 			}
-			valueScalar, err := partitionValueScalar(value, field.Type, arrowType.Field(fieldIndex).Type)
+			valueScalar, err := tblutils.PartitionValueScalar(value, field.Type, arrowType.Field(fieldIndex).Type)
 			if err != nil {
 				return fmt.Errorf("partition field %q: %w", field.Name, err)
 			}
@@ -411,33 +413,33 @@ func appendPartitionAggregate(bldr *array.RecordBuilder, partitionType *iceberg.
 			}
 		}
 		idx++
-		bldr.Field(idx).(*array.Int32Builder).Append(aggregate.specID)
+		bldr.Field(idx).(*array.Int32Builder).Append(aggregate.SpecID)
 		idx++
 	}
-	bldr.Field(idx).(*array.Int64Builder).Append(aggregate.dataRecordCount)
+	bldr.Field(idx).(*array.Int64Builder).Append(aggregate.DataRecordCount)
 	idx++
-	bldr.Field(idx).(*array.Int32Builder).Append(aggregate.dataFileCount)
+	bldr.Field(idx).(*array.Int32Builder).Append(aggregate.DataFileCount)
 	idx++
-	bldr.Field(idx).(*array.Int64Builder).Append(aggregate.dataFileSize)
+	bldr.Field(idx).(*array.Int64Builder).Append(aggregate.DataFileSize)
 	idx++
-	bldr.Field(idx).(*array.Int64Builder).Append(aggregate.positionDeleteCount)
+	bldr.Field(idx).(*array.Int64Builder).Append(aggregate.PositionDeleteCount)
 	idx++
-	bldr.Field(idx).(*array.Int32Builder).Append(aggregate.positionDeleteFiles)
+	bldr.Field(idx).(*array.Int32Builder).Append(aggregate.PositionDeleteFiles)
 	idx++
-	bldr.Field(idx).(*array.Int64Builder).Append(aggregate.equalityDeleteCount)
+	bldr.Field(idx).(*array.Int64Builder).Append(aggregate.EqualityDeleteCount)
 	idx++
-	bldr.Field(idx).(*array.Int32Builder).Append(aggregate.equalityDeleteFiles)
+	bldr.Field(idx).(*array.Int32Builder).Append(aggregate.EqualityDeleteFiles)
 	idx++
-	if aggregate.lastUpdatedAt == nil {
+	if aggregate.LastUpdatedAt == nil {
 		bldr.Field(idx).(*array.TimestampBuilder).AppendNull()
 	} else {
-		bldr.Field(idx).(*array.TimestampBuilder).Append(arrow.Timestamp(*aggregate.lastUpdatedAt))
+		bldr.Field(idx).(*array.TimestampBuilder).Append(arrow.Timestamp(*aggregate.LastUpdatedAt))
 	}
 	idx++
-	if aggregate.lastUpdatedSnapshot == nil {
+	if aggregate.LastUpdatedSnapshot == nil {
 		bldr.Field(idx).(*array.Int64Builder).AppendNull()
 	} else {
-		bldr.Field(idx).(*array.Int64Builder).Append(*aggregate.lastUpdatedSnapshot)
+		bldr.Field(idx).(*array.Int64Builder).Append(*aggregate.LastUpdatedSnapshot)
 	}
 
 	return nil

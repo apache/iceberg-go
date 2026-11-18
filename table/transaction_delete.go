@@ -944,7 +944,7 @@ func (t *Transaction) writePositionDeletesForFiles(ctx context.Context, fs io.IO
 				return
 			}
 			column := record.Column(0)
-			values, err := filePathValues(column)
+			values, err := tblutils.FilePathValues(column)
 			if err != nil {
 				record.Release()
 				yield(nil, err)

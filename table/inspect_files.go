@@ -27,6 +27,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
+	tblutils "github.com/apache/iceberg-go/table/internal"
 )
 
 // DataFiles returns the live data files in the current snapshot. Deleted
@@ -78,7 +79,7 @@ func (i InspectTable) inspectFiles(
 	allSnapshots bool,
 	includeManifest func(iceberg.ManifestFile) bool,
 ) (array.RecordReader, error) {
-	partitionType, err := unifiedPartitionType(i.tbl.Metadata())
+	partitionType, err := tblutils.UnifiedPartitionType(i.tbl.Metadata().PartitionSpecs(), i.tbl.Schema())
 	if err != nil {
 		return nil, fmt.Errorf("inspect %s: %w", name, err)
 	}
@@ -233,7 +234,7 @@ func (i InspectTable) manifestEntryReaderFromManifestSource(
 					return
 				}
 				rows++
-				if rows == recordBatchSize && !emit() {
+				if rows == tblutils.RecordBatchSize && !emit() {
 					return
 				}
 			}

@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"maps"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -2216,4 +2217,22 @@ func TestTableOperationsRejectEmptyIdentifiers(t *testing.T) {
 		_, err = cat.CheckTableExists(ctx, ident)
 		require.ErrorIs(t, err, catalog.ErrNoSuchTable)
 	}
+}
+
+func TestNewCatalogCancelledContext(t *testing.T) {
+	// A reachable listener, so construction that ignores ctx succeeds.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer ln.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	uri := "thrift://" + ln.Addr().String()
+
+	_, err = NewCatalog(ctx, iceberg.Properties{URI: uri})
+	require.ErrorIs(t, err, context.Canceled)
+
+	_, err = catalog.Load(ctx, "hive", iceberg.Properties{"type": "hive", URI: uri})
+	require.ErrorIs(t, err, context.Canceled)
 }

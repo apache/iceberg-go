@@ -262,7 +262,7 @@ func readDeletesBefore(ctx context.Context, fs iceio.IO, dataFile iceberg.DataFi
 	}
 	defer tbl.Release()
 
-	filePathIndex, posIndex, err := positionDeleteColumnIndices(tbl.Schema())
+	filePathIndex, posIndex, err := tblutils.PositionDeleteColumnIndices(tbl.Schema())
 	if err != nil {
 		return nil, err
 	}
@@ -372,7 +372,7 @@ func groupPosDeletesByFilePathBefore(ctx context.Context, filePathCol, posCol *a
 	unique.Release()
 	defer uniquePaths.Release()
 
-	paths, err := filePathValues(uniquePaths)
+	paths, err := tblutils.FilePathValues(uniquePaths)
 	if err != nil {
 		return nil, err
 	}

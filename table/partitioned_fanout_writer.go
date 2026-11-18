@@ -36,6 +36,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/extensions"
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/internal"
+	tblutils "github.com/apache/iceberg-go/table/internal"
 	"github.com/google/uuid"
 	"golang.org/x/sync/errgroup"
 )
@@ -80,65 +81,29 @@ type partitionExtractionPlan struct {
 	pathPlan     partitionPathPlan
 }
 
-type (
-	binaryPartitionKey  string
-	float32PartitionKey uint32
-	float64PartitionKey uint64
-	integerPartitionKey int64
-)
-
-const (
-	// Canonical NaN payloads make all NaNs of the same width compare equal.
-	// The width-specific key types preserve float width, while using raw bits
-	// intentionally keeps -0.0 and +0.0 distinct.
-	canonicalFloat32NaNBits uint32 = 0x7fc00000
-	canonicalFloat64NaNBits uint64 = 0x7ff8000000000000
-)
-
-func comparablePartitionKey(value any) any {
-	switch value := value.(type) {
-	case []byte:
-		return binaryPartitionKey(value)
-	case int:
-		return integerPartitionKey(value)
-	case int32:
-		return integerPartitionKey(value)
-	case int64:
-		return integerPartitionKey(value)
-	case iceberg.Date:
-		return integerPartitionKey(value)
-	case iceberg.Time:
-		return integerPartitionKey(value)
-	case iceberg.Timestamp:
-		return integerPartitionKey(value)
-	case iceberg.TimestampNano:
-		return integerPartitionKey(value)
-	case float32:
-		rawBits := math.Float32bits(value)
-		if math.IsNaN(float64(value)) {
-			rawBits = canonicalFloat32NaNBits
-		}
-
-		return float32PartitionKey(rawBits)
-	case float64:
-		rawBits := math.Float64bits(value)
-		if math.IsNaN(value) {
-			rawBits = canonicalFloat64NaNBits
-		}
-
-		return float64PartitionKey(rawBits)
-	}
-
-	return value
+func partitionValuesEqual(left, right any) bool {
+	return partitionComparisonKey(left) == partitionComparisonKey(right)
 }
 
-func partitionValuesEqual(left, right any) bool {
-	// Integer-backed partition values are normalized across manifest decoder
-	// representations and Iceberg integer promotions. []byte is converted to a
-	// string key and floats use width-aware keys so NaNs compare consistently
-	// while signed zero and float width remain significant.
-	// The default branch preserves comparable scalar values.
-	return comparablePartitionKey(left) == comparablePartitionKey(right)
+// Manifest decoders and int-to-long promotions can represent the same integer
+// partition value with different Go types. Other values use the shared keys.
+func partitionComparisonKey(value any) any {
+	switch value := value.(type) {
+	case int:
+		return int64(value)
+	case int32:
+		return int64(value)
+	case iceberg.Date:
+		return int64(value)
+	case iceberg.Time:
+		return int64(value)
+	case iceberg.Timestamp:
+		return int64(value)
+	case iceberg.TimestampNano:
+		return int64(value)
+	default:
+		return tblutils.ComparablePartitionKey(value)
+	}
 }
 
 func partitionRecordsEqual(left, right partitionRecord) bool {
@@ -779,7 +744,7 @@ func (n *partitionMapNode) child(part any) (any, bool) {
 
 		return child, found
 	default:
-		child, found := n.children[comparablePartitionKey(part)]
+		child, found := n.children[tblutils.ComparablePartitionKey(part)]
 
 		return child, found
 	}
@@ -811,7 +776,7 @@ func (n *partitionMapNode) setChild(part, child any) {
 		if n.children == nil {
 			n.children = make(map[any]any)
 		}
-		n.children[comparablePartitionKey(part)] = child
+		n.children[tblutils.ComparablePartitionKey(part)] = child
 	}
 }
 

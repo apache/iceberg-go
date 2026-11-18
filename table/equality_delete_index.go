@@ -27,6 +27,7 @@ import (
 
 	"github.com/apache/iceberg-go"
 	iceberginternal "github.com/apache/iceberg-go/internal"
+	tblutils "github.com/apache/iceberg-go/table/internal"
 	"github.com/google/uuid"
 )
 
@@ -345,7 +346,7 @@ func comparableEqualityDeletePartitionValue(value any) (any, error) {
 	case float32, float64:
 		// Keep equality-delete indexing aligned with writer partition keys:
 		// canonicalize NaNs within each width and preserve signed zero.
-		return comparablePartitionKey(value), nil
+		return tblutils.ComparablePartitionKey(value), nil
 	case string:
 		return equalityDeleteStringPartitionValue(value), nil
 	case []byte:
