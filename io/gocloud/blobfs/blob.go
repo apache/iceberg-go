@@ -46,7 +46,7 @@ type blobOpenFile struct {
 	*blob.Reader
 
 	name, key string
-	b         *FileIO
+	b         *fileIO
 	ctx       context.Context
 }
 
@@ -205,7 +205,21 @@ func defaultKeyExtractor(bucketName string, allowedSchemes ...string) KeyExtract
 }
 
 // FileIO is the iceberg-go/io implementation backed by a gocloud.dev bucket.
-type FileIO struct {
+// Close closes the bucket passed to New.
+type FileIO interface {
+	icebergio.ReadFileIO
+	icebergio.WriteFileIO
+	icebergio.ListableIO
+	icebergio.BulkRemovableIO
+	icebergio.StatIO
+	icebergio.RenameIO
+	icebergio.RenameNoReplaceIO
+	icebergio.RemoveAllIO
+	icebergio.MkdirAllIO
+	io.Closer
+}
+
+type fileIO struct {
 	*blob.Bucket
 
 	extractObject ObjectLocationExtractor
@@ -216,10 +230,7 @@ type FileIO struct {
 	newRangeReader func(ctx context.Context, key string, offset, length int64) (io.ReadCloser, error)
 }
 
-var (
-	_ icebergio.ListableIO      = (*FileIO)(nil)
-	_ icebergio.BulkRemovableIO = (*FileIO)(nil)
-)
+var _ FileIO = (*fileIO)(nil)
 
 // deleteFilesMaxConcurrency bounds the number of in-flight object-store
 // deletes without creating one goroutine per path for large cleanup jobs.
@@ -244,7 +255,7 @@ func (f blobFileInfo) IsDir() bool        { return f.mode.IsDir() }
 func (f blobFileInfo) Sys() any           { return f.sys }
 
 // preprocess returns the object key from an input path
-func (bfs *FileIO) preprocess(path string) (string, error) {
+func (bfs *fileIO) preprocess(path string) (string, error) {
 	location, err := bfs.resolveLocation(path)
 	if err != nil {
 		return "", err
@@ -285,7 +296,7 @@ func directoryName(key string) string {
 	return pathpkg.Base(key)
 }
 
-func (bfs *FileIO) Open(_ context.Context, path string) (icebergio.File, error) {
+func (bfs *fileIO) Open(_ context.Context, path string) (icebergio.File, error) {
 	// The returned File is read after Open returns, so its reads stay bound to
 	// the FileIO's lifetime context (bfs.ctx) rather than this per-call ctx.
 	originalPath := path
@@ -308,7 +319,7 @@ func (bfs *FileIO) Open(_ context.Context, path string) (icebergio.File, error) 
 	return &blobOpenFile{Reader: r, name: name, key: key, b: bfs, ctx: bfs.ctx}, nil
 }
 
-func (bfs *FileIO) Remove(ctx context.Context, name string) error {
+func (bfs *fileIO) Remove(ctx context.Context, name string) error {
 	key, err := bfs.preprocess(name)
 	if err != nil {
 		return &fs.PathError{Op: "remove", Path: name, Err: err}
@@ -334,11 +345,11 @@ func (bfs *FileIO) Remove(ctx context.Context, name string) error {
 	return nil
 }
 
-func (bfs *FileIO) Create(ctx context.Context, name string) (icebergio.FileWriter, error) {
-	return bfs.NewWriter(ctx, name, true, nil)
+func (bfs *fileIO) Create(ctx context.Context, name string) (icebergio.FileWriter, error) {
+	return bfs.newWriter(ctx, name, true, nil)
 }
 
-func (bfs *FileIO) WriteFile(ctx context.Context, name string, content []byte) error {
+func (bfs *fileIO) WriteFile(ctx context.Context, name string, content []byte) error {
 	key, err := bfs.preprocess(name)
 	if err != nil {
 		return &fs.PathError{Op: "write file", Path: name, Err: err}
@@ -347,15 +358,15 @@ func (bfs *FileIO) WriteFile(ctx context.Context, name string, content []byte) e
 	return bfs.WriteAll(ctx, key, content, nil)
 }
 
-// NewWriter returns a Writer that writes to the blob stored at path.
+// newWriter returns a writer that writes to the blob stored at path.
 // A nil WriterOptions is treated the same as the zero value.
 //
 // If overwrite is disabled and a blob with this path already exists,
 // an error will be returned.
 //
-// The caller must call Close on the returned Writer, even if the write is
+// The caller must call Close on the returned writer, even if the write is
 // aborted.
-func (bfs *FileIO) NewWriter(ctx context.Context, path string, overwrite bool, opts *blob.WriterOptions) (w *Writer, err error) {
+func (bfs *fileIO) newWriter(ctx context.Context, path string, overwrite bool, opts *blob.WriterOptions) (w *writer, err error) {
 	key, err := bfs.preprocess(path)
 	if err != nil {
 		return nil, &fs.PathError{Op: "new writer", Path: path, Err: err}
@@ -378,7 +389,7 @@ func (bfs *FileIO) NewWriter(ctx context.Context, path string, overwrite bool, o
 		return nil, err
 	}
 
-	return &Writer{
+	return &writer{
 			Writer: bw,
 			name:   key,
 		},
@@ -387,11 +398,11 @@ func (bfs *FileIO) NewWriter(ctx context.Context, path string, overwrite bool, o
 
 // New returns a FileIO backed by bucket,
 // using extractObject to map input paths to object keys within it.
-func New(ctx context.Context, bucket *blob.Bucket, extractObject ObjectLocationExtractor) *FileIO {
-	return &FileIO{Bucket: bucket, extractObject: extractObject, ctx: ctx}
+func New(ctx context.Context, bucket *blob.Bucket, extractObject ObjectLocationExtractor) FileIO {
+	return &fileIO{Bucket: bucket, extractObject: extractObject, ctx: ctx}
 }
 
-func (bfs *FileIO) resolveLocation(root string) (ObjectLocation, error) {
+func (bfs *fileIO) resolveLocation(root string) (ObjectLocation, error) {
 	if bfs.extractObject == nil {
 		return ObjectLocation{}, errors.New("blob file IO missing object location extractor")
 	}
@@ -414,7 +425,7 @@ func walkedURIPath(location ObjectLocation, walked string) string {
 // walkFS walks a bucket for fs.WalkDir, treating any key with children as a directory,
 // so the 0-byte directory blobs of ADLS hierarchical namespaces (OneLake) aren't files.
 type walkFS struct {
-	bfs *FileIO
+	bfs *fileIO
 	ctx context.Context
 }
 
@@ -545,7 +556,7 @@ type walkFileEntry struct{ blobFileInfo }
 func (f walkFileEntry) Type() fs.FileMode          { return f.mode.Type() }
 func (f walkFileEntry) Info() (fs.FileInfo, error) { return f.blobFileInfo, nil }
 
-func (bfs *FileIO) WalkDir(ctx context.Context, root string, fn fs.WalkDirFunc) error {
+func (bfs *fileIO) WalkDir(ctx context.Context, root string, fn fs.WalkDirFunc) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -580,7 +591,7 @@ func (bfs *FileIO) WalkDir(ctx context.Context, root string, fn fs.WalkDirFunc) 
 	})
 }
 
-func (bfs *FileIO) deleteFile(ctx context.Context, p string) (bool, error) {
+func (bfs *fileIO) deleteFile(ctx context.Context, p string) (bool, error) {
 	key, err := bfs.preprocess(p)
 	if err != nil {
 		return false, fmt.Errorf("failed to delete %s: %w", p, err)
@@ -598,7 +609,7 @@ func (bfs *FileIO) deleteFile(ctx context.Context, p string) (bool, error) {
 	return true, nil
 }
 
-func (bfs *FileIO) DeleteFiles(ctx context.Context, paths []string) ([]string, error) {
+func (bfs *fileIO) DeleteFiles(ctx context.Context, paths []string) ([]string, error) {
 	if len(paths) == 0 {
 		return nil, nil
 	}
@@ -647,7 +658,7 @@ func (bfs *FileIO) DeleteFiles(ctx context.Context, paths []string) ([]string, e
 }
 
 // MkdirAll mimics creating a directory by creating a zero-length object for each component of the path
-func (bfs *FileIO) MkdirAll(ctx context.Context, path string) error {
+func (bfs *fileIO) MkdirAll(ctx context.Context, path string) error {
 	if err := ctx.Err(); err != nil {
 		return &fs.PathError{Op: "mkdir", Path: path, Err: err}
 	}
@@ -678,7 +689,7 @@ func (bfs *FileIO) MkdirAll(ctx context.Context, path string) error {
 }
 
 // ReadFile reads the contents of the file at the given path and returns it as a byte slice.
-func (bfs *FileIO) ReadFile(ctx context.Context, path string) ([]byte, error) {
+func (bfs *fileIO) ReadFile(ctx context.Context, path string) ([]byte, error) {
 	key, err := bfs.preprocess(path)
 	if err != nil {
 		return nil, &fs.PathError{Op: "ReadFile", Path: path, Err: err}
@@ -694,7 +705,7 @@ func (bfs *FileIO) ReadFile(ctx context.Context, path string) ([]byte, error) {
 
 // Stat interprets the input path as a directory or file and returns the corresponding FileInfo.
 // If the path does not exist, it returns fs.ErrNotExist
-func (bfs *FileIO) Stat(ctx context.Context, path string) (fs.FileInfo, error) {
+func (bfs *fileIO) Stat(ctx context.Context, path string) (fs.FileInfo, error) {
 	key, err := bfs.preprocess(path)
 	if err != nil {
 		return nil, &fs.PathError{Op: "Stat", Path: path, Err: err}
@@ -767,7 +778,7 @@ func (bfs *FileIO) Stat(ctx context.Context, path string) (fs.FileInfo, error) {
 }
 
 // Rename renames one file from oldpath to newpath, replacing newpath if it already exists.
-func (bfs *FileIO) Rename(ctx context.Context, oldpath, newpath string) error {
+func (bfs *fileIO) Rename(ctx context.Context, oldpath, newpath string) error {
 	if err := ctx.Err(); err != nil {
 		return &fs.PathError{Op: "Rename", Path: oldpath, Err: err}
 	}
@@ -796,7 +807,7 @@ func (bfs *FileIO) Rename(ctx context.Context, oldpath, newpath string) error {
 }
 
 // RenameNoReplace renames one file/object (non-recursive) from oldpath to newpath, returning an error if newpath already exists.
-func (bfs *FileIO) RenameNoReplace(ctx context.Context, oldpath, newpath string) error {
+func (bfs *fileIO) RenameNoReplace(ctx context.Context, oldpath, newpath string) error {
 	if err := ctx.Err(); err != nil {
 		return &fs.PathError{Op: "RenameNoReplace", Path: newpath, Err: err}
 	}
@@ -812,7 +823,7 @@ func (bfs *FileIO) RenameNoReplace(ctx context.Context, oldpath, newpath string)
 
 // RemoveAll removes either a single file or interprets the path as and removes both
 // it and and all its children.
-func (bfs *FileIO) RemoveAll(ctx context.Context, name string) error {
+func (bfs *fileIO) RemoveAll(ctx context.Context, name string) error {
 	if err := ctx.Err(); err != nil {
 		return &fs.PathError{Op: "RemoveAll", Path: name, Err: err}
 	}
@@ -854,15 +865,14 @@ func (bfs *FileIO) RemoveAll(ctx context.Context, name string) error {
 	return nil
 }
 
-// Writer is the FileWriter returned by NewWriter.
-// It exposes the underlying gocloud.dev writer for callers that need its options.
-type Writer struct {
+// writer is the FileWriter returned by newWriter.
+type writer struct {
 	*blob.Writer
 	name string
-	b    *FileIO
+	b    *fileIO
 }
 
-func (f *Writer) Name() string                { return f.name }
-func (f *Writer) Sys() any                    { return f.b }
-func (f *Writer) Close() error                { return f.Writer.Close() }
-func (f *Writer) Write(p []byte) (int, error) { return f.Writer.Write(p) }
+func (f *writer) Name() string                { return f.name }
+func (f *writer) Sys() any                    { return f.b }
+func (f *writer) Close() error                { return f.Writer.Close() }
+func (f *writer) Write(p []byte) (int, error) { return f.Writer.Write(p) }

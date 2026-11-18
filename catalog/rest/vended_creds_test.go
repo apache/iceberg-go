@@ -1344,7 +1344,7 @@ func registerContextCapturingScheme(t *testing.T, scheme string) *contextCapturi
 // closeCountingIO counts closes and forwards them, so a closed IO fails the
 // way a closed gocloud bucket does.
 type closeCountingIO struct {
-	*blobfs.FileIO
+	blobfs.FileIO
 	closeCount *atomic.Int32
 }
 
