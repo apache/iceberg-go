@@ -272,6 +272,10 @@ func (t Table) NewTransactionOnBranch(branch string) (*Transaction, error) {
 }
 
 func (t *Table) Refresh(ctx context.Context) error {
+	if t.cat == nil {
+		return fmt.Errorf("%w: table is not associated with a catalog", ErrInvalidOperation)
+	}
+
 	fresh, err := t.cat.LoadTable(ctx, slices.Clone(t.identifier))
 	if err != nil {
 		return err
