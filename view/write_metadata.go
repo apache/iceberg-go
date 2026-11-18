@@ -55,13 +55,8 @@ func WithIORegistry(registry *icebergio.Registry) MetadataIOOption {
 // cancellation. After a successful write, the caller owns publication and may
 // use the returned filesystem to remove the file after a confirmed failed
 // commit. A commit with an unknown outcome must retain the file.
-// For isolated FileIO, use WriteMetadataWithOptions and WithIORegistry.
-func WriteMetadata(ctx context.Context, metadata Metadata, ioProps iceberg.Properties) (string, icebergio.WriteFileIO, error) {
-	return WriteMetadataWithOptions(ctx, metadata, ioProps)
-}
-
-// WriteMetadataWithOptions writes view metadata using optional FileIO configuration.
-func WriteMetadataWithOptions(ctx context.Context, metadata Metadata, ioProps iceberg.Properties, opts ...MetadataIOOption) (string, icebergio.WriteFileIO, error) {
+// WithIORegistry selects an isolated filesystem for this write.
+func WriteMetadata(ctx context.Context, metadata Metadata, ioProps iceberg.Properties, opts ...MetadataIOOption) (string, icebergio.WriteFileIO, error) {
 	var config metadataIOOptions
 	for _, opt := range opts {
 		opt(&config)

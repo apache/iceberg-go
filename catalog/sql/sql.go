@@ -596,15 +596,9 @@ func (c *Catalog) isV0() bool { return c.schemaVersion == schemaV0 }
 // CreateTable, CreateView and the other operations that retry on a lock conflict give up after about 310ms and the
 // rest fail at once. NewCatalog does not mutate connection settings on the caller-owned db.
 //
-// Use NewCatalogWithOptions(ctx, ...) and WithIORegistry to select a catalog-scoped
-// FileIO registry. The default is the global registry, and the caller retains db ownership.
-func NewCatalog(ctx context.Context, name string, db *sql.DB, dialect SupportedDialect, props iceberg.Properties) (*Catalog, error) {
-	return NewCatalogWithOptions(ctx, name, db, dialect, props)
-}
-
-// NewCatalogWithOptions constructs a SQL catalog with optional settings.
-// WithIORegistry selects an isolated registry; nil uses the global default.
-func NewCatalogWithOptions(ctx context.Context, name string, db *sql.DB, dialect SupportedDialect, props iceberg.Properties, opts ...Option) (*Catalog, error) {
+// WithIORegistry selects a catalog-scoped FileIO registry. The default is the
+// global registry.
+func NewCatalog(ctx context.Context, name string, db *sql.DB, dialect SupportedDialect, props iceberg.Properties, opts ...Option) (*Catalog, error) {
 	d, err := getDialect(dialect)
 	if err != nil {
 		return nil, err
@@ -1883,7 +1877,7 @@ func (c *Catalog) CreateView(ctx context.Context, identifier table.Identifier, v
 		version.DefaultCatalog = c.name
 	}
 
-	createdView, err := view.CreateViewFromVersionWithOptions(ctx, identifier, schema, version, loc, ioProps, cfg.Properties, view.WithIORegistry(c.ioRegistry))
+	createdView, err := view.CreateViewFromVersion(ctx, identifier, schema, version, loc, ioProps, cfg.Properties, view.WithIORegistry(c.ioRegistry))
 	if err != nil {
 		return nil, err
 	}

@@ -377,7 +377,7 @@ func (c *Catalog) CreateView(ctx context.Context, identifier table.Identifier, v
 		maps.Copy(ioProps, cfg.Properties)
 	}
 
-	createdView, err := view.CreateViewFromVersionWithOptions(ctx, identifier, freshSchema, version, loc, ioProps, cfg.Properties, view.WithIORegistry(c.opts.ioRegistry))
+	createdView, err := view.CreateViewFromVersion(ctx, identifier, freshSchema, version, loc, ioProps, cfg.Properties, view.WithIORegistry(c.opts.ioRegistry))
 	if err != nil {
 		return nil, err
 	}

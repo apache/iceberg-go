@@ -887,16 +887,12 @@ v.Properties()            // iceberg.Properties
 
 `view.New(ident, meta, metadataLocation)` constructs a view from already-loaded metadata; `view.NewFromLocation(ctx, ident, metadataLocation, fsysFactory)` loads metadata from disk or object storage.
 
-For isolated FileIO, use `view.WithIORegistry(registry)` with
-`view.CreateViewWithOptions`, `view.CreateViewWithIOPropertiesAndOptions`,
-`view.CreateViewFromVersionWithOptions`, or `view.WriteMetadataWithOptions`.
-The original helpers retain their exact function signatures, so function
-values and existing calls remain compatible. A nil registry uses global FileIO;
-a non-nil registry is used strictly, even if it is empty. The registry is shared,
-so later register/unregister calls affect future writes. For
-`view.NewFromLocation`, pass a filesystem factory based on that registry.
-The IO-properties helpers keep filesystem configuration (`ioProps`) separate
-from persisted view properties (`metadataProps`). See
+Pass `view.WithIORegistry(registry)` to `view.CreateView`,
+`view.CreateViewWithIOProperties`, `view.CreateViewFromVersion`, or
+`view.WriteMetadata` to use isolated FileIO. For `view.NewFromLocation`,
+pass a filesystem factory from the registry. The IO-properties helpers
+keep filesystem configuration (`ioProps`) separate from persisted view
+properties (`metadataProps`). See
 [FileIO configuration](./configuration.md#file-system-credentials).
 
 ## Iceberg ↔ Arrow types

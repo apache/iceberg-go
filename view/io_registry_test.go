@@ -40,7 +40,7 @@ func TestCreateViewWithIsolatedIORegistry(t *testing.T) {
 	}
 
 	for i, registry := range registries {
-		created, err := CreateViewWithOptions(
+		created, err := CreateView(
 			t.Context(), "test", []string{"db", "orders"},
 			newTestSchema(0), Representation{SQL: "SELECT 1", Dialect: "spark"},
 			[]string{"db"}, scheme+"://bucket/view", nil, WithIORegistry(registry),
@@ -70,7 +70,7 @@ func TestCreateViewWithSeparateIOPropertiesAndRegistry(t *testing.T) {
 		return fs, nil
 	}))
 
-	created, err := CreateViewWithIOPropertiesAndOptions(
+	created, err := CreateViewWithIOProperties(
 		t.Context(), "test", []string{"db", "orders"},
 		newTestSchema(0), Representation{SQL: "SELECT 1", Dialect: "spark"},
 		[]string{"db"}, "isolated-view-properties://bucket/view",
@@ -84,7 +84,7 @@ func TestCreateViewWithSeparateIOPropertiesAndRegistry(t *testing.T) {
 }
 
 func TestCreateViewWithEmptyRegistryDoesNotFallBackToGlobal(t *testing.T) {
-	_, err := CreateViewWithOptions(
+	_, err := CreateView(
 		t.Context(), "test", []string{"db", "orders"},
 		newTestSchema(0), Representation{SQL: "SELECT 1", Dialect: "spark"},
 		[]string{"db"}, "file:///tmp/view-registry-no-fallback", nil, WithIORegistry(&iceio.Registry{}),
@@ -106,7 +106,7 @@ func TestWriteMetadataUsesIsolatedRegistry(t *testing.T) {
 
 		return fs, nil
 	}))
-	created, err := CreateViewWithOptions(
+	created, err := CreateView(
 		ctx, "test", []string{"db", "view"}, newTestSchema(0),
 		Representation{SQL: "SELECT 1", Dialect: "spark"},
 		[]string{"db"}, scheme+"://bucket/view", iceberg.Properties{"persisted": "yes"},
@@ -114,7 +114,7 @@ func TestWriteMetadataUsesIsolatedRegistry(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	metadataLocation, writeFS, err := WriteMetadataWithOptions(ctx, created.Metadata(),
+	metadataLocation, writeFS, err := WriteMetadata(ctx, created.Metadata(),
 		iceberg.Properties{"storage-token": "private"}, WithIORegistry(registry))
 	require.NoError(t, err)
 	require.NotEqual(t, created.MetadataLocation(), metadataLocation)
@@ -139,7 +139,7 @@ func TestViewMetadataIORegistryIsLive(t *testing.T) {
 	representation := Representation{SQL: "SELECT 1", Dialect: "spark"}
 	location := scheme + "://bucket/view"
 
-	_, err := CreateViewWithOptions(ctx, "test", ident, newTestSchema(0),
+	_, err := CreateView(ctx, "test", ident, newTestSchema(0),
 		representation, []string{"db"}, location, nil, WithIORegistry(registry))
 	require.ErrorIs(t, err, iceio.ErrIOSchemeNotFound)
 
@@ -147,7 +147,7 @@ func TestViewMetadataIORegistryIsLive(t *testing.T) {
 	require.NoError(t, registry.Register(scheme, func(context.Context, *url.URL, map[string]string) (iceio.IO, error) {
 		return fs, nil
 	}))
-	created, err := CreateViewWithOptions(ctx, "test", ident, newTestSchema(0),
+	created, err := CreateView(ctx, "test", ident, newTestSchema(0),
 		representation, []string{"db"}, location, nil, WithIORegistry(registry))
 	require.NoError(t, err)
 	file, err := fs.Open(ctx, created.MetadataLocation())
@@ -155,7 +155,7 @@ func TestViewMetadataIORegistryIsLive(t *testing.T) {
 	require.NoError(t, file.Close())
 
 	registry.Unregister(scheme)
-	_, _, err = WriteMetadataWithOptions(ctx, created.Metadata(), nil, WithIORegistry(registry))
+	_, _, err = WriteMetadata(ctx, created.Metadata(), nil, WithIORegistry(registry))
 	require.ErrorIs(t, err, iceio.ErrIOSchemeNotFound,
 		"unregistering the private scheme must not fall back to the global registry")
 	file, err = fs.Open(ctx, created.MetadataLocation())
@@ -179,7 +179,7 @@ func TestCreateViewFromVersionPreservesMetadataWithIsolatedRegistry(t *testing.T
 		WithTimestampMS(1234),
 	)
 	require.NoError(t, err)
-	created, err := CreateViewFromVersionWithOptions(
+	created, err := CreateViewFromVersion(
 		t.Context(), []string{"db", "v"}, newTestSchema(0), version,
 		scheme+"://bucket/view", iceberg.Properties{"storage-only": "secret"},
 		iceberg.Properties{"view-property": "stored"}, WithIORegistry(registry),

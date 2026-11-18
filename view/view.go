@@ -134,22 +134,9 @@ func NewFromLocation(
 // Note: This function only supports creating new views with format version 1.
 // It does not support updating existing view metadata.
 // representation holds both SQL text and its dialect.
-// For scoped FileIO, use CreateViewWithOptions with WithIORegistry.
+// WithIORegistry selects a non-global filesystem for the metadata write;
+// the option does not persist filesystem credentials in the view.
 func CreateView(
-	ctx context.Context,
-	catalogName string,
-	viewIdent table.Identifier,
-	schema *iceberg.Schema,
-	representation Representation,
-	defaultNS table.Identifier,
-	loc string,
-	props iceberg.Properties,
-) (*View, error) {
-	return CreateViewWithOptions(ctx, catalogName, viewIdent, schema, representation, defaultNS, loc, props)
-}
-
-// CreateViewWithOptions creates a view using optional FileIO configuration.
-func CreateViewWithOptions(
 	ctx context.Context,
 	catalogName string,
 	viewIdent table.Identifier,
@@ -160,31 +147,14 @@ func CreateViewWithOptions(
 	props iceberg.Properties,
 	opts ...MetadataIOOption,
 ) (*View, error) {
-	return CreateViewWithIOPropertiesAndOptions(ctx, catalogName, viewIdent, schema, representation, defaultNS, loc, props, props, opts...)
+	return CreateViewWithIOProperties(ctx, catalogName, viewIdent, schema, representation, defaultNS, loc, props, props, opts...)
 }
 
 // CreateViewWithIOProperties creates a view using ioProps to configure the
 // filesystem and metadataProps as the properties persisted in view metadata.
-// representation holds both SQL text and its dialect. For a scoped registry,
-// use CreateViewWithIOPropertiesAndOptions and WithIORegistry.
+// representation holds both SQL text and its dialect. WithIORegistry optionally
+// selects the registry used by the write without changing persisted metadata.
 func CreateViewWithIOProperties(
-	ctx context.Context,
-	catalogName string,
-	viewIdent table.Identifier,
-	schema *iceberg.Schema,
-	representation Representation,
-	defaultNS table.Identifier,
-	loc string,
-	ioProps iceberg.Properties,
-	metadataProps iceberg.Properties,
-) (*View, error) {
-	return CreateViewWithIOPropertiesAndOptions(ctx, catalogName, viewIdent, schema, representation,
-		defaultNS, loc, ioProps, metadataProps)
-}
-
-// CreateViewWithIOPropertiesAndOptions creates a view with separate storage and
-// metadata properties and optional FileIO configuration.
-func CreateViewWithIOPropertiesAndOptions(
 	ctx context.Context,
 	catalogName string,
 	viewIdent table.Identifier,
@@ -207,28 +177,14 @@ func CreateViewWithIOPropertiesAndOptions(
 		return nil, err
 	}
 
-	return CreateViewFromVersionWithOptions(ctx, viewIdent, schema, version, loc, ioProps, metadataProps, opts...)
+	return CreateViewFromVersion(ctx, viewIdent, schema, version, loc, ioProps, metadataProps, opts...)
 }
 
 // CreateViewFromVersion creates a view whose first version is version, kept as
 // given apart from its IDs. A nil default namespace defaults to the view's
 // namespace, a nil summary to the engine name, and a zero timestamp to now.
-// Use CreateViewFromVersionWithOptions and WithIORegistry for scoped FileIO.
+// WithIORegistry affects only filesystem resolution for the metadata write.
 func CreateViewFromVersion(
-	ctx context.Context,
-	viewIdent table.Identifier,
-	schema *iceberg.Schema,
-	version *Version,
-	loc string,
-	ioProps iceberg.Properties,
-	metadataProps iceberg.Properties,
-) (*View, error) {
-	return CreateViewFromVersionWithOptions(ctx, viewIdent, schema, version, loc, ioProps, metadataProps)
-}
-
-// CreateViewFromVersionWithOptions creates a view from a version using optional
-// FileIO configuration without persisting storage-only properties.
-func CreateViewFromVersionWithOptions(
 	ctx context.Context,
 	viewIdent table.Identifier,
 	schema *iceberg.Schema,
@@ -266,7 +222,7 @@ func CreateViewFromVersionWithOptions(
 		return nil, err
 	}
 
-	metadataLocation, _, err := WriteMetadataWithOptions(ctx, viewMD.Metadata, ioProps, opts...)
+	metadataLocation, _, err := WriteMetadata(ctx, viewMD.Metadata, ioProps, opts...)
 	if err != nil {
 		return nil, err
 	}
