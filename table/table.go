@@ -99,10 +99,6 @@ var ErrCommitRejected = errors.New("commit rejected")
 // apply keeps the builder's error as its cause. Transaction.Commit also
 // returns it, on any attempt, when a delete references data files that are
 // missing (ErrDataFilesMissing).
-//
-// An expiry replay also becomes unusable if a commit retry refreshes to
-// refs-only snapshot history. Load with snapshot-loading-mode=all and start
-// a new transaction.
 var ErrTransactionUnusable = errors.New("transaction cannot be committed again")
 
 // ErrWriteIORequired is returned by write paths when the table's file system
