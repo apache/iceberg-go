@@ -34,8 +34,10 @@ import (
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
 	"github.com/apache/iceberg-go/catalog/rest"
+	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/metrics"
 	"github.com/apache/iceberg-go/table"
+	"github.com/apache/iceberg-go/table/maintenance"
 	"github.com/apache/iceberg-go/view"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -2126,6 +2128,80 @@ func (r *RestCatalogSuite) TestLoadTableWithSnapshotModeAll() {
 	r.EqualValues(1000000000000000001, tbl.Metadata().Snapshots()[0].SnapshotID)
 	r.EqualValues(3497810964824022504, tbl.Metadata().Snapshots()[1].SnapshotID)
 	r.EqualValues(3497810964824022504, tbl.CurrentSnapshot().SnapshotID)
+}
+
+func TestOrphanCleanupHonorsEffectiveRESTSnapshotMode(t *testing.T) {
+	const scheme = "orphan-cleanup-test"
+	const location = scheme + "://warehouse/table"
+	const metadataLocation = location + "/metadata/v1.metadata.json"
+	const orphan = location + "/data/orphan.parquet"
+	const modeKey = "snapshot-loading-mode"
+
+	metadata, err := table.NewMetadata(tableSchemaSimple, iceberg.UnpartitionedSpec,
+		table.UnsortedSortOrder, location, nil)
+	require.NoError(t, err)
+	response, err := json.Marshal(map[string]any{
+		"metadata-location": metadataLocation,
+		"metadata":          metadata,
+	})
+	require.NoError(t, err)
+
+	for _, tc := range []struct {
+		name      string
+		overrides iceberg.Properties
+		wantMode  string
+	}{
+		{name: "client all overrides refs default", wantMode: "all"},
+		{name: "server refs override wins", overrides: iceberg.Properties{modeKey: "refs"}, wantMode: "refs"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			fs := iceio.NewMemFS()
+			require.NoError(t, fs.WriteFile(ctx, orphan, []byte("orphan")))
+			registry := &iceio.Registry{}
+			fsCalls := 0
+			require.NoError(t, registry.Register(scheme, func(context.Context, *url.URL, map[string]string) (iceio.IO, error) {
+				fsCalls++
+
+				return fs, nil
+			}))
+
+			mux := http.NewServeMux()
+			mux.HandleFunc("GET /v1/config", func(w http.ResponseWriter, _ *http.Request) {
+				assert.NoError(t, json.NewEncoder(w).Encode(map[string]any{
+					"defaults":  iceberg.Properties{modeKey: "refs"},
+					"overrides": tc.overrides,
+					"endpoints": rest.AllEndpointStrings,
+				}))
+			})
+			mux.HandleFunc("GET /v1/namespaces/db/tables/tbl", func(w http.ResponseWriter, req *http.Request) {
+				assert.Equal(t, tc.wantMode, req.URL.Query().Get("snapshots"))
+				_, err := w.Write(response)
+				assert.NoError(t, err)
+			})
+			srv := httptest.NewServer(mux)
+			t.Cleanup(srv.Close)
+
+			cat, err := rest.NewCatalog(ctx, "rest", srv.URL,
+				rest.WithAdditionalProps(iceberg.Properties{modeKey: "all"}),
+				rest.WithIORegistry(registry))
+			require.NoError(t, err)
+			tbl, err := cat.LoadTable(ctx, catalog.ToIdentifier("db", "tbl"))
+			require.NoError(t, err)
+
+			plan, err := maintenance.PlanOrphanFiles(ctx, tbl, maintenance.WithCleanupFilesOlderThan(0))
+			if tc.wantMode == "refs" {
+				require.True(t, tbl.SnapshotHistoryLimitedToRefs())
+				require.ErrorIs(t, err, table.ErrInvalidOperation)
+				require.Zero(t, fsCalls, "refs-only planning should stop before getting FileIO")
+
+				return
+			}
+			require.False(t, tbl.SnapshotHistoryLimitedToRefs())
+			require.NoError(t, err)
+			require.Equal(t, []string{orphan}, plan.Files())
+		})
+	}
 }
 
 func (r *RestCatalogSuite) TestRenameTable409() {
