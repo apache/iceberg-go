@@ -323,7 +323,8 @@ func rejectPlanOption(cfg *orphanCleanupConfig, name string) {
 // fully enumerate candidate files before deciding what is safe to delete.
 // Orphan cleanup, including dry runs, is rejected when garbage collection is disabled via gc.enabled.
 // It also rejects REST refs-only snapshot history, which can omit still-live files.
-// Use snapshot-loading-mode=all to reload a complete table before cleanup.
+// Configure the REST catalog with snapshot-loading-mode=all and reload the
+// table before cleanup. A server override can force refs mode.
 func DeleteOrphanFiles(ctx context.Context, tbl *table.Table, opts ...OrphanCleanupOption) (OrphanCleanupResult, error) {
 	cfg := newOrphanCleanupConfig(opts...)
 	if cfg.validationErr != nil {

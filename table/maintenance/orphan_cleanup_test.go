@@ -2616,6 +2616,12 @@ func TestPlanOrphanFilesRejectsRefsOnlyWithLiveHistoricalData(t *testing.T) {
 	_, err = PlanOrphanFiles(ctx, refsOnlyTable,
 		WithCleanupLocation(cleanupLocation), WithCleanupFilesOlderThan(0))
 	require.ErrorIs(t, err, table.ErrInvalidOperation)
+
+	// The same metadata may have been handed to a separate planner without the
+	// loading-mode marker. Executing its non-empty plan must still fail closed.
+	result, err := ExecuteOrphanCleanup(ctx, refsOnlyTable, unsafePlan)
+	require.ErrorIs(t, err, table.ErrInvalidOperation)
+	require.Empty(t, result.DeletedFiles)
 	file, err := fs.Open(ctx, historicalFile)
 	require.NoError(t, err, "the historical data file must remain on disk")
 	require.NoError(t, file.Close())
