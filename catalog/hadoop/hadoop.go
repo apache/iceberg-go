@@ -207,7 +207,8 @@ type Catalog struct {
 // Pass WithIORegistry(registry) to use a catalog-specific filesystem registry.
 // A nil or omitted registry uses global FileIO; a non-nil empty registry does
 // not fall back to built-in schemes. The registry is shared, not copied, and
-// subsequent registry changes affect future FileIO resolutions.
+// subsequent registry changes affect future table FileIO resolutions. The
+// warehouse filesystem is resolved once during construction.
 func NewCatalog(ctx context.Context, name, warehouse string, props iceberg.Properties, opts ...Option) (*Catalog, error) {
 	var config catalogOptions
 	for _, opt := range opts {
@@ -277,7 +278,7 @@ func NewCatalog(ctx context.Context, name, warehouse string, props iceberg.Prope
 		name:      name,
 		warehouse: warehouse,
 		isLocal:   isLocal,
-		// filesystem is resolved dynamically from the IO registry based on the warehouse scheme
+		// Retain the warehouse filesystem selected during construction.
 		filesystem: hadoopFs,
 		props:      props,
 		ioRegistry: config.ioRegistry,

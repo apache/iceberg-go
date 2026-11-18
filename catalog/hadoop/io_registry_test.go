@@ -75,6 +75,15 @@ func TestHadoopRegistryUsedForTableCreateAndLoad(t *testing.T) {
 	require.NoError(t, err)
 	require.Greater(t, calls.Load(), initial)
 	require.Equal(t, created.MetadataLocation(), loaded.MetadataLocation())
+
+	registry.Unregister("")
+	require.NoError(t, cat.CreateNamespace(t.Context(), []string{"other"}, nil),
+		"warehouse operations keep the filesystem opened by the constructor")
+	_, err = loaded.FS(t.Context())
+	require.ErrorIs(t, err, iceio.ErrIOSchemeNotFound,
+		"table filesystem lookups use the current scoped registry")
+	_, err = cat.LoadTable(t.Context(), []string{"db", "tbl"})
+	require.ErrorIs(t, err, iceio.ErrIOSchemeNotFound)
 }
 
 // identifiedHadoopCatalogFS has a non-zero-sized value: distinct zero-sized

@@ -470,8 +470,9 @@ not affect `catalog.Load`, which uses the global registry with the built-in
 catalog registrars.
 
 The catalog holds the supplied registry, so registering or unregistering a
-scheme affects future FileIO resolutions. Use `registry.Clone()` to give
-another catalog its own set of schemes.
+scheme affects future FileIO resolutions. Hadoop opens its warehouse
+filesystem during construction and reuses it for warehouse operations.
+Use `registry.Clone()` to give another catalog its own set of schemes.
 
 View metadata creation accepts the same scoped registry option, but reading
 view metadata via `view.NewFromLocation` uses the filesystem factory explicitly
