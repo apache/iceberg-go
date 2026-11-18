@@ -739,8 +739,7 @@ func TestPartitionsMatchUsesFloatSemantics(t *testing.T) {
 		{name: "float32 signed zero", left: float32(math.Copysign(0, -1)), right: float32(0), match: false},
 		{name: "float64 signed zero", left: math.Copysign(0, -1), right: float64(0), match: false},
 		{name: "float widths differ", left: float32(1), right: float64(1), match: false},
-		{name: "promoted integer widths", left: int32(7), right: int64(7), match: true},
-		{name: "different promoted integer values", left: int32(7), right: int64(8), match: false},
+		{name: "integer widths differ", left: int32(7), right: int64(7), match: false},
 		{name: "pass-through integer", left: int64(42), right: int64(42), match: true},
 		{name: "pass-through strings differ", left: "a", right: "b", match: false},
 		{name: "nil values", left: nil, right: nil, match: true},
@@ -770,6 +769,8 @@ func TestDVPartitionsMatchUsesPromotedIdentityType(t *testing.T) {
 		schema *iceberg.Schema
 		match  bool
 	}{
+		{name: "promoted integer widths", data: int32(7), dv: int64(7), match: true},
+		{name: "different promoted integer values", data: int32(7), dv: int64(8)},
 		{name: "exact float widening", data: float32(0.1), dv: float64(float32(0.1)), schema: doubleSchema, match: true},
 		{name: "distinct double value", data: float32(0.1), dv: float64(0.1), schema: doubleSchema},
 		{name: "NaN payloads", data: math.Float32frombits(0x7fc00001), dv: math.Float64frombits(0x7ff8000000000002), schema: doubleSchema, match: true},

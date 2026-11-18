@@ -540,7 +540,7 @@ func (idx *changelogDeleteIndex) forDataFile(entry iceberg.ManifestEntry) ([]ice
 	if _, hasDV := idx.dv[entry.DataFile().FilePath()]; hasDV && idx.specs != nil {
 		spec = idx.specs.PartitionSpecByID(int(entry.DataFile().SpecID()))
 	}
-	task, err := fileScanTaskForDataEntryWithSchema(entry, idx.pos, idx.dv, idx.eq, spec, idx.schema)
+	task, err := fileScanTaskForDataEntry(entry, idx.pos, idx.dv, idx.eq, spec, idx.schema)
 	if err != nil {
 		return nil, err
 	}

@@ -1046,7 +1046,28 @@ func dvPartitionValuesEqual(
 		return partitionValuesEqual(dataFloat64, float64(dvFloat32))
 	}
 
-	return partitionValuesEqual(dataValue, dvValue)
+	return dvPartitionComparisonKey(dataValue) == dvPartitionComparisonKey(dvValue)
+}
+
+// Manifest decoders and int-to-long promotions can represent the same integer
+// partition value with different Go types. Other values use the shared keys.
+func dvPartitionComparisonKey(value any) any {
+	switch value := value.(type) {
+	case int:
+		return int64(value)
+	case int32:
+		return int64(value)
+	case iceberg.Date:
+		return int64(value)
+	case iceberg.Time:
+		return int64(value)
+	case iceberg.Timestamp:
+		return int64(value)
+	case iceberg.TimestampNano:
+		return int64(value)
+	default:
+		return tblutils.ComparablePartitionKey(value)
+	}
 }
 
 func partitionFieldAllowsFloatWidening(
@@ -1123,11 +1144,7 @@ func buildDVIndex(dvEntries []iceberg.ManifestEntry) (map[string]iceberg.Manifes
 // would never satisfy dataSeq <= -1 and would silently drop the DV,
 // resurfacing deleted rows; an unset data sequence likewise satisfies
 // -1 <= dvSeq for any known DV sequence.
-func matchDVToData(dataEntry iceberg.ManifestEntry, dvIndex map[string]iceberg.ManifestEntry) ([]iceberg.DataFile, error) {
-	return matchDVToDataWithSchema(dataEntry, dvIndex, nil, nil)
-}
-
-func matchDVToDataWithSchema(
+func matchDVToData(
 	dataEntry iceberg.ManifestEntry,
 	dvIndex map[string]iceberg.ManifestEntry,
 	spec *iceberg.PartitionSpec,
@@ -1629,7 +1646,7 @@ func (scan *Scan) planDataManifestTasksWithOptions(
 				if _, hasDV := dvIndex[dataFile.FilePath()]; hasDV {
 					spec = scan.metadata.PartitionSpecByID(int(dataFile.SpecID()))
 				}
-				task, err := fileScanTaskForDataEntryWithSchema(entry, posDeleteIndex, dvIndex, eqDeleteIndex, spec, schema)
+				task, err := fileScanTaskForDataEntry(entry, posDeleteIndex, dvIndex, eqDeleteIndex, spec, schema)
 				if err != nil {
 					return err
 				}
@@ -1720,15 +1737,6 @@ func fileScanTaskForDataEntry(
 	posDeleteIndex *positionalDeleteIndex,
 	dvIndex map[string]iceberg.ManifestEntry,
 	eqDeleteIndex *equalityDeleteIndex,
-) (FileScanTask, error) {
-	return fileScanTaskForDataEntryWithSchema(entry, posDeleteIndex, dvIndex, eqDeleteIndex, nil, nil)
-}
-
-func fileScanTaskForDataEntryWithSchema(
-	entry iceberg.ManifestEntry,
-	posDeleteIndex *positionalDeleteIndex,
-	dvIndex map[string]iceberg.ManifestEntry,
-	eqDeleteIndex *equalityDeleteIndex,
 	spec *iceberg.PartitionSpec,
 	schema *iceberg.Schema,
 ) (FileScanTask, error) {
@@ -1738,7 +1746,7 @@ func fileScanTaskForDataEntryWithSchema(
 	// would be wasteful I/O, and on a buggy writer whose DV omits prior
 	// positions, applying both would over-delete. Mirrors Java's
 	// DeleteFileIndex.forDataFile.
-	dvFiles, err := matchDVToDataWithSchema(entry, dvIndex, spec, schema)
+	dvFiles, err := matchDVToData(entry, dvIndex, spec, schema)
 	if err != nil {
 		return FileScanTask{}, err
 	}

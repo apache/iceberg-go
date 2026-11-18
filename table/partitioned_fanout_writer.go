@@ -82,28 +82,10 @@ type partitionExtractionPlan struct {
 }
 
 func partitionValuesEqual(left, right any) bool {
-	return partitionComparisonKey(left) == partitionComparisonKey(right)
-}
-
-// Manifest decoders and int-to-long promotions can represent the same integer
-// partition value with different Go types. Other values use the shared keys.
-func partitionComparisonKey(value any) any {
-	switch value := value.(type) {
-	case int:
-		return int64(value)
-	case int32:
-		return int64(value)
-	case iceberg.Date:
-		return int64(value)
-	case iceberg.Time:
-		return int64(value)
-	case iceberg.Timestamp:
-		return int64(value)
-	case iceberg.TimestampNano:
-		return int64(value)
-	default:
-		return tblutils.ComparablePartitionKey(value)
-	}
+	// Supported partition values are primitive literals. ComparablePartitionKey
+	// converts []byte to a string key and float values to comparable
+	// width-aware keys, and preserves other comparable scalar values.
+	return tblutils.ComparablePartitionKey(left) == tblutils.ComparablePartitionKey(right)
 }
 
 func partitionRecordsEqual(left, right partitionRecord) bool {

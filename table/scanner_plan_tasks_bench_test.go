@@ -195,7 +195,7 @@ func planBufferedDataManifestTasks(
 		if _, hasDV := dvIndex[entry.DataFile().FilePath()]; hasDV {
 			spec = scan.metadata.PartitionSpecByID(int(entry.DataFile().SpecID()))
 		}
-		task, err := fileScanTaskForDataEntryWithSchema(
+		task, err := fileScanTaskForDataEntry(
 			entry, posDeleteIndex, dvIndex, eqDeleteIndex, spec, schema)
 		if err != nil {
 			return nil, err
