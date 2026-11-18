@@ -214,7 +214,7 @@ func (p *partitionedFanoutWriter) processRecord(ctx context.Context, writerCtx c
 		}
 
 		partitionPath := p.partitionPath(val.partitionRec)
-		rollingDataWriter, err := p.writerFactory.getOrCreateRollingDataWriter(writerCtx, partitionPath, val.partitionValues, dataFilesChannel)
+		rollingDataWriter, err := p.writerFactory.getOrCreateRollingDataWriter(writerCtx, partitionPath, val.partitionValues, dataFilesChannel, p.writerFactory.currentSpec)
 		if err != nil {
 			partitionRecord.Release()
 

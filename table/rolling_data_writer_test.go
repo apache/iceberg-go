@@ -80,7 +80,7 @@ func BenchmarkWriterFactoryCacheHit(b *testing.B) {
 			partitions := make([]string, partitionCount)
 			for i := range partitionCount {
 				partitions[i] = strconv.Itoa(i)
-				factory.writers.Store(partitions[i], &RollingDataWriter{})
+				factory.writers.Store(rollingWriterKey{factory.currentSpec.ID(), partitions[i]}, &RollingDataWriter{})
 			}
 
 			b.ReportAllocs()
@@ -88,7 +88,7 @@ func BenchmarkWriterFactoryCacheHit(b *testing.B) {
 				var i int
 				for pb.Next() {
 					writer, err := factory.getOrCreateRollingDataWriter(
-						context.Background(), partitions[i%partitionCount], nil, nil)
+						context.Background(), partitions[i%partitionCount], nil, nil, factory.currentSpec)
 					if err != nil || writer == nil {
 						b.Fatalf("get existing writer: writer=%v, err=%v", writer, err)
 					}
@@ -178,7 +178,7 @@ func (s *RollingDataWriterTestSuite) TestSingleFileUnderTarget() {
 	defer factory.closeAll()
 
 	outputCh := make(chan iceberg.DataFile, 10)
-	writer := factory.newRollingDataWriter(s.ctx, "", nil, outputCh)
+	writer := factory.newRollingDataWriter(s.ctx, "", nil, outputCh, factory.currentSpec)
 
 	record := s.buildRecord(arrSchema, 5)
 	defer record.Release()
@@ -207,7 +207,7 @@ func (s *RollingDataWriterTestSuite) TestRollsMultipleFiles() {
 	defer factory.closeAll()
 
 	outputCh := make(chan iceberg.DataFile, 100)
-	writer := factory.newRollingDataWriter(s.ctx, "", nil, outputCh)
+	writer := factory.newRollingDataWriter(s.ctx, "", nil, outputCh, factory.currentSpec)
 
 	totalRows := int64(0)
 	for range 10 {
@@ -280,7 +280,7 @@ func (s *RollingDataWriterTestSuite) TestCloseAllFinishesQueuedRecordsWithoutCan
 	writerCtx, cancel := context.WithCancel(s.ctx)
 	defer cancel()
 
-	writer, err := factory.getOrCreateRollingDataWriter(writerCtx, "", nil, outputCh)
+	writer, err := factory.getOrCreateRollingDataWriter(writerCtx, "", nil, outputCh, factory.currentSpec)
 	s.Require().NoError(err)
 	const totalBatches = 4
 	const rowsPerBatch = 25
@@ -319,7 +319,7 @@ func (s *RollingDataWriterTestSuite) TestConcurrentGetOrCreateCreatesOneWriter()
 	for range goroutineCount {
 		wg.Go(func() {
 			<-start
-			writer, err := factory.getOrCreateRollingDataWriter(s.ctx, "partition", nil, outputCh)
+			writer, err := factory.getOrCreateRollingDataWriter(s.ctx, "partition", nil, outputCh, factory.currentSpec)
 			results <- struct {
 				writer *RollingDataWriter
 				err    error
@@ -345,6 +345,26 @@ func (s *RollingDataWriterTestSuite) TestConcurrentGetOrCreateCreatesOneWriter()
 	s.Require().NoError(expected.closeAndWait())
 }
 
+func (s *RollingDataWriterTestSuite) TestWriterKeysIncludeSpecAndAreRemoved() {
+	factory := &writerFactory{}
+	output := make(chan iceberg.DataFile)
+	spec0 := iceberg.NewPartitionSpecID(0)
+	spec1 := iceberg.NewPartitionSpecID(1)
+	first, err := factory.getOrCreateRollingDataWriter(s.ctx, "same-path", nil, output, spec0)
+	s.Require().NoError(err)
+	second, err := factory.getOrCreateRollingDataWriter(s.ctx, "same-path", nil, output, spec1)
+	s.Require().NoError(err)
+	s.NotSame(first, second)
+	s.Require().NoError(first.closeAndWait())
+	_, firstExists := factory.writers.Load(first.key)
+	_, secondExists := factory.writers.Load(second.key)
+	s.False(firstExists)
+	s.True(secondExists)
+	second.abortAndWait()
+	_, secondExists = factory.writers.Load(second.key)
+	s.False(secondExists)
+}
+
 func (s *RollingDataWriterTestSuite) TestAbortAndWaitCancelsContext() {
 	arrSchema := arrow.NewSchema([]arrow.Field{
 		{Name: "id", Type: arrow.PrimitiveTypes.Int32, Nullable: true},
@@ -359,7 +379,7 @@ func (s *RollingDataWriterTestSuite) TestAbortAndWaitCancelsContext() {
 	writerCtx, cancel := context.WithCancel(s.ctx)
 	defer cancel()
 
-	writer, err := factory.getOrCreateRollingDataWriter(writerCtx, "", nil, outputCh)
+	writer, err := factory.getOrCreateRollingDataWriter(writerCtx, "", nil, outputCh, factory.currentSpec)
 	s.Require().NoError(err)
 	record := s.buildRecord(arrSchema, 5)
 	s.Require().NoError(writer.Add(record))
@@ -479,7 +499,7 @@ func (s *RollingDataWriterTestSuite) TestWriterFactoryDoesNotStampSortOrderID() 
 	defer factory.closeAll()
 
 	outputCh := make(chan iceberg.DataFile, 10)
-	writer := factory.newRollingDataWriter(s.ctx, "", nil, outputCh)
+	writer := factory.newRollingDataWriter(s.ctx, "", nil, outputCh, factory.currentSpec)
 
 	record := s.buildRecord(arrSchema, 5)
 	defer record.Release()
@@ -526,7 +546,7 @@ func (s *RollingDataWriterTestSuite) TestStreamErrorPathUsesAbort() {
 	defer factory.closeAll()
 
 	outputCh := make(chan iceberg.DataFile, 10)
-	writer := factory.newRollingDataWriter(s.ctx, "", nil, outputCh)
+	writer := factory.newRollingDataWriter(s.ctx, "", nil, outputCh, factory.currentSpec)
 
 	// Send a record with an incompatible schema to trigger a
 	// ToRequestedSchema error, exercising the deferred Abort() path.
@@ -590,7 +610,7 @@ func (s *RollingDataWriterTestSuite) TestStreamErrorRemovesWriterFromFactory() {
 	defer factory.closeAll()
 
 	outputCh := make(chan iceberg.DataFile, 10)
-	writer, err := factory.getOrCreateRollingDataWriter(s.ctx, "", nil, outputCh)
+	writer, err := factory.getOrCreateRollingDataWriter(s.ctx, "", nil, outputCh, factory.currentSpec)
 	s.Require().NoError(err)
 
 	badSchema := arrow.NewSchema([]arrow.Field{
@@ -724,7 +744,7 @@ func (s *RollingDataWriterTestSuite) TestPartitionedDataLocations() {
 			defer factory.closeAll()
 
 			outputCh := make(chan iceberg.DataFile, 1)
-			writer := factory.newRollingDataWriter(s.ctx, partition, nil, outputCh)
+			writer := factory.newRollingDataWriter(s.ctx, partition, nil, outputCh, factory.currentSpec)
 
 			record := s.buildRecord(arrSchema, 5)
 			defer record.Release()
@@ -823,7 +843,7 @@ func (s *RollingDataWriterTestSuite) TestSortsRowsBeforeWriting() {
 	defer record.Release()
 
 	outputCh := make(chan iceberg.DataFile, 10)
-	writer := factory.newRollingDataWriter(s.ctx, "", nil, outputCh)
+	writer := factory.newRollingDataWriter(s.ctx, "", nil, outputCh, factory.currentSpec)
 	s.Require().NoError(writer.Add(record))
 	s.Require().NoError(writer.closeAndWait())
 	close(outputCh)
@@ -907,7 +927,7 @@ func (s *RollingDataWriterTestSuite) TestUnsortedOrderIsNoOp() {
 	defer record.Release()
 
 	outputCh := make(chan iceberg.DataFile, 10)
-	writer := factory.newRollingDataWriter(s.ctx, "", nil, outputCh)
+	writer := factory.newRollingDataWriter(s.ctx, "", nil, outputCh, factory.currentSpec)
 	s.Require().NoError(writer.Add(record))
 	s.Require().NoError(writer.closeAndWait())
 	close(outputCh)
@@ -997,7 +1017,7 @@ func (s *RollingDataWriterTestSuite) TestStreamRecoversWriterClosePanic() {
 			factory.format = panicOnCloseFormat{FileFormat: factory.format, bytesWritten: tt.bytesWritten}
 
 			outputCh := make(chan iceberg.DataFile, 1)
-			writer := factory.newRollingDataWriter(s.ctx, "", nil, outputCh)
+			writer := factory.newRollingDataWriter(s.ctx, "", nil, outputCh, factory.currentSpec)
 
 			record := s.buildRecord(arrSchema, 5)
 			defer record.Release()

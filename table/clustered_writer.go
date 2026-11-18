@@ -127,7 +127,7 @@ func clusteredPartitionedWrite(
 				}
 				partitionPath := extractionPlan.pathPlan.format(part.partitionRec)
 				currentWriter = factory.newRollingDataWriter(
-					ctx, partitionPath, part.partitionValues, outputCh)
+					ctx, partitionPath, part.partitionValues, outputCh, factory.currentSpec)
 				currentRec = part.partitionRec
 			}
 
