@@ -134,8 +134,9 @@ func NewFromLocation(
 // Note: This function only supports creating new views with format version 1.
 // It does not support updating existing view metadata.
 // representation holds both SQL text and its dialect.
-// WithIORegistry selects a non-global filesystem for the metadata write;
-// the option does not persist filesystem credentials in the view.
+// WithIORegistry selects the FileIO registry for the metadata write.
+// props configures FileIO and is also persisted in the view metadata. Use
+// CreateViewWithIOProperties to keep storage credentials out of view metadata.
 func CreateView(
 	ctx context.Context,
 	catalogName string,
