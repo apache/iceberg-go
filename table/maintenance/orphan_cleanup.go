@@ -330,7 +330,7 @@ func DeleteOrphanFiles(ctx context.Context, tbl *table.Table, opts ...OrphanClea
 	if cfg.validationErr != nil {
 		return OrphanCleanupResult{}, cfg.validationErr
 	}
-	if err := validateOrphanCleanupGC(tbl); err != nil {
+	if err := validateOrphanCleanupTable(tbl); err != nil {
 		return OrphanCleanupResult{}, err
 	}
 
@@ -354,9 +354,6 @@ func PlanOrphanFiles(ctx context.Context, tbl *table.Table, opts ...OrphanCleanu
 	if cfg.validationErr != nil {
 		return OrphanCleanupPlan{}, cfg.validationErr
 	}
-	if err := validateOrphanCleanupGC(tbl); err != nil {
-		return OrphanCleanupPlan{}, err
-	}
 
 	return planOrphanFiles(ctx, tbl, cfg)
 }
@@ -373,10 +370,7 @@ func ExecuteOrphanCleanup(ctx context.Context, tbl *table.Table, plan OrphanClea
 	if cfg.invalidPlanOption != nil {
 		return OrphanCleanupResult{}, cfg.invalidPlanOption
 	}
-	if err := validateOrphanCleanupGC(tbl); err != nil {
-		return OrphanCleanupResult{}, err
-	}
-	if err := validateCompleteSnapshotHistory(tbl); err != nil {
+	if err := validateOrphanCleanupTable(tbl); err != nil {
 		return OrphanCleanupResult{}, err
 	}
 	if cfg.dryRun {
@@ -394,9 +388,12 @@ func validateOrphanCleanupGC(tbl *table.Table) error {
 	return nil
 }
 
-// Reject before filesystem access: snapshots=refs can hide manifests of a
-// still-live historical snapshot, making its data appear unreferenced.
-func validateCompleteSnapshotHistory(tbl *table.Table) error {
+func validateOrphanCleanupTable(tbl *table.Table) error {
+	if err := validateOrphanCleanupGC(tbl); err != nil {
+		return err
+	}
+	// Refs-only responses can omit still-live historical snapshots, making
+	// their data appear unreferenced.
 	if tbl.SnapshotHistoryLimitedToRefs() {
 		return fmt.Errorf("%w: table snapshot history is incomplete under REST snapshot-loading-mode=refs; reload with snapshot-loading-mode=all", table.ErrInvalidOperation)
 	}
@@ -415,7 +412,7 @@ type referencedFileIndex struct {
 }
 
 func planOrphanFiles(ctx context.Context, tbl *table.Table, cfg *orphanCleanupConfig) (OrphanCleanupPlan, error) {
-	if err := validateCompleteSnapshotHistory(tbl); err != nil {
+	if err := validateOrphanCleanupTable(tbl); err != nil {
 		return OrphanCleanupPlan{}, err
 	}
 

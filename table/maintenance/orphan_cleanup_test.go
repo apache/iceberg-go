@@ -2622,6 +2622,7 @@ func TestPlanOrphanFilesRejectsRefsOnlyWithLiveHistoricalData(t *testing.T) {
 	result, err := ExecuteOrphanCleanup(ctx, refsOnlyTable, unsafePlan)
 	require.ErrorIs(t, err, table.ErrInvalidOperation)
 	require.Empty(t, result.DeletedFiles)
+
 	file, err := fs.Open(ctx, historicalFile)
 	require.NoError(t, err, "the historical data file must remain on disk")
 	require.NoError(t, file.Close())
