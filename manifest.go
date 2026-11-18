@@ -713,17 +713,15 @@ func newManifestReader(
 	projection *ManifestEntryProjection,
 ) (*ManifestReader, error) {
 	var writerSchema *avro.Schema
-	var rd *ocf.Reader
-	var err error
-	if projection == nil {
-		rd, err = ocf.NewReader(in)
-	} else {
-		rd, err = ocf.NewReader(in, ocf.WithReaderSchemaFunc(func(reader *ocf.Reader) (*avro.Schema, error) {
+	opts := []ocf.ReaderOpt{ocf.WithCodec(newManifestDeflateCodec())}
+	if projection != nil {
+		opts = append(opts, ocf.WithReaderSchemaFunc(func(reader *ocf.Reader) (*avro.Schema, error) {
 			writerSchema = reader.Schema()
 
 			return projectedManifestEntrySchema(writerSchema, *projection)
 		}))
 	}
+	rd, err := ocf.NewReader(in, opts...)
 	if err != nil {
 		return nil, err
 	}
