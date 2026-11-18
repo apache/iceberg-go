@@ -366,6 +366,7 @@ func (p ManifestProvider) Manifests(ctx context.Context, snapshot Snapshot) (ite
 // manifest Avro files themselves. The caller must not modify snapshots during
 // iteration. It shares this provider's bounded cache and FileIO, with bounded
 // concurrent prefetch of historical lists. An error ends the sequence.
+// Manifests are deduplicated by manifest file path.
 func (p ManifestProvider) UniqueManifests(ctx context.Context, snapshots []Snapshot) iter.Seq2[iceberg.ManifestFile, error] {
 	return func(yield func(iceberg.ManifestFile, error) bool) {
 		streamSnapshotManifests(ctx, snapshots, p.cachedSet, p.set, yield)

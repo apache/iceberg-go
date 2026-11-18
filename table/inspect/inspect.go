@@ -41,6 +41,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/table"
+	tblutils "github.com/apache/iceberg-go/table/internal"
 )
 
 // inspector holds a copy of the table, so a reader keeps seeing the table as
@@ -237,7 +238,7 @@ func (i inspector) snapshots(ctx context.Context) (array.RecordReader, error) {
 			// Summary.MarshalJSON). Emit it alongside the extra properties so
 			// the table faithfully reflects the on-disk summary.
 			if snap.Summary.Operation != "" {
-				summaryKeys.Append("operation")
+				summaryKeys.Append(tblutils.SummaryOperationKey)
 				summaryValues.Append(string(snap.Summary.Operation))
 			}
 			for k, v := range snap.Summary.Properties {
