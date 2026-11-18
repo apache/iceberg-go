@@ -229,20 +229,11 @@ func TestV3MergeOnReadDoubleDeletePartitionedMergesDeletionVectors(t *testing.T)
 	ctx := context.Background()
 	tbl := newPartitionedMergeOnReadTestTable(t)
 
-	arrowSchema := arrow.NewSchema([]arrow.Field{
-		{Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: false},
-		{Name: "category", Type: arrow.BinaryTypes.String, Nullable: false},
-	}, nil)
-	// Two partitions ("x", "y") produce two data files.
-	data, err := array.TableFromJSON(memory.DefaultAllocator, arrowSchema, []string{
+	// Two categories produce two partition data files.
+	tbl = appendRows(t, tbl,
 		`[{"id":1,"category":"x"},{"id":2,"category":"x"},{"id":3,"category":"x"},` +
-			`{"id":4,"category":"y"},{"id":5,"category":"y"},{"id":6,"category":"y"}]`,
-	})
-	require.NoError(t, err)
-	defer data.Release()
-
-	tbl, err = tbl.Append(ctx, array.NewTableReader(data, -1), nil)
-	require.NoError(t, err)
+			`{"id":4,"category":"y"},{"id":5,"category":"y"},{"id":6,"category":"y"}]`)
+	var err error
 	require.Equal(t, []int64{1, 2, 3, 4, 5, 6}, idsInTable(t, tbl))
 
 	// Seed a DV on each partition's data file.
@@ -575,18 +566,10 @@ func TestV3MergeOnReadUpgradeKeepsUntouchedFileScopedDeletes(t *testing.T) {
 func TestV3MergeOnReadMixedExistingDVsKeepsUnchangedFile(t *testing.T) {
 	ctx := t.Context()
 	tbl := newPartitionedMergeOnReadTestTable(t)
-	arrowSchema := arrow.NewSchema([]arrow.Field{
-		{Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: false},
-		{Name: "category", Type: arrow.BinaryTypes.String, Nullable: false},
-	}, nil)
-	data, err := array.TableFromJSON(memory.DefaultAllocator, arrowSchema, []string{
+	tbl = appendRows(t, tbl,
 		`[{"id":1,"category":"x"},{"id":2,"category":"x"},{"id":3,"category":"x"},` +
-			`{"id":4,"category":"y"},{"id":5,"category":"y"},{"id":6,"category":"y"}]`,
-	})
-	require.NoError(t, err)
-	defer data.Release()
-	tbl, err = tbl.Append(ctx, array.NewTableReader(data, -1), nil)
-	require.NoError(t, err)
+			`{"id":4,"category":"y"},{"id":5,"category":"y"},{"id":6,"category":"y"}]`)
+	var err error
 
 	tbl, err = tbl.Delete(ctx, iceberg.NewOr(
 		iceberg.EqualTo(iceberg.Reference("id"), int64(1)),
@@ -707,19 +690,10 @@ func TestV3MergeOnReadUpgradePreservesPartitionedPositionDeletes(t *testing.T) {
 	ctx := t.Context()
 	tbl := newPartitionedMergeOnReadTestTableVersion(t, "2")
 
-	arrowSchema := arrow.NewSchema([]arrow.Field{
-		{Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: false},
-		{Name: "category", Type: arrow.BinaryTypes.String, Nullable: false},
-	}, nil)
-	data, err := array.TableFromJSON(memory.DefaultAllocator, arrowSchema, []string{
+	tbl = appendRows(t, tbl,
 		`[{"id":1,"category":"x"},{"id":2,"category":"x"},{"id":3,"category":"x"},` +
-			`{"id":4,"category":"y"},{"id":5,"category":"y"},{"id":6,"category":"y"}]`,
-	})
-	require.NoError(t, err)
-	defer data.Release()
-
-	tbl, err = tbl.Append(ctx, array.NewTableReader(data, -1), nil)
-	require.NoError(t, err)
+			`{"id":4,"category":"y"},{"id":5,"category":"y"},{"id":6,"category":"y"}]`)
+	var err error
 	tbl, err = tbl.Delete(ctx, iceberg.EqualTo(iceberg.Reference("id"), int64(1)), nil)
 	require.NoError(t, err)
 	tbl, err = tbl.Delete(ctx, iceberg.EqualTo(iceberg.Reference("id"), int64(4)), nil)

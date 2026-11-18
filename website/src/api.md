@@ -424,8 +424,10 @@ newTbl, err := tbl.Delete(ctx,
 With `write.delete.mode=merge-on-read`, format v2 writes position-delete
 files and format v3 writes deletion vectors (DVs). After a table is upgraded
 from v2 to v3, its older position-delete files remain valid. The **first**
-DV written for a data file includes all positions previously deleted from
-that file; otherwise a reader could show rows deleted before the upgrade.
+DV written for a data file carries over positions from applicable legacy
+position-delete files for that data file. Equality deletes are not folded
+into the DV and continue to apply independently. Without those earlier
+position deletes, a reader could show rows deleted before the upgrade.
 A later delete merges into the file's existing DV, so there is never more
 than one live DV for that data file.
 
