@@ -769,8 +769,8 @@ func TestValidateAddedDataFilesMatchingFilter_NoConcurrent(t *testing.T) {
 	ctx, err := newConflictContext(t.Context(), meta, meta, MainBranch, nil, true)
 	require.NoError(t, err)
 
-	require.NoError(t, validateAddedDataFilesMatchingFilter(ctx, iceberg.AlwaysTrue{}))
-	require.NoError(t, validateAddedDataFilesMatchingFilter(ctx, nil))
+	require.NoError(t, validateAddedDataFilesMatchingFilter(ctx, iceberg.AlwaysTrue{}, ctx.caseSensitive))
+	require.NoError(t, validateAddedDataFilesMatchingFilter(ctx, nil, ctx.caseSensitive))
 }
 
 func TestValidateAddedDataFilesMatchingFilterUsesFileMetrics(t *testing.T) {
@@ -795,7 +795,7 @@ func TestValidateAddedDataFilesMatchingFilterUsesFileMetrics(t *testing.T) {
 			ctx := buildPartitionedContext(t, base, listPath, baseID, concID)
 
 			err := validateAddedDataFilesMatchingFilter(ctx,
-				iceberg.EqualTo(iceberg.Reference("id"), int64(5)))
+				iceberg.EqualTo(iceberg.Reference("id"), int64(5)), ctx.caseSensitive)
 			if tt.wantConflict {
 				require.ErrorIs(t, err, ErrConflictingDataFiles)
 			} else {
@@ -815,7 +815,7 @@ func TestValidateAddedDataFilesMatchingFilterWithMissingBounds(t *testing.T) {
 	ctx := buildPartitionedContext(t, base, listPath, baseID, concID)
 
 	err := validateAddedDataFilesMatchingFilter(ctx,
-		iceberg.EqualTo(iceberg.Reference("id"), int64(5)))
+		iceberg.EqualTo(iceberg.Reference("id"), int64(5)), ctx.caseSensitive)
 	require.ErrorIs(t, err, ErrConflictingDataFiles,
 		"missing bounds must not make a data file look non-conflicting")
 }
@@ -1018,7 +1018,7 @@ func TestConflictValidationSharesManifestAfterDataFileEarlyExit(t *testing.T) {
 	require.NoError(t, err)
 
 	require.NoError(t, validateDataFilesExist(ctx, []string{dataPath}))
-	err = validateAddedDataFilesMatchingFilter(ctx, iceberg.AlwaysTrue{})
+	err = validateAddedDataFilesMatchingFilter(ctx, iceberg.AlwaysTrue{}, ctx.caseSensitive)
 	require.ErrorIs(t, err, ErrConflictingDataFiles)
 
 	assert.Equal(t, 1, tio.openCount[manifestListPath])

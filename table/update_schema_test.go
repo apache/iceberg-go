@@ -1444,6 +1444,96 @@ func TestBuildUpdates(t *testing.T) {
 		assert.IsType(t, &setCurrentSchemaUpdate{}, updates[0])
 		assert.Equal(t, 0, updates[0].(*setCurrentSchemaUpdate).SchemaID)
 	})
+
+	t.Run("test BuildUpdates asserts last-assigned-field-id when adding a schema", func(t *testing.T) {
+		table := New([]string{"table"}, testMetadata, "", nil, nil)
+		txn := table.NewTransaction()
+		updateSchema := txn.UpdateSchema(true, false).
+			AddColumn([]string{"new_col"}, iceberg.PrimitiveTypes.String, "", false, nil)
+
+		updates, requirements, err := updateSchema.BuildUpdates()
+		require.NoError(t, err)
+		require.Len(t, requirements, 2)
+		assert.IsType(t, &assertCurrentSchemaId{}, requirements[0])
+		require.IsType(t, &assertLastAssignedFieldId{}, requirements[1])
+		assert.Equal(t, testMetadata.LastColumnID(),
+			requirements[1].(*assertLastAssignedFieldId).LastAssignedFieldID)
+		require.Len(t, updates, 2)
+		assert.IsType(t, &addSchemaUpdate{}, updates[0])
+		assert.IsType(t, &setCurrentSchemaUpdate{}, updates[1])
+	})
+
+	t.Run("test chained schema updates assert last-assigned-field-id once", func(t *testing.T) {
+		table := New([]string{"table"}, testMetadata, "", nil, nil)
+		txn := table.NewTransaction()
+		for _, name := range []string{"first", "second"} {
+			require.NoError(t, txn.UpdateSchema(true, false).
+				AddColumn([]string{name}, iceberg.PrimitiveTypes.String, "", false, nil).
+				Commit())
+		}
+
+		var fieldIDReqs []*assertLastAssignedFieldId
+		for _, r := range txn.reqs {
+			if req, ok := r.(*assertLastAssignedFieldId); ok {
+				fieldIDReqs = append(fieldIDReqs, req)
+			}
+		}
+		require.Len(t, fieldIDReqs, 1)
+		assert.Equal(t, testMetadata.LastColumnID(), fieldIDReqs[0].LastAssignedFieldID)
+	})
+}
+
+func TestBuildUpdatesSelectsAddedSchemaAfterConcurrentRegistration(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		otherFields []string
+	}{
+		{name: "different schema", otherFields: []string{"a", "b"}},
+		// Passes only on catalogs that keep the reused schema as last added, like MetadataBuilder.
+		// Java catalogs reject SetCurrentSchema(-1) here.
+		{name: "equivalent schema", otherFields: []string{"a", "c"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := iceberg.NestedField{ID: 1, Name: "a", Type: iceberg.PrimitiveTypes.Int32}
+			b := iceberg.NestedField{ID: 2, Name: "b", Type: iceberg.PrimitiveTypes.Int32}
+			c := iceberg.NestedField{ID: 3, Name: "c", Type: iceberg.PrimitiveTypes.Int32}
+			base, err := NewMetadata(iceberg.NewSchema(0, a, b, c), iceberg.UnpartitionedSpec, UnsortedSortOrder, "", nil)
+			require.NoError(t, err)
+
+			tbl := New([]string{"table"}, base, "", nil, nil)
+			updates, requirements, err := tbl.NewTransaction().UpdateSchema(true, false).
+				DeleteColumn([]string{"b"}).BuildUpdates()
+			require.NoError(t, err)
+			require.Len(t, updates, 2)
+			require.Equal(t, -1, updates[1].(*setCurrentSchemaUpdate).SchemaID)
+
+			otherFields := make([]iceberg.NestedField, 0, len(tc.otherFields))
+			for _, name := range tc.otherFields {
+				field, ok := base.CurrentSchema().FindFieldByName(name)
+				require.True(t, ok)
+				otherFields = append(otherFields, field)
+			}
+			builder, err := MetadataBuilderFromBase(base, "")
+			require.NoError(t, err)
+			require.NoError(t, builder.AddSchema(iceberg.NewSchema(1, otherFields...)))
+			concurrent, err := builder.Build()
+			require.NoError(t, err)
+			require.Equal(t, base.CurrentSchema().ID, concurrent.CurrentSchema().ID)
+			require.NoError(t, AssertLastAssignedFieldID(base.LastColumnID()).Validate(concurrent))
+			for _, requirement := range requirements {
+				require.NoError(t, requirement.Validate(concurrent))
+			}
+
+			builder, err = MetadataBuilderFromBase(concurrent, "")
+			require.NoError(t, err)
+			for _, update := range updates {
+				require.NoError(t, update.Apply(builder))
+			}
+			committed, err := builder.Build()
+			require.NoError(t, err)
+			require.Equal(t, []iceberg.NestedField{a, c}, committed.CurrentSchema().Fields())
+		})
+	}
 }
 
 // TestAddColumnMonotonicFieldIDs exercises the case where the table's
