@@ -302,7 +302,7 @@ func TestExpireReplayRejectsRefsOnlyHistoryWithNoOpExpiration(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		fs, inner, tbl := newExpireReplayTable(t, nil)
 		tbl, s1 := appendOnBranch(t, tbl, MainBranch, "s1")
-		tbl, s2 := appendOnBranch(t, tbl, MainBranch, "s2")
+		_, s2 := appendOnBranch(t, tbl, MainBranch, "s2")
 
 		cat := &refsOnlyReloadCatalog{reqValidatingCatalog: inner}
 		tx := newOCCTable(t, inner.metadata, fs, cat).NewTransaction()
