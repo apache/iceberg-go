@@ -261,6 +261,12 @@
 <p><strong>Partition specs reject source types a transform cannot handle.</strong> Creating or updating a spec with an incompatible source, such as <code>day(string)</code>, now fails. Writes to existing incompatible specs return <code>ErrInvalidTransform</code> instead of writing null partition values.</p>
 </li>
 <li>
+<p><strong>REST <code>CreateTable</code> validates the partition spec locally.</strong> Invalid specs, including transforms with incompatible source types, return an error matching <code>iceberg.ErrInvalidPartitionSpec</code> before the create request. Previously, the server could return <code>rest.ErrBadRequest</code>.</p>
+</li>
+<li>
+<p><strong>New partition specs reject multiple sources for built-in transforms.</strong> Create-table and add-spec payloads with this shape return <code>ErrInvalidPartitionSpec</code>. Historical metadata with such a field still loads and round-trips, but the field is skipped during partition pruning and residual simplification. Multi-source unknown transforms remain supported.</p>
+</li>
+<li>
 <p><strong>Invalid name mappings now stop scans and add-files.</strong> Tables with an unparseable <code>schema.name-mapping.default</code> now return <code>ErrInvalidMetadata</code> on scans and add-files instead of ignoring the mapping. Fix the property with a valid mapping or remove it.</p>
 </li>
 <li>
@@ -521,6 +527,9 @@
 </li>
 <li>
 <p><strong>Float comparisons against literals beyond the float32 range follow IEEE 754.</strong> On a float32 column, <code>x &lt; 1e100</code> no longer returns NaN, <code>+Inf</code> or NULL rows, and <code>NOT(x &gt; 1e100)</code> no longer returns NULL rows. An infinite literal now binds to a float32 infinity, so <code>x = +Inf</code> matches <code>+Inf</code> rows. Java still folds these comparisons to always true or false, see <a href="https://github.com/apache/iceberg/issues/18700">apache/iceberg#18700</a>.</p>
+</li>
+<li>
+<p><strong>Orphan cleanup refreshes metadata before deletion.</strong> Non-dry-run <code>DeleteOrphanFiles</code> requires a catalog-backed table and refreshes it before planning and again before deleting files. <code>ExecuteOrphanCleanup</code> also refreshes before deleting from a non-empty plan. If a saved plan is stale, refresh or reload the table before planning again. Dry runs still work without a catalog.</p>
 </li>
 </ul>
 <h2 id="verifying-and-producing-releases"><a class="header" href="#verifying-and-producing-releases">Verifying and producing releases</a></h2>
