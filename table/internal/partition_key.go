@@ -1,0 +1,57 @@
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
+//
+//   http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
+package internal
+
+import "math"
+
+type (
+	binaryPartitionKey  string
+	float32PartitionKey uint32
+	float64PartitionKey uint64
+)
+
+const (
+	// Canonical NaN payloads make all NaNs of the same width compare equal.
+	// The width-specific key types preserve float width, while using raw bits
+	// intentionally keeps -0.0 and +0.0 distinct.
+	canonicalFloat32NaNBits uint32 = 0x7fc00000
+	canonicalFloat64NaNBits uint64 = 0x7ff8000000000000
+)
+
+func ComparablePartitionKey(value any) any {
+	switch value := value.(type) {
+	case []byte:
+		return binaryPartitionKey(value)
+	case float32:
+		rawBits := math.Float32bits(value)
+		if math.IsNaN(float64(value)) {
+			rawBits = canonicalFloat32NaNBits
+		}
+
+		return float32PartitionKey(rawBits)
+	case float64:
+		rawBits := math.Float64bits(value)
+		if math.IsNaN(value) {
+			rawBits = canonicalFloat64NaNBits
+		}
+
+		return float64PartitionKey(rawBits)
+	}
+
+	return value
+}

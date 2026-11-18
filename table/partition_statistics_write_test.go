@@ -36,6 +36,7 @@ import (
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
+	tblutils "github.com/apache/iceberg-go/table/internal"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 	"github.com/twmb/avro/ocf"
@@ -112,22 +113,22 @@ func TestPartitionStatisticValuesNullFirstNumericAndBinary(t *testing.T) {
 
 func TestSortPartitionStatisticsByTupleThenSpecID(t *testing.T) {
 	pt := statsTestPartitionType()
-	rows := []*partitionAggregate{
-		{partition: map[int]any{1000: int32(10), 1001: "z"}, specID: 3},
-		{partition: map[int]any{1000: int32(2), 1001: "z"}, specID: 4},
-		{partition: map[int]any{1000: int32(-1), 1001: "a"}, specID: 1},
-		{partition: map[int]any{1000: nil, 1001: "z"}, specID: 2},
-		{partition: map[int]any{1000: int32(2), 1001: "z"}, specID: 1},
-		{partition: map[int]any{1000: int32(2), 1001: "a"}, specID: 5},
+	rows := []*tblutils.PartitionAggregate{
+		{Partition: map[int]any{1000: int32(10), 1001: "z"}, SpecID: 3},
+		{Partition: map[int]any{1000: int32(2), 1001: "z"}, SpecID: 4},
+		{Partition: map[int]any{1000: int32(-1), 1001: "a"}, SpecID: 1},
+		{Partition: map[int]any{1000: nil, 1001: "z"}, SpecID: 2},
+		{Partition: map[int]any{1000: int32(2), 1001: "z"}, SpecID: 1},
+		{Partition: map[int]any{1000: int32(2), 1001: "a"}, SpecID: 5},
 	}
 	require.NoError(t, sortPartitionStatistics(rows, pt))
 	require.Equal(t, []int32{2, 1, 5, 1, 4, 3}, []int32{
-		rows[0].specID, rows[1].specID, rows[2].specID,
-		rows[3].specID, rows[4].specID, rows[5].specID,
+		rows[0].SpecID, rows[1].SpecID, rows[2].SpecID,
+		rows[3].SpecID, rows[4].SpecID, rows[5].SpecID,
 	})
-	require.Nil(t, rows[0].partition[1000])
-	require.EqualValues(t, -1, rows[1].partition[1000])
-	require.EqualValues(t, 10, rows[5].partition[1000])
+	require.Nil(t, rows[0].Partition[1000])
+	require.EqualValues(t, -1, rows[1].Partition[1000])
+	require.EqualValues(t, 10, rows[5].Partition[1000])
 }
 
 func TestSortPartitionStatisticsFloatAndUUID(t *testing.T) {
@@ -135,36 +136,36 @@ func TestSortPartitionStatisticsFloatAndUUID(t *testing.T) {
 		pt := iceberg.NewStructType(
 			iceberg.NestedField{ID: 1000, Name: "value", Type: iceberg.PrimitiveTypes.Float64},
 		)
-		rows := []*partitionAggregate{
-			{partition: map[int]any{1000: math.NaN()}, specID: 6},
-			{partition: map[int]any{1000: float64(0)}, specID: 3},
-			{partition: map[int]any{1000: math.Inf(1)}, specID: 5},
-			{partition: map[int]any{1000: math.Copysign(0, -1)}, specID: 2},
-			{partition: map[int]any{1000: math.Inf(-1)}, specID: 1},
-			{partition: map[int]any{1000: math.Float64frombits(0xfff8000000000001)}, specID: 7},
+		rows := []*tblutils.PartitionAggregate{
+			{Partition: map[int]any{1000: math.NaN()}, SpecID: 6},
+			{Partition: map[int]any{1000: float64(0)}, SpecID: 3},
+			{Partition: map[int]any{1000: math.Inf(1)}, SpecID: 5},
+			{Partition: map[int]any{1000: math.Copysign(0, -1)}, SpecID: 2},
+			{Partition: map[int]any{1000: math.Inf(-1)}, SpecID: 1},
+			{Partition: map[int]any{1000: math.Float64frombits(0xfff8000000000001)}, SpecID: 7},
 		}
 		require.NoError(t, sortPartitionStatistics(rows, pt))
 		require.Equal(t, []int32{1, 2, 3, 5, 6, 7}, []int32{
-			rows[0].specID, rows[1].specID, rows[2].specID,
-			rows[3].specID, rows[4].specID, rows[5].specID,
+			rows[0].SpecID, rows[1].SpecID, rows[2].SpecID,
+			rows[3].SpecID, rows[4].SpecID, rows[5].SpecID,
 		})
-		require.True(t, math.Signbit(rows[1].partition[1000].(float64)))
-		require.False(t, math.Signbit(rows[2].partition[1000].(float64)))
-		require.True(t, math.IsNaN(rows[4].partition[1000].(float64)))
+		require.True(t, math.Signbit(rows[1].Partition[1000].(float64)))
+		require.False(t, math.Signbit(rows[2].Partition[1000].(float64)))
+		require.True(t, math.IsNaN(rows[4].Partition[1000].(float64)))
 	})
 	t.Run("uuid", func(t *testing.T) {
 		pt := iceberg.NewStructType(
 			iceberg.NestedField{ID: 1000, Name: "value", Type: iceberg.PrimitiveTypes.UUID},
 		)
-		rows := []*partitionAggregate{
-			{partition: map[int]any{1000: uuid.MustParse("7fffffff-ffff-ffff-0000-000000000000")}, specID: 4},
-			{partition: map[int]any{1000: uuid.MustParse("00000000-0000-0000-7fff-ffffffffffff")}, specID: 3},
-			{partition: map[int]any{1000: uuid.MustParse("80000000-0000-0000-0000-000000000000")}, specID: 1},
-			{partition: map[int]any{1000: uuid.MustParse("00000000-0000-0000-8000-000000000000")}, specID: 2},
+		rows := []*tblutils.PartitionAggregate{
+			{Partition: map[int]any{1000: uuid.MustParse("7fffffff-ffff-ffff-0000-000000000000")}, SpecID: 4},
+			{Partition: map[int]any{1000: uuid.MustParse("00000000-0000-0000-7fff-ffffffffffff")}, SpecID: 3},
+			{Partition: map[int]any{1000: uuid.MustParse("80000000-0000-0000-0000-000000000000")}, SpecID: 1},
+			{Partition: map[int]any{1000: uuid.MustParse("00000000-0000-0000-8000-000000000000")}, SpecID: 2},
 		}
 		require.NoError(t, sortPartitionStatistics(rows, pt))
 		require.Equal(t, []int32{1, 2, 3, 4}, []int32{
-			rows[0].specID, rows[1].specID, rows[2].specID, rows[3].specID,
+			rows[0].SpecID, rows[1].SpecID, rows[2].SpecID, rows[3].SpecID,
 		})
 	})
 }
@@ -173,14 +174,14 @@ func TestPartitionStatisticsParquetWrite(t *testing.T) {
 	ctx := t.Context()
 	fs := iceio.NewMemFS()
 	path := "mem://bucket/table/metadata/v1-stats.parquet"
-	rows := []*partitionAggregate{
+	rows := []*tblutils.PartitionAggregate{
 		{
-			specID: 0, partition: map[int]any{1000: int32(-3), 1001: "a"},
-			dataRecordCount: 17, dataFileCount: 2, dataFileSize: 2048,
+			SpecID: 0, Partition: map[int]any{1000: int32(-3), 1001: "a"},
+			DataRecordCount: 17, DataFileCount: 2, DataFileSize: 2048,
 		},
 		{
-			specID: 1, partition: map[int]any{1000: int32(10), 1001: nil},
-			dataRecordCount: 3, dataFileCount: 1, dataFileSize: 512,
+			SpecID: 1, Partition: map[int]any{1000: int32(10), 1001: nil},
+			DataRecordCount: 3, DataFileCount: 1, DataFileSize: 512,
 		},
 	}
 	size, err := writePartitionStatisticsParquet(ctx, fs, path, statsTestPartitionType(), rows, 1)
@@ -245,19 +246,19 @@ func TestCollectPartitionStatisticsFromLiveManifests(t *testing.T) {
 	ctx := t.Context()
 	fs, err := tbl.FS(ctx)
 	require.NoError(t, err)
-	pt, err := unifiedPartitionType(tbl.Metadata())
+	pt, err := tblutils.UnifiedPartitionType(tbl.Metadata().PartitionSpecs(), tbl.Schema())
 	require.NoError(t, err)
 
 	rows, err := collectPartitionStatistics(ctx, fs, *tbl.CurrentSnapshot(), pt, tbl.Metadata().PartitionSpecs(), 1, nil)
 	require.NoError(t, err)
 	require.Len(t, rows, 2)
 	require.NoError(t, sortPartitionStatistics(rows, pt))
-	require.Equal(t, int32(2), rows[0].partition[1000])
-	require.Equal(t, int64(12), rows[0].dataRecordCount)
-	require.Equal(t, int32(2), rows[0].dataFileCount)
-	require.Equal(t, int32(10), rows[1].partition[1000])
-	require.Equal(t, int64(3), rows[1].dataRecordCount)
-	require.Equal(t, int32(1), rows[1].dataFileCount)
+	require.Equal(t, int32(2), rows[0].Partition[1000])
+	require.Equal(t, int64(12), rows[0].DataRecordCount)
+	require.Equal(t, int32(2), rows[0].DataFileCount)
+	require.Equal(t, int32(10), rows[1].Partition[1000])
+	require.Equal(t, int64(3), rows[1].DataRecordCount)
+	require.Equal(t, int32(1), rows[1].DataFileCount)
 }
 
 func TestCollectPartitionStatisticsDecimalFromManifest(t *testing.T) {
@@ -293,9 +294,9 @@ func TestCollectPartitionStatisticsDecimalFromManifest(t *testing.T) {
 	rows, err := collectPartitionStatistics(t.Context(), fs, snapshot, partitionType, []iceberg.PartitionSpec{spec}, 1, nil)
 	require.NoError(t, err)
 	require.Len(t, rows, 1)
-	require.Equal(t, amount, rows[0].partition[1000])
-	require.Equal(t, int64(10), rows[0].dataRecordCount)
-	require.Equal(t, int32(2), rows[0].dataFileCount)
+	require.Equal(t, amount, rows[0].Partition[1000])
+	require.Equal(t, int64(10), rows[0].DataRecordCount)
+	require.Equal(t, int32(2), rows[0].DataFileCount)
 	require.NoError(t, sortPartitionStatistics(rows, partitionType))
 
 	const statsPath = "mem://stats/decimal-stats.parquet"
@@ -464,7 +465,7 @@ func TestCollectPartitionStatisticsRejectsDuplicateLiveFiles(t *testing.T) {
 	})
 	fs, err := tbl.FS(t.Context())
 	require.NoError(t, err)
-	pt, err := unifiedPartitionType(tbl.Metadata())
+	pt, err := tblutils.UnifiedPartitionType(tbl.Metadata().PartitionSpecs(), tbl.Schema())
 	require.NoError(t, err)
 
 	_, err = collectPartitionStatistics(t.Context(), fs, *tbl.CurrentSnapshot(), pt, tbl.Metadata().PartitionSpecs(), 1, nil)
@@ -493,12 +494,12 @@ func TestPartitionStatisticsEmbeddedManifests(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, rows, 3)
 	require.NoError(t, sortPartitionStatistics(rows, pt))
-	require.Nil(t, rows[0].partition[1000])
-	require.Equal(t, int32(7), rows[0].specID)
-	require.Equal(t, int32(0), rows[1].specID)
-	require.Equal(t, int64(10), rows[1].dataRecordCount)
-	require.Equal(t, int32(7), rows[2].specID)
-	require.Equal(t, int64(20), rows[2].dataRecordCount)
+	require.Nil(t, rows[0].Partition[1000])
+	require.Equal(t, int32(7), rows[0].SpecID)
+	require.Equal(t, int32(0), rows[1].SpecID)
+	require.Equal(t, int64(10), rows[1].DataRecordCount)
+	require.Equal(t, int32(7), rows[2].SpecID)
+	require.Equal(t, int64(20), rows[2].DataRecordCount)
 	statsPath := "mem://stats/partition-stats.parquet"
 	_, err = writePartitionStatisticsParquet(t.Context(), fs, statsPath, pt, rows, 1)
 	require.NoError(t, err)

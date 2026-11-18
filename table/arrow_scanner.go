@@ -619,39 +619,10 @@ func filePathValueType(dt arrow.DataType) arrow.DataType {
 	return dt
 }
 
-func filePathValues(values arrow.Array) (arrow.TypedArray[string], error) {
-	switch arr := values.(type) {
-	case *array.Dictionary:
-		wrapped, err := array.NewDictWrapper[string](arr)
-		if err != nil {
-			return nil, fmt.Errorf("%w: file_path column is not string: %w",
-				iceberg.ErrInvalidSchema, err)
-		}
-
-		return wrapped, nil
-	case arrow.TypedArray[string]:
-		return arr, nil
-	default:
-		return nil, fmt.Errorf("%w: unsupported file_path column type %s in position delete file",
-			iceberg.ErrInvalidSchema, values.DataType())
-	}
-}
-
 type posDeleteCursor struct {
 	chunks     []*array.Int64
 	chunkIndex int
 	offset     int
-}
-
-func validatePositionDeletePositions(positions *array.Int64) error {
-	for row := range positions.Len() {
-		if position := positions.Value(row); position < 0 {
-			return fmt.Errorf("%w: negative pos %d in position delete file",
-				iceberg.ErrInvalidSchema, position)
-		}
-	}
-
-	return nil
 }
 
 func newPosDeleteCursor(posCol *arrow.Chunked) (posDeleteCursor, error) {
@@ -764,7 +735,7 @@ func (a *posDeleteAccumulator) appendFilePathChunk(ctx context.Context, filePath
 		return err
 	}
 
-	paths, err := filePathValues(filePathChunk)
+	paths, err := tblutils.FilePathValues(filePathChunk)
 	if err != nil {
 		return err
 	}
@@ -1291,7 +1262,7 @@ func positionDeletePruningEnabled(schema *arrow.Schema) (bool, error) {
 }
 
 func positionDeleteProjectionIndices(schema *arrow.Schema, reader tblutils.FileReader) ([]int, error) {
-	filePathIndex, posIndex, err := positionDeleteColumnIndices(schema)
+	filePathIndex, posIndex, err := tblutils.PositionDeleteColumnIndices(schema)
 	if err != nil {
 		return nil, err
 	}
@@ -1312,31 +1283,6 @@ func positionDeleteProjectionIndices(schema *arrow.Schema, reader tblutils.FileR
 	}
 
 	return columns, nil
-}
-
-func positionDeleteColumnIndices(schema *arrow.Schema) (int, int, error) {
-	// Position-delete columns are resolved by their spec-defined names because
-	// Arrow schemas read from external files do not always retain Iceberg IDs.
-	requiredColumn := func(name string) (int, error) {
-		indices := schema.FieldIndices(name)
-		if len(indices) != 1 {
-			return 0, fmt.Errorf("%w: position delete file must contain exactly one %q column, found %d",
-				iceberg.ErrInvalidSchema, name, len(indices))
-		}
-
-		return indices[0], nil
-	}
-
-	filePathIndex, err := requiredColumn("file_path")
-	if err != nil {
-		return 0, 0, err
-	}
-	posIndex, err := requiredColumn("pos")
-	if err != nil {
-		return 0, 0, err
-	}
-
-	return filePathIndex, posIndex, nil
 }
 
 type set[T comparable] map[T]struct{}

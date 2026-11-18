@@ -35,6 +35,7 @@ import (
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
+	tblutils "github.com/apache/iceberg-go/table/internal"
 	"github.com/stretchr/testify/require"
 )
 
@@ -425,18 +426,18 @@ func TestPartitionStatisticsAllMetricOverflows(t *testing.T) {
 	spec := partitionedSpec()
 	for _, tt := range []struct {
 		name    string
-		row     partitionAggregate
+		row     tblutils.PartitionAggregate
 		content iceberg.ManifestEntryContent
 		path    string
 	}{
-		{"data records", partitionAggregate{dataRecordCount: math.MaxInt64}, iceberg.EntryContentData, "data.parquet"},
-		{"data files", partitionAggregate{dataFileCount: math.MaxInt32}, iceberg.EntryContentData, "data.parquet"},
-		{"data bytes", partitionAggregate{dataFileSize: math.MaxInt64}, iceberg.EntryContentData, "data.parquet"},
-		{"position records", partitionAggregate{positionDeleteCount: math.MaxInt64}, iceberg.EntryContentPosDeletes, "delete.parquet"},
-		{"position files", partitionAggregate{positionDeleteFiles: math.MaxInt32}, iceberg.EntryContentPosDeletes, "delete.parquet"},
-		{"equality records", partitionAggregate{equalityDeleteCount: math.MaxInt64}, iceberg.EntryContentEqDeletes, "delete.parquet"},
-		{"equality files", partitionAggregate{equalityDeleteFiles: math.MaxInt32}, iceberg.EntryContentEqDeletes, "delete.parquet"},
-		{"vectors", partitionAggregate{deletionVectorCount: math.MaxInt32}, iceberg.EntryContentPosDeletes, "delete.puffin"},
+		{"data records", tblutils.PartitionAggregate{DataRecordCount: math.MaxInt64}, iceberg.EntryContentData, "data.parquet"},
+		{"data files", tblutils.PartitionAggregate{DataFileCount: math.MaxInt32}, iceberg.EntryContentData, "data.parquet"},
+		{"data bytes", tblutils.PartitionAggregate{DataFileSize: math.MaxInt64}, iceberg.EntryContentData, "data.parquet"},
+		{"position records", tblutils.PartitionAggregate{PositionDeleteCount: math.MaxInt64}, iceberg.EntryContentPosDeletes, "delete.parquet"},
+		{"position files", tblutils.PartitionAggregate{PositionDeleteFiles: math.MaxInt32}, iceberg.EntryContentPosDeletes, "delete.parquet"},
+		{"equality records", tblutils.PartitionAggregate{EqualityDeleteCount: math.MaxInt64}, iceberg.EntryContentEqDeletes, "delete.parquet"},
+		{"equality files", tblutils.PartitionAggregate{EqualityDeleteFiles: math.MaxInt32}, iceberg.EntryContentEqDeletes, "delete.parquet"},
+		{"vectors", tblutils.PartitionAggregate{DeletionVectorCount: math.MaxInt32}, iceberg.EntryContentPosDeletes, "delete.puffin"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			file := partitionStatsFile(t, spec, tt.content, tt.path, map[int]any{1000: int32(2)}, 1).Build()
@@ -549,29 +550,29 @@ func TestPartitionStatisticsVectorTotalsValidateTargets(t *testing.T) {
 		{name: "unknown vector sequence", dataSequence: 1, vectorSequence: -1, vectorCount: 3, wantUnknown: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			row := &partitionAggregate{dataRecordCount: 10}
+			row := &tblutils.PartitionAggregate{DataRecordCount: 10}
 			vectorRow := row
 			if tt.differentPartition {
-				vectorRow = &partitionAggregate{}
+				vectorRow = &tblutils.PartitionAggregate{}
 			}
 			data := make(map[string]partitionStatisticsDataFile)
 			if !tt.missing {
 				data["data.parquet"] = partitionStatisticsDataFile{row: row, count: 10, sequence: tt.dataSequence}
 			}
 			vectors := map[string][]partitionStatisticsVector{"data.parquet": {{row: vectorRow, count: tt.vectorCount, sequence: tt.vectorSequence}}}
-			unrelated := &partitionAggregate{dataRecordCount: 20}
-			allRows := []*partitionAggregate{row, unrelated}
+			unrelated := &tblutils.PartitionAggregate{DataRecordCount: 20}
+			allRows := []*tblutils.PartitionAggregate{row, unrelated}
 			if vectorRow != row {
 				allRows = append(allRows, vectorRow)
 			}
 			err := finishPartitionStatistics(t.Context(), allRows, data, vectors, true)
 			require.NoError(t, err)
-			require.Equal(t, int64(20), *unrelated.totalRecordCount)
+			require.Equal(t, int64(20), *unrelated.TotalRecordCount)
 			if tt.wantUnknown {
-				require.Nil(t, row.totalRecordCount)
-				require.Nil(t, vectorRow.totalRecordCount)
+				require.Nil(t, row.TotalRecordCount)
+				require.Nil(t, vectorRow.TotalRecordCount)
 			} else {
-				require.Equal(t, int64(7), *row.totalRecordCount)
+				require.Equal(t, int64(7), *row.TotalRecordCount)
 			}
 		})
 	}
@@ -752,7 +753,7 @@ func TestPartitionStatisticsV2V3FailureAndEmptySnapshots(t *testing.T) {
 		fs, err := tbl.FS(t.Context())
 		require.NoError(t, err)
 		_, err = writePartitionStatisticsParquet(ctx, fs.(iceio.WriteFileIO), "mem://stats/table/metadata/cancelled.parquet", statsTestPartitionType(),
-			[]*partitionAggregate{{partition: map[int]any{1000: int32(2)}}}, version)
+			[]*tblutils.PartitionAggregate{{Partition: map[int]any{1000: int32(2)}}}, version)
 		require.ErrorIs(t, err, context.Canceled)
 		_, err = fs.Open(t.Context(), "mem://stats/table/metadata/cancelled.parquet")
 		require.Error(t, err)
@@ -797,7 +798,7 @@ func TestPartitionStatisticsV2V3RemovesFileAfterCloseFailure(t *testing.T) {
 		failure := errors.New("injected close failure")
 		path := "mem://stats/table/metadata/failed.parquet"
 		_, err := writePartitionStatisticsParquet(t.Context(), partitionStatisticsCloseFailureIO{WriteFileIO: fs, failure: failure}, path,
-			statsTestPartitionType(), []*partitionAggregate{{partition: map[int]any{1000: int32(2)}, dataRecordCount: 10}}, version)
+			statsTestPartitionType(), []*tblutils.PartitionAggregate{{Partition: map[int]any{1000: int32(2)}, DataRecordCount: 10}}, version)
 		require.ErrorIs(t, err, failure)
 		_, err = fs.Open(t.Context(), path)
 		require.Error(t, err, "a failed file must not remain available for registration")

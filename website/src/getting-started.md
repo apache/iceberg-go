@@ -62,7 +62,7 @@ func openCatalog(ctx context.Context) (*sqlcat.Catalog, error) {
     if err != nil {
         return nil, err
     }
-    return sqlcat.NewCatalog("default", db, sqlcat.SQLite, iceberg.Properties{
+    return sqlcat.NewCatalog(ctx, "default", db, sqlcat.SQLite, iceberg.Properties{
         "warehouse":            "file:///tmp/iceberg-tutorial",
         "init_catalog_tables":  "true",
     })

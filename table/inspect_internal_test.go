@@ -40,6 +40,7 @@ import (
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table/dv"
+	tblutils "github.com/apache/iceberg-go/table/internal"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
@@ -1244,7 +1245,7 @@ func TestInspectAllManifestsPreservesSnapshotReferences(t *testing.T) {
 }
 
 func TestInspectAllManifestsStreamsRecordBatches(t *testing.T) {
-	const manifestCount = recordBatchSize + 1
+	const manifestCount = tblutils.RecordBatchSize + 1
 
 	manifests := make([]iceberg.ManifestFile, manifestCount)
 	for idx := range manifests {
@@ -1266,7 +1267,7 @@ func TestInspectAllManifestsStreamsRecordBatches(t *testing.T) {
 		batchSizes = append(batchSizes, rr.RecordBatch().NumRows())
 	}
 	require.NoError(t, rr.Err())
-	require.Equal(t, []int64{recordBatchSize, 1}, batchSizes)
+	require.Equal(t, []int64{tblutils.RecordBatchSize, 1}, batchSizes)
 }
 
 func TestInspectAllManifestsAllocator(t *testing.T) {
@@ -1276,7 +1277,7 @@ func TestInspectAllManifestsAllocator(t *testing.T) {
 		next          bool
 	}{
 		{name: "before first batch", manifestCount: 1},
-		{name: "after first batch", manifestCount: recordBatchSize + 1, next: true},
+		{name: "after first batch", manifestCount: tblutils.RecordBatchSize + 1, next: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			checked := memory.NewCheckedAllocator(memory.DefaultAllocator)
@@ -1871,7 +1872,7 @@ func TestInspectAllEntriesIncludesDeleteManifests(t *testing.T) {
 func TestInspectAllEntriesStreamsBatches(t *testing.T) {
 	spec := *iceberg.UnpartitionedSpec
 	tbl := inspectDataFilesTable(t, spec,
-		inspectDataFileEntries(t, spec, recordBatchSize+1))
+		inspectDataFileEntries(t, spec, tblutils.RecordBatchSize+1))
 
 	rr, err := tbl.Inspect().AllEntries(context.Background())
 	require.NoError(t, err)
@@ -1882,7 +1883,7 @@ func TestInspectAllEntriesStreamsBatches(t *testing.T) {
 		batchRows = append(batchRows, int(rr.RecordBatch().NumRows()))
 	}
 	require.NoError(t, rr.Err())
-	require.Equal(t, []int{recordBatchSize, 1}, batchRows)
+	require.Equal(t, []int{tblutils.RecordBatchSize, 1}, batchRows)
 }
 
 func TestInspectAllEntriesEmptyTableEarlyRelease(t *testing.T) {
@@ -2335,8 +2336,8 @@ func TestInspectDataFilesStreamsBatchesAndSkipsDeleted(t *testing.T) {
 	txn, memIO := createTestTransactionWithMemIO(t, spec)
 	schema := simpleSchema()
 
-	entries := make([]iceberg.ManifestEntry, 0, recordBatchSize+2)
-	for index := range recordBatchSize + 1 {
+	entries := make([]iceberg.ManifestEntry, 0, tblutils.RecordBatchSize+2)
+	for index := range tblutils.RecordBatchSize + 1 {
 		file := newTestDataFile(t, spec,
 			"mem://default/table-location/data/live-"+strconv.Itoa(index)+".parquet", nil)
 		sequenceNumber := int64(1)
@@ -2389,8 +2390,8 @@ func TestInspectDataFilesStreamsBatchesAndSkipsDeleted(t *testing.T) {
 		}
 	}
 	require.NoError(t, rr.Err())
-	require.Equal(t, []int{recordBatchSize, 1}, batchRows)
-	require.Len(t, paths, recordBatchSize+1)
+	require.Equal(t, []int{tblutils.RecordBatchSize, 1}, batchRows)
+	require.Len(t, paths, tblutils.RecordBatchSize+1)
 	require.NotContains(t, paths, deletedPath)
 }
 
@@ -2464,7 +2465,7 @@ func TestInspectDataFilesAllocator(t *testing.T) {
 			t.Cleanup(func() { checked.AssertSize(t, 0) })
 
 			spec := *iceberg.UnpartitionedSpec
-			tbl := inspectDataFilesTable(t, spec, inspectDataFileEntries(t, spec, recordBatchSize+1))
+			tbl := inspectDataFilesTable(t, spec, inspectDataFileEntries(t, spec, tblutils.RecordBatchSize+1))
 			rr, err := tbl.Inspect(WithInspectAllocator(checked)).DataFiles(context.Background())
 			require.NoError(t, err)
 
@@ -3031,7 +3032,7 @@ func TestInspectPositionDeletesDefersLaterManifestReads(t *testing.T) {
 	dataPath := "mem://position-deletes/table/data/data.parquet"
 	var deleteRows bytes.Buffer
 	deleteRows.WriteByte('[')
-	for pos := range recordBatchSize {
+	for pos := range tblutils.RecordBatchSize {
 		if pos > 0 {
 			deleteRows.WriteByte(',')
 		}
@@ -3047,7 +3048,7 @@ func TestInspectPositionDeletesDefersLaterManifestReads(t *testing.T) {
 		*iceberg.UnpartitionedSpec, tableSchema, snapshotID, iceberg.ManifestContentDeletes,
 		[]iceberg.ManifestEntry{iceberg.NewManifestEntry(
 			iceberg.EntryStatusADDED, &snapshotID, &sequenceNumber, &sequenceNumber,
-			newPosDeleteFile(t, deletePath, recordBatchSize, 128),
+			newPosDeleteFile(t, deletePath, tblutils.RecordBatchSize, 128),
 		)},
 	)
 	missingManifest := iceberg.NewManifestBuilder(
@@ -3062,7 +3063,7 @@ func TestInspectPositionDeletesDefersLaterManifestReads(t *testing.T) {
 	require.NoError(t, err)
 	defer rr.Release()
 	require.True(t, rr.Next(), "reader error: %v", rr.Err())
-	require.EqualValues(t, recordBatchSize, rr.RecordBatch().NumRows())
+	require.EqualValues(t, tblutils.RecordBatchSize, rr.RecordBatch().NumRows())
 }
 
 func TestAppendParquetPositionDeleteRowsRejectsNullRow(t *testing.T) {

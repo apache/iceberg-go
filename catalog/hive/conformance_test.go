@@ -20,6 +20,7 @@
 package hive
 
 import (
+	"context"
 	"testing"
 
 	"github.com/apache/iceberg-go"
@@ -33,7 +34,7 @@ func TestHiveCatalogConformance(t *testing.T) {
 		SupportsNamespaceProperties: true,
 		SupportsRenameTable:         true,
 		NewCatalog: func(t *testing.T) catalog.Catalog {
-			cat, err := NewCatalog(iceberg.Properties{
+			cat, err := NewCatalog(context.Background(), iceberg.Properties{
 				URI:       getTestHiveURI(),
 				Warehouse: getTestTableLocation(),
 			})

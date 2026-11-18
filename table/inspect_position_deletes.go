@@ -104,7 +104,7 @@ type positionDeleteRecordAppender struct {
 	filePath         *array.StringBuilder
 	pos              *array.Int64Builder
 	row              *array.StructBuilder
-	partition        *partitionStructBuilder
+	partition        *tblutils.PartitionStructBuilder
 	specID           *array.Int32Builder
 	deleteFilePath   *array.StringBuilder
 	contentOffset    *array.Int64Builder
@@ -182,7 +182,7 @@ func newPositionDeleteRecordAppender(
 		projection:       projection,
 	}
 	if partitionType.NumFields() > 0 {
-		partitionBuilder, err := newPartitionStructBuilder(
+		partitionBuilder, err := tblutils.NewPartitionStructBuilder(
 			bldr.Field(nextField).(*array.StructBuilder), partitionType)
 		if err != nil {
 			return out, err
@@ -216,7 +216,7 @@ func (a positionDeleteRecordAppender) prepareFile(file iceberg.DataFile) positio
 		deleteFilePath: file.FilePath(),
 	}
 	if a.partition != nil {
-		borrowedPartition := dataFilePartition(file)
+		borrowedPartition := iceinternal.BorrowedDataFilePartition(file)
 		meta.partition = make(map[int]any, len(borrowedPartition))
 		for oldID, value := range borrowedPartition {
 			newID, ok := a.partitionIDByOld[oldID]
@@ -261,7 +261,7 @@ func (a positionDeleteRecordAppender) appendPrepared(
 	}
 
 	if a.partition != nil {
-		if err := a.partition.append(meta.partition); err != nil {
+		if err := a.partition.Append(meta.partition); err != nil {
 			return err
 		}
 	}
@@ -537,7 +537,7 @@ func (i InspectTable) positionDeleteRecordReader(
 				return false, err
 			}
 			rows++
-			if rows == recordBatchSize {
+			if rows == tblutils.RecordBatchSize {
 				return emit(), nil
 			}
 
@@ -701,11 +701,11 @@ func appendPositionDeleteRecord(
 	appendRow appendPositionDeleteRow,
 	projection positionDeleteProjectionOptions,
 ) (bool, error) {
-	filePathIndex, posIndex, err := positionDeleteColumnIndices(record.Schema())
+	filePathIndex, posIndex, err := tblutils.PositionDeleteColumnIndices(record.Schema())
 	if err != nil {
 		return false, err
 	}
-	filePaths, err := filePathValues(record.Column(filePathIndex))
+	filePaths, err := tblutils.FilePathValues(record.Column(filePathIndex))
 	if err != nil {
 		return false, err
 	}
@@ -720,7 +720,7 @@ func appendPositionDeleteRecord(
 	if positions.NullN() > 0 {
 		return false, fmt.Errorf("%w: null pos in position delete file", iceberg.ErrInvalidSchema)
 	}
-	if err := validatePositionDeletePositions(positions); err != nil {
+	if err := tblutils.ValidatePositionDeletePositions(positions); err != nil {
 		return false, err
 	}
 
@@ -804,7 +804,7 @@ func positionDeletesPartitionType(
 	metadata Metadata,
 ) (*iceberg.StructType, map[int]int, error) {
 	currentSchema := metadata.CurrentSchema()
-	base, err := unifiedPartitionTypeWithSchema(metadata, currentSchema)
+	base, err := tblutils.UnifiedPartitionType(metadata.PartitionSpecs(), currentSchema)
 	if err != nil {
 		return nil, nil, err
 	}

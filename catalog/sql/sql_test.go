@@ -31,6 +31,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -116,8 +117,34 @@ func TestNewCatalogInvalidDialect(t *testing.T) {
 	assert.NoError(t, err)
 	defer sqldb.Close()
 
-	_, err = sqlcat.NewCatalog("default", sqldb, "foobar", nil)
+	_, err = sqlcat.NewCatalog(context.Background(), "default", sqldb, "foobar", nil)
 	assert.ErrorContains(t, err, "unsupported sql dialect")
+}
+
+func TestNewCatalogCancelledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	for _, initTables := range []string{"true", "false"} {
+		t.Run("init_catalog_tables="+initTables, func(t *testing.T) {
+			sqldb, err := sql.Open(sqliteshim.ShimName, ":memory:")
+			require.NoError(t, err)
+			defer sqldb.Close()
+
+			_, err = sqlcat.NewCatalog(ctx, "default", sqldb, sqlcat.SQLite, iceberg.Properties{
+				"init_catalog_tables": initTables,
+			})
+			assert.ErrorIs(t, err, context.Canceled)
+		})
+	}
+
+	_, err := catalog.Load(ctx, "sql", iceberg.Properties{
+		sqlcat.DriverKey:  sqliteshim.ShimName,
+		sqlcat.DialectKey: string(sqlcat.SQLite),
+		"uri":             ":memory:",
+		"type":            "sql",
+	})
+	assert.ErrorIs(t, err, context.Canceled)
 }
 
 func randomString(n int) string {
@@ -177,12 +204,16 @@ func (s *SqliteCatalogTestSuite) SetupTest() {
 
 // catalogUri returns the file-backed SQLite DSN the whole suite shares, with a
 // busy timeout on every pooled connection; mattn and modernc both read
-// _busy_timeout. The timeout applies where SQLite consults the busy handler: a
-// lock requested before the transaction has read anything. A transaction that
-// reads first and then writes fails with SQLITE_BUSY at once, whatever the
-// timeout.
+// _busy_timeout. Catalog write transactions take the write lock before they
+// read, so a contended writer waits up to the timeout.
 func (s *SqliteCatalogTestSuite) catalogUri() string {
-	return "file://" + filepath.Join(s.warehouse, "sql-catalog.db") + "?_busy_timeout=5000"
+	return s.catalogURIWithBusyTimeout(5 * time.Second)
+}
+
+// catalogURIWithBusyTimeout returns the suite's DSN with another busy timeout.
+func (s *SqliteCatalogTestSuite) catalogURIWithBusyTimeout(timeout time.Duration) string {
+	return "file://" + filepath.Join(s.warehouse, "sql-catalog.db") +
+		"?_busy_timeout=" + strconv.FormatInt(timeout.Milliseconds(), 10)
 }
 
 func (s *SqliteCatalogTestSuite) confirmNoTables(db *sql.DB) {
@@ -3102,7 +3133,7 @@ func (s *SqliteCatalogTestSuite) newAbortCatalog(mode insertFailure) (*sqlcat.Ca
 
 	// Postgres dialect so the savepoint-backed recovery path runs; the driver
 	// above emulates Postgres aborting the tx over an sqlite base.
-	cat, err := sqlcat.NewCatalog("default", sqldb, sqlcat.Postgres, iceberg.Properties{"warehouse": "file://" + s.warehouse})
+	cat, err := sqlcat.NewCatalog(context.Background(), "default", sqldb, sqlcat.Postgres, iceberg.Properties{"warehouse": "file://" + s.warehouse})
 	s.Require().NoError(err)
 
 	return cat, drv
@@ -3191,7 +3222,7 @@ func (s *SqliteCatalogTestSuite) newDupCatalog() (*sqlcat.Catalog, *dupInsertDri
 
 	// SQLite dialect so the non-Postgres recovery branch (plain insert + re-check)
 	// runs; the driver rolls back only the failing statement, so no savepoint.
-	cat, err := sqlcat.NewCatalog("default", sqldb, sqlcat.SQLite, iceberg.Properties{"warehouse": "file://" + s.warehouse})
+	cat, err := sqlcat.NewCatalog(context.Background(), "default", sqldb, sqlcat.SQLite, iceberg.Properties{"warehouse": "file://" + s.warehouse})
 	s.Require().NoError(err)
 
 	return cat, drv
@@ -3778,6 +3809,119 @@ func (s *SqliteCatalogTestSuite) TestConcurrentTableViewCollisionUnderLockConten
 	} else {
 		s.ErrorIs(second.err, catalog.ErrViewAlreadyExists)
 	}
+}
+
+// TestCreateWaitsOnBusyTimeoutWhileWriteLockHeld pins that SQLite write transactions
+// queue on the DSN's busy_timeout. A write transaction that reads before it writes
+// cannot wait for the write lock: SQLite skips the busy handler for that upgrade and
+// returns SQLITE_BUSY at once. The lock is held for longer than the whole lock-retry
+// budget in retrySerializableWriteTx, so only a create that waits on busy_timeout can
+// succeed.
+func (s *SqliteCatalogTestSuite) TestCreateWaitsOnBusyTimeoutWhileWriteLockHeld() {
+	const holdWriteLockFor = 500 * time.Millisecond
+
+	tests := []struct {
+		name   string
+		create func(context.Context, *sqlcat.Catalog, table.Identifier) error
+	}{
+		{
+			name: "table",
+			create: func(ctx context.Context, cat *sqlcat.Catalog, identifier table.Identifier) error {
+				_, err := cat.CreateTable(ctx, identifier, tableSchemaNested)
+
+				return err
+			},
+		},
+		{
+			name: "view",
+			create: func(ctx context.Context, cat *sqlcat.Catalog, identifier table.Identifier) error {
+				return createTestView(ctx, cat, identifier, tableSchemaNested, view.Representation{SQL: "SELECT 1", Dialect: "spark"}, nil)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		s.Run(tt.name, func() {
+			ctx := context.Background()
+			sqlDB := s.getDB()
+			_, err := sqlDB.Exec("PRAGMA journal_mode=WAL")
+			s.Require().NoError(err)
+			_, err = sqlDB.Exec("CREATE TABLE IF NOT EXISTS lock_holder(x)")
+			s.Require().NoError(err)
+			s.Require().NoError(sqlDB.Close())
+
+			cat, err := catalog.Load(ctx, "default", iceberg.Properties{
+				"uri":             s.catalogURIWithBusyTimeout(5 * time.Second),
+				sqlcat.DriverKey:  sqliteshim.ShimName,
+				sqlcat.DialectKey: string(sqlcat.SQLite),
+				"type":            "sql",
+				"warehouse":       "file://" + s.warehouse,
+			})
+			s.Require().NoError(err)
+			db := cat.(*sqlcat.Catalog)
+			identifier := s.randomTableIdentifier()
+			s.Require().NoError(db.CreateNamespace(ctx, catalog.NamespaceFromIdent(identifier), nil))
+
+			holder := s.getDB()
+			tx, err := holder.BeginTx(ctx, nil)
+			s.Require().NoError(err)
+			_, err = tx.ExecContext(ctx, "INSERT INTO lock_holder VALUES (1)")
+			s.Require().NoError(err)
+
+			released := make(chan struct{})
+			time.AfterFunc(holdWriteLockFor, func() {
+				_ = tx.Rollback()
+				_ = holder.Close()
+				close(released)
+			})
+
+			s.Require().NoError(tt.create(ctx, db, identifier))
+			<-released
+		})
+	}
+}
+
+// TestCreateFailsAfterOneBusyTimeoutWhileWriteLockHeld pins that a write lock SQLite
+// did not grant within busy_timeout is returned, not retried: retrying would wait
+// busy_timeout once per attempt in retrySerializableWriteTx.
+func (s *SqliteCatalogTestSuite) TestCreateFailsAfterOneBusyTimeoutWhileWriteLockHeld() {
+	const busyTimeout = 500 * time.Millisecond
+
+	ctx := context.Background()
+	sqlDB := s.getDB()
+	_, err := sqlDB.Exec("PRAGMA journal_mode=WAL")
+	s.Require().NoError(err)
+	_, err = sqlDB.Exec("CREATE TABLE IF NOT EXISTS lock_holder(x)")
+	s.Require().NoError(err)
+	s.Require().NoError(sqlDB.Close())
+
+	cat, err := catalog.Load(ctx, "default", iceberg.Properties{
+		"uri":             s.catalogURIWithBusyTimeout(busyTimeout),
+		sqlcat.DriverKey:  sqliteshim.ShimName,
+		sqlcat.DialectKey: string(sqlcat.SQLite),
+		"type":            "sql",
+		"warehouse":       "file://" + s.warehouse,
+	})
+	s.Require().NoError(err)
+	db := cat.(*sqlcat.Catalog)
+	identifier := s.randomTableIdentifier()
+	s.Require().NoError(db.CreateNamespace(ctx, catalog.NamespaceFromIdent(identifier), nil))
+
+	holder := s.getDB()
+	defer holder.Close()
+	tx, err := holder.BeginTx(ctx, nil)
+	s.Require().NoError(err)
+	defer func() { _ = tx.Rollback() }()
+	_, err = tx.ExecContext(ctx, "INSERT INTO lock_holder VALUES (1)")
+	s.Require().NoError(err)
+
+	start := time.Now()
+	_, err = db.CreateTable(ctx, identifier, tableSchemaNested)
+	elapsed := time.Since(start)
+
+	s.Require().ErrorContains(err, "within busy_timeout")
+	// One wait is busy_timeout; a retried one would be six of them plus backoff.
+	s.Less(elapsed, 3*busyTimeout, "create waited %v", elapsed)
 }
 
 func (s *SqliteCatalogTestSuite) TestCreateRemovesMetadataIfCatalogInsertFails() {
