@@ -135,7 +135,7 @@ func BenchmarkConflictValidationMixedValidators(b *testing.B) {
 					b.Fatal(err)
 				}
 
-				err := validateAddedDataFilesMatchingFilter(ctx, iceberg.AlwaysTrue{})
+				err := validateAddedDataFilesMatchingFilter(ctx, iceberg.AlwaysTrue{}, ctx.caseSensitive)
 				if !errors.Is(err, ErrConflictingDataFiles) {
 					b.Fatalf("validateAddedDataFilesMatchingFilter() error = %v", err)
 				}

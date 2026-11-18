@@ -143,9 +143,15 @@ func readIsolationLevel(props iceberg.Properties, key string, defVal IsolationLe
 var ErrCommitDiverged = errors.New("commit diverged: base snapshot is no longer on the branch")
 
 // ErrConflictingDataFiles is returned when a concurrent commit added data
-// files that satisfy the committer's filter. It wraps ErrCommitFailed: a
-// new transaction built from a reloaded table may succeed.
+// files that satisfy the committer's conflict filter. It wraps ErrCommitFailed:
+// a new transaction built from a reloaded table may succeed.
 var ErrConflictingDataFiles = fmt.Errorf("%w: concurrent data files added", ErrCommitFailed)
+
+// ErrDuplicateDataFiles is returned when a RowDelta adds the same data file
+// path twice or when a retry finds a concurrent addition of that path still
+// live. It does not wrap ErrCommitFailed: refreshing the table alone cannot
+// resolve a collision. The caller must use a different data file path.
+var ErrDuplicateDataFiles = errors.New("duplicate data file path")
 
 // ErrConflictingDeleteFiles is returned when a concurrent commit added
 // delete files that could mask rows the committer is writing or replacing.
@@ -413,9 +419,10 @@ func (c *conflictContext) manifestsFor(snap Snapshot) ([]iceberg.ManifestFile, e
 // branch. It walks the ancestry of the branch's current head back to
 // the writer's base snapshot to enumerate concurrent commits.
 //
-// caseSensitive must match the value the committer used when it bound
-// its filter (typically the scan's case-sensitivity) so
-// partition-spec projection resolves the same column identifiers.
+// caseSensitive is the default used by validators that do not carry an
+// operation-specific setting. Validators for filters with their own binding
+// option must use that option so partition-spec projection resolves the same
+// column identifiers used when the operation was staged.
 //
 // When base and current point at the same snapshot on the branch, the
 // returned context has no concurrent snapshots and validators that
@@ -474,49 +481,68 @@ func newConflictContext(ctx context.Context, base, current Metadata, branch stri
 	}, nil
 }
 
-// forEachAddedEntry visits every ManifestEntry with status ADDED
-// whose snapshot id equals one of the concurrent snapshots. This
-// matches Java's per-entry filter: an ADDED entry is attributed to
-// the snapshot that produced it, independent of which manifest
-// happens to carry it today — a manifest-rewrite (e.g. the merging
-// append producer) can carry ADDED entries from a prior snapshot
-// into a newer manifest whose added-snapshot-id is the committing
-// one, so per-manifest filtering alone would miss or mis-attribute
-// entries. Filtering on entry.SnapshotID() is the only attribution
-// that survives manifest rewrites.
+// forEachEntryInSnapshot visits entries in the selected manifest content
+// whose status matches includeStatus and whose entry snapshot ID matches
+// snap. Entry snapshot IDs provide attribution across manifest rewrites,
+// which may carry entries from an earlier snapshot in a newer manifest.
 //
 // The visitor returns early if the callback returns a non-nil error.
-func (c *conflictContext) forEachAddedEntry(content iceberg.ManifestContent, visit func(Snapshot, iceberg.ManifestEntry) error) error {
-	for _, snap := range c.concurrent {
-		manifests, err := c.manifestsFor(snap)
-		if err != nil {
-			return fmt.Errorf("loading entries for concurrent snapshot %d: %w", snap.SnapshotID, err)
+func (c *conflictContext) forEachEntryInSnapshot(
+	snap Snapshot,
+	content iceberg.ManifestContent,
+	includeStatus func(iceberg.ManifestEntryStatus) bool,
+	visit func(Snapshot, iceberg.ManifestEntry) error,
+) error {
+	manifests, err := c.manifestsFor(snap)
+	if err != nil {
+		return fmt.Errorf("loading entries for concurrent snapshot %d: %w", snap.SnapshotID, err)
+	}
+	for _, mf := range manifests {
+		if content >= 0 && mf.ManifestContent() != content {
+			continue
 		}
-		for _, mf := range manifests {
-			if content >= 0 && mf.ManifestContent() != content {
+
+		for entry, err := range mf.Entries(c.ctx, c.manifestReadIO(), false) {
+			if err != nil {
+				return fmt.Errorf("loading entries for concurrent snapshot %d: %w", snap.SnapshotID, err)
+			}
+			if entry.SnapshotID() != snap.SnapshotID || !includeStatus(entry.Status()) {
 				continue
 			}
-
-			for entry, err := range mf.Entries(c.ctx, c.manifestReadIO(), false) {
-				if err != nil {
-					return fmt.Errorf("loading entries for concurrent snapshot %d: %w", snap.SnapshotID, err)
-				}
-				if entry.Status() != iceberg.EntryStatusADDED {
-					continue
-				}
-				if entry.SnapshotID() != snap.SnapshotID {
-					// Entry was inherited from a prior snapshot and is
-					// not attributable to this concurrent commit.
-					continue
-				}
-				if err := visit(snap, entry); err != nil {
-					return err
-				}
+			if err := visit(snap, entry); err != nil {
+				return err
 			}
 		}
 	}
 
 	return nil
+}
+
+// forEachAddedEntry visits every ADDED entry attributed to a concurrent
+// snapshot. A manifest rewrite may carry an entry from an earlier snapshot,
+// so attribution uses the entry snapshot ID instead of the manifest snapshot ID.
+func (c *conflictContext) forEachAddedEntry(content iceberg.ManifestContent, visit func(Snapshot, iceberg.ManifestEntry) error) error {
+	for _, snap := range c.concurrent {
+		if err := c.forEachEntryInSnapshot(snap, content,
+			func(status iceberg.ManifestEntryStatus) bool { return status == iceberg.EntryStatusADDED }, visit); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// forEachChangedEntryInSnapshot visits ADDED and DELETED entries attributed
+// to snap. Both statuses are needed when resolving whether a path added by a
+// concurrent snapshot remains live.
+func (c *conflictContext) forEachChangedEntryInSnapshot(
+	snap Snapshot,
+	content iceberg.ManifestContent,
+	visit func(Snapshot, iceberg.ManifestEntry) error,
+) error {
+	return c.forEachEntryInSnapshot(snap, content, func(status iceberg.ManifestEntryStatus) bool {
+		return status == iceberg.EntryStatusADDED || status == iceberg.EntryStatusDELETED
+	}, visit)
 }
 
 // validateDataFilesExist verifies that every file path in
@@ -755,7 +781,9 @@ func dataFilesMissingError(missing []string, state string) error {
 //     one actual added file's partition value satisfies the filter.
 //  3. The surviving files are evaluated against their column metrics so
 //     files whose bounds cannot match the filter are ignored.
-func validateAddedDataFilesMatchingFilter(cc *conflictContext, filter iceberg.BooleanExpression) error {
+func validateAddedDataFilesMatchingFilter(
+	cc *conflictContext, filter iceberg.BooleanExpression, caseSensitive bool,
+) error {
 	if len(cc.concurrent) == 0 {
 		return nil
 	}
@@ -771,19 +799,19 @@ func validateAddedDataFilesMatchingFilter(cc *conflictContext, filter iceberg.Bo
 	// buildPartitionEvaluator) so there is one code path that pruning
 	// semantics flow through.
 	partitionFilters := newKeyDefaultMapWrapErr(func(specID int) (iceberg.BooleanExpression, error) {
-		return buildPartitionProjection(specID, cc.current, cc.current.CurrentSchema(), filter, cc.caseSensitive)
+		return buildPartitionProjection(specID, cc.current, cc.current.CurrentSchema(), filter, caseSensitive)
 	})
 	manifestEvals := newKeyDefaultMapWrapErr(func(specID int) (func(iceberg.ManifestFile) (bool, error), error) {
-		return buildManifestEvaluator(specID, cc.current, cc.current.CurrentSchema(), partitionFilters, cc.caseSensitive)
+		return buildManifestEvaluator(specID, cc.current, cc.current.CurrentSchema(), partitionFilters, caseSensitive)
 	})
 	partitionEvals := newKeyDefaultMapWrapErr(func(specID int) (func(iceberg.DataFile) (bool, error), error) {
-		return buildPartitionEvaluator(specID, cc.current, cc.current.CurrentSchema(), partitionFilters, cc.caseSensitive)
+		return buildPartitionEvaluator(specID, cc.current, cc.current.CurrentSchema(), partitionFilters, caseSensitive)
 	})
 	// Eval copies each file's metrics into fresh evaluator state, so this
 	// evaluator can be reused across concurrent manifests.
 	// includeEmptyFiles=false is intentional: an empty file has no rows that
 	// can match the filter and must not create a conflict.
-	metricsEval, err := newInclusiveMetricsEvaluator(cc.current.CurrentSchema(), filter, cc.caseSensitive, false)
+	metricsEval, err := newInclusiveMetricsEvaluator(cc.current.CurrentSchema(), filter, caseSensitive, false)
 	if err != nil {
 		return fmt.Errorf("failed to build metrics evaluator: %w", err)
 	}
@@ -858,7 +886,7 @@ func validateNoConflictingDataFiles(cc *conflictContext, filter iceberg.BooleanE
 		return nil
 	}
 
-	return validateAddedDataFilesMatchingFilter(cc, filter)
+	return validateAddedDataFilesMatchingFilter(cc, filter, cc.caseSensitive)
 }
 
 // validateNoConflictingDataFilesInPartitions is like

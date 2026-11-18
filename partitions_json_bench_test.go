@@ -36,8 +36,8 @@ func BenchmarkPartitionFieldUnmarshalJSON(b *testing.B) {
 			payload: []byte(`{"source-id": 1, "field-id": 1000, "transform": "bucket[16]", "name": "id_bucket"}`),
 		},
 		{
-			name:    "multi-source",
-			payload: []byte(`{"source-ids": [1, 2], "field-id": 1000, "transform": "bucket[16]", "name": "id_bucket"}`),
+			name:    "multi-source-unknown",
+			payload: []byte(`{"source-ids": [1, 2], "field-id": 1000, "transform": "custom", "name": "custom_partition"}`),
 		},
 	} {
 		b.Run(tt.name, func(b *testing.B) {
