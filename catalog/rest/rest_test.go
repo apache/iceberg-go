@@ -1582,6 +1582,27 @@ func (r *RestCatalogSuite) TestCreateTableRejectsIncompatiblePartitionSourceType
 	r.False(serverHit, "create POST must not be sent with an incompatible partition source type")
 }
 
+func (r *RestCatalogSuite) TestCreateTableRejectsDuplicatePartitionFieldIDs() {
+	var serverHit bool
+	r.mux.HandleFunc("/v1/namespaces/fokko/tables", func(w http.ResponseWriter, req *http.Request) {
+		serverHit = true
+		w.Write([]byte(createTableRestExample))
+	})
+
+	cat, err := rest.NewCatalog(r.T().Context(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	spec := iceberg.NewPartitionSpecID(1,
+		iceberg.PartitionField{SourceIDs: []int{1}, FieldID: 1000, Name: "first", Transform: iceberg.IdentityTransform{}},
+		iceberg.PartitionField{SourceIDs: []int{2}, FieldID: 1000, Name: "second", Transform: iceberg.IdentityTransform{}},
+	)
+	_, err = cat.CreateTable(r.T().Context(), table.Identifier{"fokko", "fokko2"}, tableSchemaSimple,
+		catalog.WithPartitionSpec(&spec))
+	r.Require().ErrorIs(err, iceberg.ErrInvalidPartitionSpec)
+	r.ErrorContains(err, "duplicate field ID")
+	r.False(serverHit)
+}
+
 func (r *RestCatalogSuite) TestCreateTableStagedInvalidAddSpecDoesNotCreateStagedTable() {
 	var createCalled bool
 	r.mux.HandleFunc("/v1/namespaces/db/tables", func(w http.ResponseWriter, req *http.Request) {

@@ -98,6 +98,9 @@ func (p *PartitionField) EscapedName() string {
 }
 
 func validatePartitionFieldSourceCount(transform Transform, sourceIDs []int) error {
+	if len(sourceIDs) == 0 {
+		return fmt.Errorf("%w: partition field requires a source ID", ErrInvalidPartitionSpec)
+	}
 	if hasMultipleSourcesForBuiltInTransform(transform, sourceIDs) {
 		return fmt.Errorf("%w: built-in partition transform %s requires exactly one source ID, got %d",
 			ErrInvalidPartitionSpec, transform, len(sourceIDs))
@@ -366,7 +369,7 @@ func (p *PartitionSpec) BindToSchema(schema *Schema, lastPartitionID *int, newSp
 		return PartitionSpec{}, err
 	}
 	if err = freshSpec.assignPartitionFieldIds(lastPartitionID); err != nil {
-		return PartitionSpec{}, err
+		return PartitionSpec{}, fmt.Errorf("%w: %w", ErrInvalidPartitionSpec, err)
 	}
 
 	return freshSpec, err

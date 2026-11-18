@@ -964,6 +964,31 @@ func TestUnboundPartitionSpecJSONAcceptsSingleSourceIDsForBuiltInTransform(t *te
 	assert.NotContains(t, string(encoded), `"source-ids"`)
 }
 
+func TestUnboundPartitionSpecMarshalRequiresSourceIDs(t *testing.T) {
+	unknown, err := iceberg.ParseTransform("custom_transform")
+	require.NoError(t, err)
+	for _, transform := range []iceberg.Transform{iceberg.IdentityTransform{}, unknown} {
+		t.Run(transform.String(), func(t *testing.T) {
+			spec := iceberg.UnboundPartitionSpec{
+				PartitionSpec: iceberg.NewPartitionSpecID(1, iceberg.PartitionField{
+					FieldID: 1000, Name: "part", Transform: transform,
+				}),
+			}
+			_, err := json.Marshal(spec)
+			require.ErrorIs(t, err, iceberg.ErrInvalidPartitionSpec)
+		})
+	}
+
+	// A decoded historical void field uses the zero sentinel for its absent
+	// source. Keep that distinct from a new field with an empty source list.
+	var spec iceberg.UnboundPartitionSpec
+	data := []byte(`{"spec-id":1,"fields":[{"field-id":1000,"name":"removed","transform":"void"}]}`)
+	require.NoError(t, json.Unmarshal(data, &spec))
+	encoded, err := json.Marshal(spec)
+	require.NoError(t, err)
+	assert.JSONEq(t, string(data), string(encoded))
+}
+
 func TestUnboundPartitionSpecJSONRoundTripsMultiSourceUnknownTransform(t *testing.T) {
 	data := []byte(`{"spec-id":1,"fields":[{"source-ids":[1,2],"field-id":1000,"name":"combined","transform":"custom_two_arg"}]}`)
 
