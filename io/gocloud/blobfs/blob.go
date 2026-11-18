@@ -384,7 +384,7 @@ func (bfs *fileIO) newWriter(ctx context.Context, path string, overwrite bool, o
 			return nil, &fs.PathError{Op: "new writer", Path: path, Err: fs.ErrInvalid}
 		}
 	}
-	bw, err := bfs.Bucket.NewWriter(ctx, key, opts)
+	bw, err := bfs.NewWriter(ctx, key, opts)
 	if err != nil {
 		return nil, err
 	}
