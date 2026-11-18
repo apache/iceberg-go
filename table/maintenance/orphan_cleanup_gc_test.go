@@ -96,6 +96,30 @@ func TestOrphanCleanupPlanRejectsExecutionAfterGCIsDisabled(t *testing.T) {
 	require.NoError(t, file.Close())
 }
 
+func TestOrphanCleanupRejectsGCDisabledInCatalog(t *testing.T) {
+	ctx := t.Context()
+	fs := iceio.NewMemFS()
+	tbl, orphan := orphanCleanupGCTestTable(t, fs, nil)
+	plan, err := PlanOrphanFiles(ctx, tbl, WithCleanupFilesOlderThan(0))
+	require.NoError(t, err)
+	require.Equal(t, []string{orphan}, plan.Files())
+
+	txn := tbl.NewTransaction()
+	require.NoError(t, txn.SetProperties(iceberg.Properties{table.GCEnabledKey: "false"}))
+	_, err = txn.Commit(ctx)
+	require.NoError(t, err)
+	require.True(t, table.IsGCEnabled(tbl.Properties()), "the input table still has the old metadata")
+
+	_, err = ExecuteOrphanCleanup(ctx, tbl, plan)
+	require.ErrorContains(t, err, "GC is disabled")
+	_, err = DeleteOrphanFiles(ctx, tbl, WithCleanupFilesOlderThan(0))
+	require.ErrorContains(t, err, "GC is disabled")
+
+	file, err := fs.Open(ctx, orphan)
+	require.NoError(t, err)
+	require.NoError(t, file.Close())
+}
+
 func TestOrphanCleanupChecksGCBeforeDeletingOrphans(t *testing.T) {
 	meta, err := table.NewMetadata(iceberg.NewSchema(0), nil, table.UnsortedSortOrder,
 		"mem://gc/table", iceberg.Properties{table.GCEnabledKey: "false"})

@@ -114,8 +114,9 @@ func WithCleanupLocation(location string) OrphanCleanupOption {
 }
 
 // WithCleanupFilesOlderThan only considers files last modified before now minus
-// duration, so recently written files are never treated as orphans. Defaults to
-// 72h. The duration must be non-negative.
+// duration. The duration must be non-negative and defaults to 72 hours. Keep
+// it longer than the longest expected write so cleanup does not delete files
+// from commits that are still in flight.
 func WithCleanupFilesOlderThan(duration time.Duration) OrphanCleanupOption {
 	return func(cfg *orphanCleanupConfig) {
 		rejectPlanOption(cfg, "WithCleanupFilesOlderThan")
@@ -330,13 +331,12 @@ func rejectPlanOption(cfg *orphanCleanupConfig, name string) {
 //
 // The table filesystem must implement io.ListableIO so orphan cleanup can
 // fully enumerate candidate files before deciding what is safe to delete.
-// Before deleting, cleanup refreshes metadata and rejects a plan that was
-// already stale at that point. This is a best-effort check: it does not prevent
-// a concurrent commit after refresh. Keep the age threshold longer than the
-// longest expected write; the default is 72 hours. Actual deletion requires a
-// catalog-backed table so cleanup can refresh metadata; dry runs do not.
-// If execution returns ErrStaleOrphanCleanupPlan, refresh or reload tbl before
-// retrying so the next plan uses current metadata.
+// A non-dry run requires a catalog-backed table. It refreshes a copy of tbl
+// before planning and refreshes again to verify that the plan still matches
+// the table before deleting files. Use an age threshold longer than the
+// longest expected write (default 72 hours) to protect writes that commit
+// after the second refresh.
+// Dry runs plan from the supplied table metadata.
 // Orphan cleanup, including dry runs, is rejected when garbage collection is disabled via gc.enabled.
 func DeleteOrphanFiles(ctx context.Context, tbl *table.Table, opts ...OrphanCleanupOption) (OrphanCleanupResult, error) {
 	cfg := newOrphanCleanupConfig(opts...)
@@ -345,6 +345,14 @@ func DeleteOrphanFiles(ctx context.Context, tbl *table.Table, opts ...OrphanClea
 	}
 	if err := validateOrphanCleanupGC(tbl); err != nil {
 		return OrphanCleanupResult{}, err
+	}
+
+	if !cfg.dryRun {
+		refreshed, err := refreshOrphanCleanupTable(ctx, tbl)
+		if err != nil {
+			return OrphanCleanupResult{}, err
+		}
+		tbl = refreshed
 	}
 
 	plan, err := planOrphanFiles(ctx, tbl, cfg)
@@ -404,11 +412,8 @@ func executeOrphanCleanupPlan(ctx context.Context, tbl *table.Table, plan Orphan
 		return plan.result(), nil
 	}
 
-	refreshed := *tbl
-	if err := refreshed.Refresh(ctx); err != nil {
-		return OrphanCleanupResult{}, fmt.Errorf("failed to refresh table before orphan cleanup: %w", err)
-	}
-	if err := validateOrphanCleanupGC(&refreshed); err != nil {
+	refreshed, err := refreshOrphanCleanupTable(ctx, tbl)
+	if err != nil {
 		return OrphanCleanupResult{}, err
 	}
 	if plan.metadataLocation == "" {
@@ -430,7 +435,19 @@ func executeOrphanCleanupPlan(ctx context.Context, tbl *table.Table, plan Orphan
 		return OrphanCleanupResult{}, fmt.Errorf("%w: table metadata changed without a UUID", ErrStaleOrphanCleanupPlan)
 	}
 
-	return executeOrphanCleanup(ctx, &refreshed, plan, cfg)
+	return executeOrphanCleanup(ctx, refreshed, plan, cfg)
+}
+
+func refreshOrphanCleanupTable(ctx context.Context, tbl *table.Table) (*table.Table, error) {
+	refreshed := *tbl
+	if err := refreshed.Refresh(ctx); err != nil {
+		return nil, fmt.Errorf("failed to refresh table before orphan cleanup: %w", err)
+	}
+	if err := validateOrphanCleanupGC(&refreshed); err != nil {
+		return nil, err
+	}
+
+	return &refreshed, nil
 }
 
 func validateOrphanCleanupGC(tbl *table.Table) error {
