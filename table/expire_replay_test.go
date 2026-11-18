@@ -208,26 +208,32 @@ func TestFailedRefsOnlyExpirationLeavesAppendUsable(t *testing.T) {
 	fs, cat, tbl := newExpireReplayTable(t, nil)
 	tbl.snapshotHistoryRefsOnly = true
 	tx := tbl.NewTransaction()
+	require.NoError(t, tx.SetProperties(iceberg.Properties{"before-expiration": "kept"}))
+	updatesBefore := slices.Clone(tx.meta.updates)
+	reqsBefore := slices.Clone(tx.reqs)
+	expirationsBefore := len(tx.expirations)
 
 	err := tx.ExpireSnapshots(WithOlderThan(0), WithPostCommit(false))
 	require.ErrorIs(t, err, ErrInvalidOperation)
 	require.ErrorIs(t, err, errSnapshotHistoryIncompleteForExpiration)
-	staged, err := tx.StagedTable()
-	require.NoError(t, err)
-	require.Empty(t, staged.Metadata().Snapshots(), "rejected expiration must not stage updates")
+	require.Equal(t, updatesBefore, tx.meta.updates, "rejected expiration must not add updates")
+	require.Equal(t, reqsBefore, tx.reqs, "rejected expiration must not add requirements")
+	require.Len(t, tx.expirations, expirationsBefore, "rejected expiration must not add replay records")
 
 	stageFiles(t, tx, "after-rejected-expiration")
 	committed, err := tx.Commit(t.Context())
 	require.NoError(t, err)
 	require.Len(t, committed.Metadata().Snapshots(), 1)
+	require.Equal(t, "kept", committed.Properties()["before-expiration"])
 	require.Equal(t, []string{"after-rejected-expiration"},
 		branchFiles(t, fs, committed.Metadata(), MainBranch))
 	require.Equal(t, int32(1), cat.attempts.Load(), "append should commit once")
 }
 
-func TestExpireReplayRejectsRefsOnlyHistoryAfterRetry(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		fs, inner, tbl := newExpireReplayTable(t, nil)
+func TestExpireReplayRejectsRefsOnlyHistoryOnRetryOrResume(t *testing.T) {
+	stage := func(t *testing.T, numRetries string) (*reqValidatingCatalog, *refsOnlyReloadCatalog, *Transaction, [4]int64, int64) {
+		t.Helper()
+		fs, inner, tbl := newExpireReplayTable(t, iceberg.Properties{CommitNumRetriesKey: numRetries})
 		var ids [4]int64
 		for i, name := range []string{"s1", "s2", "s3", "s4"} {
 			tbl, ids[i] = appendOnBranch(t, tbl, MainBranch, name)
@@ -242,65 +248,86 @@ func TestExpireReplayRejectsRefsOnlyHistoryAfterRetry(t *testing.T) {
 		))
 		staged, err := tx.StagedTable()
 		require.NoError(t, err)
-		assert.Nil(t, staged.Metadata().SnapshotByName("expired-tag"))
-		assert.Equal(t, sortedIDs(ids[:]...), survivors(staged.Metadata()))
-
-		peer := peerAppend(t, fs, inner, MainBranch, "s5")
-		partial := refsOnlySnapshotMetadata(t, inner.metadata, ids[0], peer)
-		assert.Equal(t, sortedIDs(ids[0], peer), survivors(partial))
-		cat.partial = partial
-		attemptsBefore := inner.attempts.Load()
-
-		_, err = tx.Commit(t.Context())
-		require.ErrorIs(t, err, ErrTransactionUnusable)
-		require.ErrorIs(t, err, errSnapshotHistoryIncompleteForExpiration)
-		assert.Equal(t, 1, cat.loads)
-		assert.Equal(t, attemptsBefore+1, inner.attempts.Load(), "retry must stop before resubmitting expiration")
-		assert.Equal(t, sortedIDs(ids[0], ids[1], ids[2], ids[3], peer), survivors(inner.metadata))
-		assert.NotNil(t, inner.metadata.SnapshotByID(ids[0]), "retained history must remain in catalog metadata")
-		assert.NotNil(t, inner.metadata.SnapshotByName("expired-tag"), "failed expiry must not remove the tag")
-		assert.Equal(t, peer, refHead(t, inner.metadata, MainBranch))
-	})
-}
-
-func TestExpireReplayRejectsRefsOnlyHistoryOnResume(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		fs, inner, tbl := newExpireReplayTable(t, iceberg.Properties{CommitNumRetriesKey: "0"})
-		var ids [4]int64
-		for i, name := range []string{"s1", "s2", "s3", "s4"} {
-			tbl, ids[i] = appendOnBranch(t, tbl, MainBranch, name)
-		}
-		peerUpdate(t, inner, NewSetSnapshotRefUpdate("expired-tag", ids[0], TagRef, time.Hour.Milliseconds(), 0, 0))
-		time.Sleep(2 * time.Hour)
-
-		cat := &refsOnlyReloadCatalog{reqValidatingCatalog: inner}
-		tx := newOCCTable(t, inner.metadata, fs, cat).NewTransaction()
-		require.NoError(t, tx.ExpireSnapshots(
-			WithOlderThan(0), WithRetainLast(5), WithPostCommit(false),
-		))
-		staged, err := tx.StagedTable()
-		require.NoError(t, err)
-		assert.Nil(t, staged.Metadata().SnapshotByName("expired-tag"))
+		require.Nil(t, staged.Metadata().SnapshotByName("expired-tag"))
+		require.Equal(t, sortedIDs(ids[:]...), survivors(staged.Metadata()))
 
 		peer := peerAppend(t, fs, inner, MainBranch, "s5")
 		cat.partial = refsOnlySnapshotMetadata(t, inner.metadata, ids[0], peer)
+		require.Equal(t, sortedIDs(ids[0], peer), survivors(cat.partial))
+
+		return inner, cat, tx, ids, peer
+	}
+
+	for _, tt := range []struct {
+		name       string
+		numRetries string
+		resume     bool
+	}{
+		{name: "retry", numRetries: "3"},
+		{name: "resume", numRetries: "0", resume: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				inner, cat, tx, ids, peer := stage(t, tt.numRetries)
+				attemptsBefore := inner.attempts.Load()
+
+				if tt.resume {
+					_, err := tx.Commit(t.Context())
+					require.ErrorIs(t, err, ErrCommitFailed)
+					require.NotErrorIs(t, err, ErrTransactionUnusable)
+					require.Zero(t, cat.loads, "the first failed attempt must not refresh")
+					require.Equal(t, attemptsBefore+1, inner.attempts.Load())
+				}
+
+				_, err := tx.Commit(t.Context())
+				require.ErrorIs(t, err, ErrTransactionUnusable)
+				require.ErrorIs(t, err, errSnapshotHistoryIncompleteForExpiration)
+				require.Equal(t, 1, cat.loads)
+				require.Equal(t, attemptsBefore+1, inner.attempts.Load(),
+					"refresh must stop before resubmitting expiration")
+				require.Equal(t, sortedIDs(ids[0], ids[1], ids[2], ids[3], peer), survivors(inner.metadata))
+				require.NotNil(t, inner.metadata.SnapshotByID(ids[0]),
+					"retained history must remain in catalog metadata")
+				require.NotNil(t, inner.metadata.SnapshotByName("expired-tag"),
+					"failed expiration must not remove the tag")
+				require.Equal(t, peer, refHead(t, inner.metadata, MainBranch))
+			})
+		})
+	}
+}
+
+// A no-op expiration still needs complete history when a retry replans it.
+// The absence of planned removals must not bypass the refs-only guard.
+func TestExpireReplayRejectsRefsOnlyHistoryWithNoOpExpiration(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		fs, inner, tbl := newExpireReplayTable(t, nil)
+		tbl, s1 := appendOnBranch(t, tbl, MainBranch, "s1")
+		tbl, s2 := appendOnBranch(t, tbl, MainBranch, "s2")
+
+		cat := &refsOnlyReloadCatalog{reqValidatingCatalog: inner}
+		tx := newOCCTable(t, inner.metadata, fs, cat).NewTransaction()
+		require.NoError(t, tx.ExpireSnapshots(
+			WithOlderThan(0), WithRetainLast(5), WithPostCommit(false),
+		))
+		require.Len(t, tx.expirations, 1, "no-op expiration must still be recorded")
+		require.Zero(t, tx.expirations[0].count, "expiration must stage no updates")
+		stageFiles(t, tx, "ours")
+
+		peer := peerAppend(t, fs, inner, MainBranch, "peer")
+		cat.partial = refsOnlySnapshotMetadata(t, inner.metadata, peer)
+		require.Equal(t, []int64{peer}, survivors(cat.partial))
 		attemptsBefore := inner.attempts.Load()
 
-		_, err = tx.Commit(t.Context())
-		require.ErrorIs(t, err, ErrCommitFailed)
-		require.NotErrorIs(t, err, ErrTransactionUnusable)
-		assert.Equal(t, 0, cat.loads, "first attempt must not refresh")
-		assert.Equal(t, attemptsBefore+1, inner.attempts.Load())
-
-		_, err = tx.Commit(t.Context())
+		_, err := tx.Commit(t.Context())
 		require.ErrorIs(t, err, ErrTransactionUnusable)
 		require.ErrorIs(t, err, errSnapshotHistoryIncompleteForExpiration)
-		assert.Equal(t, 1, cat.loads)
-		assert.Equal(t, attemptsBefore+1, inner.attempts.Load(), "resume must stop before resubmitting expiration")
-		assert.Equal(t, sortedIDs(ids[0], ids[1], ids[2], ids[3], peer), survivors(inner.metadata))
-		assert.NotNil(t, inner.metadata.SnapshotByID(ids[0]))
-		assert.NotNil(t, inner.metadata.SnapshotByName("expired-tag"))
-		assert.Equal(t, peer, refHead(t, inner.metadata, MainBranch))
+		require.Equal(t, 1, cat.loads)
+		require.Equal(t, attemptsBefore+1, inner.attempts.Load(),
+			"failed retry must not resubmit the append or expiration")
+		require.Equal(t, sortedIDs(s1, s2, peer), survivors(inner.metadata))
+		require.Equal(t, peer, refHead(t, inner.metadata, MainBranch))
+		require.Equal(t, []string{"peer", "s1", "s2"},
+			branchFiles(t, fs, inner.metadata, MainBranch))
 	})
 }
 
