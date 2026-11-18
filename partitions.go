@@ -80,6 +80,13 @@ func (p PartitionField) FirstSourceID() int {
 	return p.SourceIDs[0]
 }
 
+// HasMultipleSourcesForBuiltInTransform reports whether this field has
+// multiple source IDs and uses a built-in transform. Unknown transforms may
+// have multiple sources.
+func (p PartitionField) HasMultipleSourcesForBuiltInTransform() bool {
+	return hasMultipleSourcesForBuiltInTransform(p.Transform, p.SourceIDs)
+}
+
 // EscapedName returns the URL-escaped version of the partition field name.
 // initialize() pre-populates escapedName for specs built through a constructor.
 func (p *PartitionField) EscapedName() string {
@@ -88,6 +95,22 @@ func (p *PartitionField) EscapedName() string {
 	}
 
 	return url.QueryEscape(p.Name)
+}
+
+func validatePartitionFieldSourceCount(transform Transform, sourceIDs []int) error {
+	if len(sourceIDs) == 0 {
+		return fmt.Errorf("%w: partition field requires a source ID", ErrInvalidPartitionSpec)
+	}
+	if hasMultipleSourcesForBuiltInTransform(transform, sourceIDs) {
+		return fmt.Errorf("%w: built-in partition transform %s requires exactly one source ID, got %d",
+			ErrInvalidPartitionSpec, transform, len(sourceIDs))
+	}
+
+	return nil
+}
+
+func hasMultipleSourcesForBuiltInTransform(transform Transform, sourceIDs []int) bool {
+	return len(sourceIDs) > 1 && isBuiltInPartitionTransform(transform)
 }
 
 func (p PartitionField) MarshalJSON() ([]byte, error) {
@@ -212,6 +235,16 @@ func (p *PartitionField) unmarshal(b []byte, binding specBinding) error {
 		// which carry no source column to validate.
 		next.SourceIDs = []int{0}
 	}
+	// Unbound specs are new request payloads (create-table and add-spec), so
+	// reject invalid built-in transform arity before they reach the server or
+	// metadata builder. Bound specs may be historical metadata: keep reading
+	// those fields so an old malformed spec does not make the whole table
+	// unreadable.
+	if binding == unboundSpec {
+		if err := validatePartitionFieldSourceCount(next.Transform, next.SourceIDs); err != nil {
+			return err
+		}
+	}
 	if hasSourceID || hasSourceIDs {
 		for _, sourceID := range next.SourceIDs {
 			if err := validatePartitionSourceID(sourceID, binding); err != nil {
@@ -284,6 +317,19 @@ func (u *UnboundPartitionSpec) UnmarshalJSON(b []byte) error {
 	return u.unmarshal(b, unboundSpec)
 }
 
+// MarshalJSON validates an unbound spec before writing it as a new request
+// payload. PartitionSpec JSON remains lenient so historical metadata can be
+// read and serialized even when it contains an invalid built-in field.
+func (u UnboundPartitionSpec) MarshalJSON() ([]byte, error) {
+	for _, field := range u.fields {
+		if err := validatePartitionFieldSourceCount(field.Transform, field.SourceIDs); err != nil {
+			return nil, err
+		}
+	}
+
+	return u.PartitionSpec.MarshalJSON()
+}
+
 type PartitionOption func(*PartitionSpec) error
 
 // BindToSchema creates a new PartitionSpec by copying the fields from the
@@ -323,7 +369,7 @@ func (p *PartitionSpec) BindToSchema(schema *Schema, lastPartitionID *int, newSp
 		return PartitionSpec{}, err
 	}
 	if err = freshSpec.assignPartitionFieldIds(lastPartitionID); err != nil {
-		return PartitionSpec{}, err
+		return PartitionSpec{}, fmt.Errorf("%w: %w", ErrInvalidPartitionSpec, err)
 	}
 
 	return freshSpec, err
