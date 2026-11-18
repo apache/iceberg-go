@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-package table
+package internal
 
 import (
 	"slices"
@@ -23,57 +23,57 @@ import (
 	"github.com/apache/iceberg-go"
 )
 
-type partitionAggregate struct {
-	specID              int32
-	partition           map[int]any
-	dataRecordCount     int64
-	dataFileCount       int32
-	dataFileSize        int64
-	positionDeleteCount int64
-	positionDeleteFiles int32
-	equalityDeleteCount int64
-	equalityDeleteFiles int32
-	lastUpdatedAt       *int64
-	lastUpdatedSnapshot *int64
-	orderingKey         string
+type PartitionAggregate struct {
+	SpecID              int32
+	Partition           map[int]any
+	DataRecordCount     int64
+	DataFileCount       int32
+	DataFileSize        int64
+	PositionDeleteCount int64
+	PositionDeleteFiles int32
+	EqualityDeleteCount int64
+	EqualityDeleteFiles int32
+	LastUpdatedAt       *int64
+	LastUpdatedSnapshot *int64
+	OrderingKey         string
 	// Persisted partition statistics distinguish DVs from classic delete files
 	// and expose an exact live-row total only when metadata proves it.
-	deletionVectorCount int32
-	totalRecordCount    *int64
+	DeletionVectorCount int32
+	TotalRecordCount    *int64
 	// Partition statistics store timestamps in milliseconds, while the inspect
 	// Arrow output above uses microseconds.
-	statisticsUpdatedAt       *int64
-	statisticsUpdatedSnapshot *int64
+	StatisticsUpdatedAt       *int64
+	StatisticsUpdatedSnapshot *int64
 }
 
-type partitionAggregateTree struct {
-	children       map[any]*partitionAggregateTree
-	binaryChildren map[string]*partitionAggregateTree
-	aggregate      *partitionAggregate
+type PartitionAggregateTree struct {
+	children       map[any]*PartitionAggregateTree
+	binaryChildren map[string]*PartitionAggregateTree
+	aggregate      *PartitionAggregate
 }
 
-func newPartitionAggregateTree() *partitionAggregateTree {
-	return &partitionAggregateTree{}
+func NewPartitionAggregateTree() *PartitionAggregateTree {
+	return &PartitionAggregateTree{}
 }
 
 // child uses a typed map for binary values to avoid interface-backed keys
 // during repeated lookups. Other values retain their existing key types.
-func (t *partitionAggregateTree) child(value any) (*partitionAggregateTree, bool) {
+func (t *PartitionAggregateTree) child(value any) (*PartitionAggregateTree, bool) {
 	if binary, ok := value.([]byte); ok {
 		child, found := t.binaryChildren[string(binary)]
 
 		return child, found
 	}
 
-	child, found := t.children[comparablePartitionKey(value)]
+	child, found := t.children[ComparablePartitionKey(value)]
 
 	return child, found
 }
 
-func (t *partitionAggregateTree) setChild(value any, child *partitionAggregateTree) {
+func (t *PartitionAggregateTree) setChild(value any, child *PartitionAggregateTree) {
 	if binary, ok := value.([]byte); ok {
 		if t.binaryChildren == nil {
-			t.binaryChildren = make(map[string]*partitionAggregateTree)
+			t.binaryChildren = make(map[string]*PartitionAggregateTree)
 		}
 		// A stored string key owns its bytes even if the input buffer changes.
 		t.binaryChildren[string(binary)] = child
@@ -82,12 +82,12 @@ func (t *partitionAggregateTree) setChild(value any, child *partitionAggregateTr
 	}
 
 	if t.children == nil {
-		t.children = make(map[any]*partitionAggregateTree)
+		t.children = make(map[any]*PartitionAggregateTree)
 	}
-	t.children[comparablePartitionKey(value)] = child
+	t.children[ComparablePartitionKey(value)] = child
 }
 
-func (t *partitionAggregateTree) lookup(record partitionRecord) *partitionAggregate {
+func (t *PartitionAggregateTree) Lookup(record PartitionRecord) *PartitionAggregate {
 	node := t
 	for _, value := range record {
 		child, ok := node.child(value)
@@ -100,10 +100,10 @@ func (t *partitionAggregateTree) lookup(record partitionRecord) *partitionAggreg
 	return node.aggregate
 }
 
-func (t *partitionAggregateTree) lookupPartition(
+func (t *PartitionAggregateTree) LookupPartition(
 	partition map[int]any,
 	partitionType *iceberg.StructType,
-) *partitionAggregate {
+) *PartitionAggregate {
 	node := t
 	for i := range partitionType.NumFields() {
 		child, ok := node.child(partition[partitionType.Field(i).ID])
@@ -116,15 +116,15 @@ func (t *partitionAggregateTree) lookupPartition(
 	return node.aggregate
 }
 
-// insert walks the positional record, while lookupPartition walks partition
+// Insert walks the positional record, while LookupPartition walks partition
 // field IDs. Build records with the same partition type so their field order
 // stays aligned.
-func (t *partitionAggregateTree) insert(record partitionRecord, aggregate *partitionAggregate) {
+func (t *PartitionAggregateTree) Insert(record PartitionRecord, aggregate *PartitionAggregate) {
 	node := t
 	for _, value := range record {
 		child, ok := node.child(value)
 		if !ok {
-			child = newPartitionAggregateTree()
+			child = NewPartitionAggregateTree()
 			node.setChild(value, child)
 		}
 		node = child
@@ -132,7 +132,7 @@ func (t *partitionAggregateTree) insert(record partitionRecord, aggregate *parti
 	node.aggregate = aggregate
 }
 
-func coercePartition(values map[int]any, partitionType *iceberg.StructType) map[int]any {
+func CoercePartition(values map[int]any, partitionType *iceberg.StructType) map[int]any {
 	if partitionType == nil || partitionType.NumFields() == 0 {
 		return nil
 	}
@@ -148,7 +148,7 @@ func coercePartition(values map[int]any, partitionType *iceberg.StructType) map[
 	return coerced
 }
 
-func clonePartition(partition map[int]any) map[int]any {
+func ClonePartition(partition map[int]any) map[int]any {
 	if partition == nil {
 		return nil
 	}

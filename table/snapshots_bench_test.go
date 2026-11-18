@@ -23,6 +23,7 @@ import (
 	"testing"
 
 	"github.com/apache/iceberg-go"
+	tblutils "github.com/apache/iceberg-go/table/internal"
 )
 
 var partitionSummaryBenchmarkResult string
@@ -85,7 +86,7 @@ func BenchmarkSnapshotSummaryPartitionPath(b *testing.B) {
 				b.ReportAllocs()
 				for b.Loop() {
 					snapshotSummaryPathBenchmarkResult = spec.PartitionToPath(
-						newPartitionRecord(partition, spec.PartitionType(schema)), schema)
+						tblutils.NewPartitionRecord(partition, spec.PartitionType(schema)), schema)
 				}
 			})
 
@@ -128,7 +129,7 @@ func BenchmarkSnapshotSummaryPartitionPathEscaped(b *testing.B) {
 	} {
 		b.Run(tc.name, func(b *testing.B) {
 			partition := map[int]any{1000: tc.value}
-			want := spec.PartitionToPath(newPartitionRecord(partition, spec.PartitionType(schema)), schema)
+			want := spec.PartitionToPath(tblutils.NewPartitionRecord(partition, spec.PartitionType(schema)), schema)
 			var collector SnapshotSummaryCollector
 			if got := collector.partitionPath(partition, schema, spec); got != want {
 				b.Fatalf("partition path changed: got %q, want %q", got, want)
@@ -138,7 +139,7 @@ func BenchmarkSnapshotSummaryPartitionPathEscaped(b *testing.B) {
 				b.ReportAllocs()
 				for b.Loop() {
 					snapshotSummaryPathBenchmarkResult = spec.PartitionToPath(
-						newPartitionRecord(partition, spec.PartitionType(schema)), schema)
+						tblutils.NewPartitionRecord(partition, spec.PartitionType(schema)), schema)
 				}
 			})
 

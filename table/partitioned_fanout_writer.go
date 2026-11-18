@@ -36,6 +36,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/extensions"
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/internal"
+	tblutils "github.com/apache/iceberg-go/table/internal"
 	"github.com/google/uuid"
 	"golang.org/x/sync/errgroup"
 )
@@ -80,48 +81,11 @@ type partitionExtractionPlan struct {
 	pathPlan     partitionPathPlan
 }
 
-type (
-	binaryPartitionKey  string
-	float32PartitionKey uint32
-	float64PartitionKey uint64
-)
-
-const (
-	// Canonical NaN payloads make all NaNs of the same width compare equal.
-	// The width-specific key types preserve float width, while using raw bits
-	// intentionally keeps -0.0 and +0.0 distinct.
-	canonicalFloat32NaNBits uint32 = 0x7fc00000
-	canonicalFloat64NaNBits uint64 = 0x7ff8000000000000
-)
-
-func comparablePartitionKey(value any) any {
-	switch value := value.(type) {
-	case []byte:
-		return binaryPartitionKey(value)
-	case float32:
-		rawBits := math.Float32bits(value)
-		if math.IsNaN(float64(value)) {
-			rawBits = canonicalFloat32NaNBits
-		}
-
-		return float32PartitionKey(rawBits)
-	case float64:
-		rawBits := math.Float64bits(value)
-		if math.IsNaN(value) {
-			rawBits = canonicalFloat64NaNBits
-		}
-
-		return float64PartitionKey(rawBits)
-	}
-
-	return value
-}
-
 func partitionValuesEqual(left, right any) bool {
-	// Supported partition values are primitive literals; []byte is converted to
-	// a string key and float values are converted to comparable width-aware keys
-	// above. The default branch preserves comparable scalar values.
-	return comparablePartitionKey(left) == comparablePartitionKey(right)
+	// Supported partition values are primitive literals. ComparablePartitionKey
+	// converts []byte to a string key and float values to comparable
+	// width-aware keys, and preserves other comparable scalar values.
+	return tblutils.ComparablePartitionKey(left) == tblutils.ComparablePartitionKey(right)
 }
 
 func partitionRecordsEqual(left, right partitionRecord) bool {
@@ -762,7 +726,7 @@ func (n *partitionMapNode) child(part any) (any, bool) {
 
 		return child, found
 	default:
-		child, found := n.children[comparablePartitionKey(part)]
+		child, found := n.children[tblutils.ComparablePartitionKey(part)]
 
 		return child, found
 	}
@@ -794,7 +758,7 @@ func (n *partitionMapNode) setChild(part, child any) {
 		if n.children == nil {
 			n.children = make(map[any]any)
 		}
-		n.children[comparablePartitionKey(part)] = child
+		n.children[tblutils.ComparablePartitionKey(part)] = child
 	}
 }
 

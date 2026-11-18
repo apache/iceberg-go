@@ -55,7 +55,7 @@ import (
 
 db, err := sql.Open(sqliteshim.ShimName, "file:catalog.db")
 // handle err
-cat, err := sqlcat.NewCatalog("default", db, sqlcat.SQLite, iceberg.Properties{
+cat, err := sqlcat.NewCatalog(context.Background(), "default", db, sqlcat.SQLite, iceberg.Properties{
     "warehouse": "file:///tmp/warehouse",
 })
 ```
@@ -81,7 +81,7 @@ import (
     "github.com/apache/iceberg-go/catalog/hive"
 )
 
-cat, err := hive.NewCatalog(iceberg.Properties{},
+cat, err := hive.NewCatalog(context.Background(), iceberg.Properties{},
     hive.WithURI("thrift://localhost:9083"),
     hive.WithWarehouse("s3://my-bucket/warehouse"))
 ```
