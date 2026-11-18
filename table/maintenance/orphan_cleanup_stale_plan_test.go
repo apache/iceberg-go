@@ -19,6 +19,7 @@ package maintenance
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 
@@ -53,6 +54,14 @@ func TestExecuteOrphanCleanupRejectsStalePlanWhenFileBecomesLive(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []string{dataPath}, plan.Files())
 
+	loadErr := errors.New("catalog unavailable")
+	catalog.beforeLoad = func() error { return loadErr }
+	_, err = ExecuteOrphanCleanup(ctx, tbl, plan)
+	require.ErrorIs(t, err, loadErr)
+	file, err := fs.Open(ctx, dataPath)
+	require.NoError(t, err, "failed refresh must leave the plan's files intact")
+	require.NoError(t, file.Close())
+
 	fileBuilder, err := iceberg.NewDataFileBuilder(
 		*iceberg.UnpartitionedSpec,
 		iceberg.EntryContentData,
@@ -74,7 +83,7 @@ func TestExecuteOrphanCleanupRejectsStalePlanWhenFileBecomesLive(t *testing.T) {
 	_, err = ExecuteOrphanCleanup(ctx, tbl, plan)
 	require.ErrorIs(t, err, ErrStaleOrphanCleanupPlan)
 
-	file, err := fs.Open(ctx, dataPath)
+	file, err = fs.Open(ctx, dataPath)
 	require.NoError(t, err, "a file committed after planning must not be deleted")
 	require.NoError(t, file.Close())
 
