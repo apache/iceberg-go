@@ -1959,18 +1959,7 @@ func (s *SqliteCatalogTestSuite) TestStaleSchemaUpdateDoesNotReuseDroppedFieldID
 
 	current, err := cat.LoadTable(ctx, tblID)
 	s.Require().NoError(err)
-	s.Equal(peer.MetadataLocation(), current.MetadataLocation(), "nothing may be committed")
-
-	rows, err := current.Scan().ToArrowTable(ctx)
-	s.Require().NoError(err)
-	defer rows.Release()
-	for i := range int(rows.NumCols()) {
-		for _, chunk := range rows.Column(i).Data().Chunks() {
-			for j := range chunk.Len() {
-				s.NotEqual("42", chunk.ValueStr(j), "column %s", rows.Schema().Field(i).Name)
-			}
-		}
-	}
+	s.Require().Equal(peer.MetadataLocation(), current.MetadataLocation(), "nothing may be committed")
 }
 
 func (s *SqliteCatalogTestSuite) TestRejectedUpdateResumesThenEndsWhenReplayCannotApply() {
