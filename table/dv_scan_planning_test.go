@@ -346,6 +346,25 @@ func TestMatchDVToDataValidatesPartition(t *testing.T) {
 			wantError:     true,
 		},
 		{
+			name:          "different field IDs with the same value",
+			dataPartition: map[int]any{1000: int32(4)},
+			dvPartition:   map[int]any{1001: int32(4)},
+			dataSeq:       4,
+			wantError:     true,
+		},
+		{
+			name:          "matching null partition values",
+			dataPartition: map[int]any{1000: nil},
+			dvPartition:   map[int]any{1000: nil},
+			dataSeq:       4,
+		},
+		{
+			name:          "missing null partition field",
+			dataPartition: map[int]any{1000: nil},
+			dataSeq:       4,
+			wantError:     true,
+		},
+		{
 			name:      "different spec IDs",
 			dvSpecID:  1,
 			dataSeq:   4,

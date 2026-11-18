@@ -942,6 +942,30 @@ func TestIncrementalChangelogScanPlansDeletionVectors(t *testing.T) {
 	require.Empty(t, rows.ScanTask().DeletionVectorFiles)
 }
 
+func TestIncrementalChangelogScanRejectsMismatchedDeletionVectorPartition(t *testing.T) {
+	spec := partitionedSpec()
+	data := newTestDataFile(t, spec, "mem://default/changelog-dv-mismatch/data.parquet",
+		map[int]any{1000: int32(1)})
+	dv := newChangelogDeletionVector(t, spec, "mem://default/changelog-dv-mismatch/dv.puffin",
+		data.FilePath(), map[int]any{1000: int32(2)})
+	tbl := writeChangelogScanTable(t, "changelog-dv-mismatch", []changelogScanStep{
+		{
+			operation: OpAppend,
+			data:      []iceberg.ManifestEntry{changelogManifestEntry(iceberg.EntryStatusADDED, 1, 1, data)},
+		},
+		{
+			operation:       OpDelete,
+			manifestVersion: 3,
+			deletes:         []iceberg.ManifestEntry{changelogManifestEntry(iceberg.EntryStatusADDED, 2, 2, dv)},
+		},
+	})
+
+	_, err := tbl.NewIncrementalChangelogScan().PlanFiles(t.Context())
+	require.ErrorIs(t, err, ErrInvalidMetadata)
+	require.ErrorContains(t, err, dv.FilePath())
+	require.ErrorContains(t, err, data.FilePath())
+}
+
 func TestIncrementalChangelogScanAppliesExistingDeletesToRemovedFiles(t *testing.T) {
 	spec := partitionedSpec()
 	data := newTestDataFile(t, spec, "mem://default/changelog-removed/data.parquet", map[int]any{1000: int32(1)})
