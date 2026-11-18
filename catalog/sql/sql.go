@@ -1865,7 +1865,6 @@ func (c *Catalog) CreateView(ctx context.Context, identifier table.Identifier, v
 		return nil, err
 	}
 
-	// Catalog credentials configure FileIO, but only view properties belong in metadata.
 	ioProps := maps.Clone(c.props)
 	if ioProps == nil {
 		ioProps = make(iceberg.Properties)
