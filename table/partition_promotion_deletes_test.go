@@ -22,8 +22,6 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/apache/arrow-go/v18/arrow/array"
-	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
@@ -57,21 +55,6 @@ func newPromotablePartitionTable(t *testing.T, formatVersion string, partType ic
 	cat := &concurrentTestCatalog{metadata: meta, location: metaLoc, fsF: fsF}
 
 	return table.New(table.Identifier{"db", "partition_promotion"}, meta, metaLoc, fsF, cat)
-}
-
-func appendPromotionRows(t *testing.T, tbl *table.Table, rows string) *table.Table {
-	t.Helper()
-
-	arrowSc, err := table.SchemaToArrowSchema(tbl.Schema(), nil, false, false)
-	require.NoError(t, err)
-	data, err := array.TableFromJSON(memory.DefaultAllocator, arrowSc, []string{rows})
-	require.NoError(t, err)
-	defer data.Release()
-
-	tbl, err = tbl.Append(t.Context(), array.NewTableReader(data, -1), nil)
-	require.NoError(t, err)
-
-	return tbl
 }
 
 func promotePartitionSource(t *testing.T, tbl *table.Table, target iceberg.Type) *table.Table {
@@ -112,7 +95,7 @@ func TestMergeOnReadDeleteAfterPartitionSourcePromotion(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			tbl := newPromotablePartitionTable(t, "2", tt.from)
-			tbl = appendPromotionRows(t, tbl, tt.rows)
+			tbl = appendRows(t, tbl, tt.rows)
 			tbl = promotePartitionSource(t, tbl, tt.to)
 
 			tbl, err := tbl.Delete(t.Context(), iceberg.EqualTo(iceberg.Reference("id"), int64(1)), nil)
@@ -131,7 +114,7 @@ func TestEqualityDeletesAfterFloatPartitionSourcePromotion(t *testing.T) {
 	for _, formatVersion := range []string{"2", "3"} {
 		t.Run("v"+formatVersion, func(t *testing.T) {
 			tbl := newPromotablePartitionTable(t, formatVersion, iceberg.PrimitiveTypes.Float32)
-			tbl = appendPromotionRows(t, tbl, `[{"id": 1, "p": 1.5}, {"id": 2, "p": 1.5}, {"id": 3, "p": 4.5}]`)
+			tbl = appendRows(t, tbl, `[{"id": 1, "p": 1.5}, {"id": 2, "p": 1.5}, {"id": 3, "p": 4.5}]`)
 			tbl = promotePartitionSource(t, tbl, iceberg.PrimitiveTypes.Float64)
 
 			arrowSc, err := table.SchemaToArrowSchema(tbl.Schema(), nil, true, false)
