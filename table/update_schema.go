@@ -1119,7 +1119,9 @@ func (u *UpdateSchema) BuildUpdates() ([]Update, []Requirement, error) {
 			updates = append(
 				updates,
 				NewAddSchemaUpdate(newSchema),
-				NewSetCurrentSchemaUpdate(newSchema.ID),
+				// -1 selects the last added schema; the catalog may assign newSchema a different ID.
+				// Java's SchemaUpdate sends the same pair; Java catalogs reject -1 when a concurrent writer already added an equivalent schema.
+				NewSetCurrentSchemaUpdate(-1),
 			)
 		} else {
 			updates = append(updates,
