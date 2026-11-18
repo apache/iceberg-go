@@ -22,7 +22,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"iter"
-	"maps"
 	"runtime"
 	"slices"
 	"strings"
@@ -185,7 +184,7 @@ func (t *Transaction) performMergeOnReadDeletion(ctx context.Context, snapshotPr
 		for _, entry := range withPartialDeletions {
 			partialFiles = append(partialFiles, entry.DataFile())
 		}
-		referenced, err := t.writePositionDeletesForFiles(ctx, fs, updater, dvs, partialFiles, filter, caseSensitive, concurrency, commitUUID)
+		referenced, err := t.writePositionDeletesForFiles(ctx, wfs, updater, dvs, partialFiles, filter, caseSensitive, concurrency, commitUUID)
 		if err != nil {
 			return nil, err
 		}
@@ -903,17 +902,8 @@ func isNullPositionDeletePath(values arrow.TypedArray[string], column arrow.Arra
 // On v3, only files with new positions receive replacement DVs. An unchanged
 // file must retain its prior deletes, and a shared legacy delete file cannot
 // be removed just because one of its targets now has a DV.
-func (t *Transaction) writePositionDeletesForFiles(ctx context.Context, fs io.IO, updater *snapshotProducer, dvs liveDeletionVectors, files []iceberg.DataFile, filter iceberg.BooleanExpression, caseSensitive bool, concurrency int, commitUUID uuid.UUID) ([]string, error) {
+func (t *Transaction) writePositionDeletesForFiles(ctx context.Context, fs io.WriteFileIO, updater *snapshotProducer, dvs liveDeletionVectors, files []iceberg.DataFile, filter iceberg.BooleanExpression, caseSensitive bool, concurrency int, commitUUID uuid.UUID) ([]string, error) {
 	meta, err := t.txnMeta()
-	if err != nil {
-		return nil, err
-	}
-
-	posDeleteRecIter, oldPositionDeletes, err := t.makePositionDeleteRecordsForFilter(ctx, fs, files, filter, caseSensitive, concurrency)
-	if err != nil {
-		return nil, err
-	}
-	wfs, err := requireWriteFileIO(fs)
 	if err != nil {
 		return nil, err
 	}
@@ -921,6 +911,36 @@ func (t *Transaction) writePositionDeletesForFiles(ctx context.Context, fs io.IO
 	partitionContextByFilePath := make(map[string]partitionContext, len(files))
 	for _, df := range files {
 		partitionContextByFilePath[df.FilePath()] = partitionContext{partitionData: df.Partition(), specID: df.SpecID()}
+	}
+
+	// Read existing DVs before starting the record scan so a failed Puffin
+	// read cannot strand scan workers or their Arrow buffers.
+	existingDeletes := make(map[string]*dv.RoaringPositionBitmap, min(len(dvs), len(files)))
+	for _, df := range files {
+		path := df.FilePath()
+		entry, ok := dvs[path]
+		if !ok {
+			continue
+		}
+		bitmap, err := dv.ReadDV(ctx, fs, entry.DataFile())
+		if err != nil {
+			return nil, fmt.Errorf("failed to read existing deletion vector for %s: %w", path, err)
+		}
+		existingDeletes[path] = bitmap
+	}
+	posDeleteRecIter, oldPositionDeletes, err := t.makePositionDeleteRecordsForFilter(ctx, fs, files, filter, caseSensitive, concurrency)
+	if err != nil {
+		return nil, err
+	}
+	// An upgraded table may still have v2 position deletes that need to be
+	// carried into the first DV. The writer uses a seed only after finding
+	// at least one position that it does not already cover.
+	for path, bitmap := range oldPositionDeletes.bitmaps {
+		if existing := existingDeletes[path]; existing != nil {
+			existing.Or(bitmap)
+		} else {
+			existingDeletes[path] = bitmap
+		}
 	}
 
 	// A v2 output file can contain deletes for multiple data files and then
@@ -977,41 +997,11 @@ func (t *Transaction) writePositionDeletesForFiles(ctx context.Context, fs io.IO
 		}
 	}
 
-	// V3 tables store deletes as deletion vectors, and the spec allows at most
-	// one DV per data file. A data file being partially deleted may already
-	// carry a DV from an earlier delete; those existing positions are folded
-	// into the new DV (the incremental deletes) and the superseded DVs are
-	// removed. Without this a second delete on the same file would write a
-	// second live DV, corrupting the table (buildDVIndex rejects it).
-	// dvs is empty on v2.
-	// A v2 table upgraded to v3 may still have position deletes. Seed
-	// those positions too: once a DV applies, readers ignore old position
-	// deletes for that data file. The writer only uses a seed after finding
-	// at least one position not already covered by it.
-	existingDVs := make(map[string]iceberg.DataFile)
-	existingDeletes := make(map[string]*dv.RoaringPositionBitmap, len(oldPositionDeletes.bitmaps)+len(dvs))
-	maps.Copy(existingDeletes, oldPositionDeletes.bitmaps)
-	for _, df := range files {
-		entry, ok := dvs[df.FilePath()]
-		if !ok {
-			continue
-		}
-		bitmap, err := dv.ReadDV(ctx, fs, entry.DataFile())
-		if err != nil {
-			return nil, fmt.Errorf("failed to read existing deletion vector for %s: %w", df.FilePath(), err)
-		}
-		if oldPositions, ok := existingDeletes[df.FilePath()]; ok {
-			bitmap.Or(oldPositions)
-		}
-		existingDVs[df.FilePath()] = entry.DataFile()
-		existingDeletes[df.FilePath()] = bitmap
-	}
-
 	posDeleteFiles := positionDeleteRecordsToDataFiles(ctx, meta.loc, meta, partitionContextByFilePath, recordWritingArgs{
 		sc:              PositionalDeleteArrowSchema,
 		itr:             recordsWithPaths,
 		writeUUID:       &commitUUID,
-		fs:              wfs,
+		fs:              fs,
 		existingDeletes: existingDeletes,
 	})
 
@@ -1039,7 +1029,7 @@ func (t *Transaction) writePositionDeletesForFiles(ctx context.Context, fs io.IO
 	}
 
 	// Only replace old deletes for data files that actually received a DV.
-	supersedeDeletesForWrittenDVs(updater, seen, oldPositionDeletes, existingDVs)
+	supersedeDeletesForWrittenDVs(updater, seen, oldPositionDeletes, dvs)
 
 	return referenced, nil
 }
@@ -1048,13 +1038,13 @@ func (t *Transaction) writePositionDeletesForFiles(ctx context.Context, fs io.IO
 // received a replacement DV. File-scoped legacy deletes are folded into the
 // new bitmap; shared position-delete files must remain live because another
 // data file can still need them.
-func supersedeDeletesForWrittenDVs(updater *snapshotProducer, replacedPaths map[string]struct{}, oldPositionDeletes *legacyPositionDeletes, oldDVs map[string]iceberg.DataFile) {
+func supersedeDeletesForWrittenDVs(updater *snapshotProducer, replacedPaths map[string]struct{}, oldPositionDeletes *legacyPositionDeletes, oldDVs liveDeletionVectors) {
 	for dataFilePath := range replacedPaths {
 		for _, deleteFile := range oldPositionDeletes.fileScoped[dataFilePath] {
 			updater.removeDeleteFile(deleteFile)
 		}
-		if dvFile, ok := oldDVs[dataFilePath]; ok {
-			updater.removeDeletionVector(dvFile)
+		if entry, ok := oldDVs[dataFilePath]; ok {
+			updater.removeDeletionVector(entry.DataFile())
 		}
 	}
 }
