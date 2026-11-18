@@ -20,9 +20,12 @@ package table
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table/dv"
@@ -87,6 +90,56 @@ func TestDVWritePathProducesReadableOutput(t *testing.T) {
 	assert.Equal(t, int64(2), bm2.Cardinality())
 	assert.True(t, bm2.Contains(0))
 	assert.True(t, bm2.Contains(10))
+}
+
+type clearingDeleteBatchAllocator struct {
+	memory.Allocator
+}
+
+func (a clearingDeleteBatchAllocator) Free(data []byte) {
+	clear(data)
+	a.Allocator.Free(data)
+}
+
+func TestDVWritePathKeepsPathsAfterBatchRelease(t *testing.T) {
+	const path = "s3://bucket/data/file.parquet"
+	mb := newPositionDeleteUnpartitionedMetadata(t, 3)
+	fs := iceio.NewMemFS()
+	allocator := clearingDeleteBatchAllocator{memory.DefaultAllocator}
+	itr := func(yield func(arrow.RecordBatch, error) bool) {
+		for _, position := range []string{"1", "2"} {
+			batch, _, err := array.RecordFromJSON(allocator, PositionalDeleteArrowSchema,
+				strings.NewReader(`[{"file_path":"`+path+`","pos":`+position+`}]`))
+			require.NoError(t, err)
+			more := yield(batch, nil)
+			batch.Release()
+			if !more {
+				return
+			}
+		}
+	}
+	prior := dv.NewRoaringPositionBitmap()
+	prior.Set(0)
+
+	var files []iceberg.DataFile
+	for file, err := range positionDeleteRecordsToDataFiles(t.Context(), "mem://test", mb,
+		unpartitionedContexts(path), recordWritingArgs{
+			sc: PositionalDeleteArrowSchema, itr: itr, fs: fs,
+			existingDeletes: map[string]*dv.RoaringPositionBitmap{path: prior},
+		}) {
+		require.NoError(t, err)
+		files = append(files, file)
+	}
+
+	require.Len(t, files, 1)
+	require.NotNil(t, files[0].ReferencedDataFile())
+	require.Equal(t, path, *files[0].ReferencedDataFile())
+	bitmap, err := dv.ReadDV(t.Context(), fs, files[0])
+	require.NoError(t, err)
+	require.Equal(t, int64(3), bitmap.Cardinality())
+	for position := range uint64(3) {
+		require.True(t, bitmap.Contains(position))
+	}
 }
 
 func TestDVWritePathV2UsesParquetPositionDeletes(t *testing.T) {

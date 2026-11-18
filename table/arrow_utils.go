@@ -2515,6 +2515,8 @@ func positionDeleteRecordsToDataFilesDV(ctx context.Context, rootLocation string
 					continue
 				}
 				if _, ok := seededPaths[filePath]; !ok {
+					// The writer and seededPaths outlive the batch's string buffer.
+					filePath = strings.Clone(filePath)
 					if bitmap := args.existingDeletes[filePath]; bitmap != nil {
 						writer.Load(filePath, bitmap, pCtx.specID, pCtx.partitionData)
 					}
