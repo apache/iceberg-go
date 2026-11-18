@@ -247,7 +247,7 @@ func TestRenameViewPreservesUnknownCommitError(t *testing.T) {
 	db, err := sql.Open(name, filepath.Join(t.TempDir(), "catalog.db"))
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
-	cat, err := NewCatalog("default", db, SQLite, iceberg.Properties{"warehouse": "file://" + filepath.ToSlash(t.TempDir())})
+	cat, err := NewCatalog(context.Background(), "default", db, SQLite, iceberg.Properties{"warehouse": "file://" + filepath.ToSlash(t.TempDir())})
 	require.NoError(t, err)
 	require.NoError(t, cat.CreateNamespace(t.Context(), table.Identifier{"db"}, nil))
 	from, to := table.Identifier{"db", "source"}, table.Identifier{"db", "target"}

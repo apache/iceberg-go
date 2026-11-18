@@ -18,6 +18,7 @@
 package hive
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -26,7 +27,7 @@ import (
 func TestNewHiveClientRejectsInvalidPort(t *testing.T) {
 	for _, uri := range []string{"thrift://host:0", "thrift://host:65536"} {
 		t.Run(uri, func(t *testing.T) {
-			client, err := newHiveClient(uri, nil)
+			client, err := newHiveClient(context.Background(), uri, nil)
 			require.Error(t, err)
 			require.Nil(t, client)
 			require.Contains(t, err.Error(), "invalid port")
