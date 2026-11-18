@@ -68,6 +68,7 @@ func (t *Transaction) performCopyOnWriteDeletion(ctx context.Context, operation 
 
 	commitUUID := uuid.New()
 	updater := t.updateSnapshot(wfs, snapshotProps, operation).mergeOverwrite(&commitUUID, filter)
+	updater.setOverwriteCaseSensitive(caseSensitive)
 	updater.setManifestConcurrency(concurrency)
 
 	filesToDelete, entriesToRewrite, err := t.classifyFilesForDeletions(ctx, fs, filter, caseSensitive, concurrency)
@@ -157,6 +158,7 @@ func (t *Transaction) performMergeOnReadDeletion(ctx context.Context, snapshotPr
 
 	commitUUID := uuid.New()
 	updater := t.updateSnapshot(wfs, snapshotProps, OpDelete).mergeOverwrite(&commitUUID, filter)
+	updater.setOverwriteCaseSensitive(caseSensitive)
 	updater.setManifestConcurrency(concurrency)
 
 	filesToDelete, withPartialDeletions, err := t.classifyFilesForDeletions(ctx, fs, filter, caseSensitive, concurrency)

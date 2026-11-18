@@ -413,9 +413,10 @@ func (c *conflictContext) manifestsFor(snap Snapshot) ([]iceberg.ManifestFile, e
 // branch. It walks the ancestry of the branch's current head back to
 // the writer's base snapshot to enumerate concurrent commits.
 //
-// caseSensitive must match the value the committer used when it bound
-// its filter (typically the scan's case-sensitivity) so
-// partition-spec projection resolves the same column identifiers.
+// caseSensitive is the default used by validators that do not carry an
+// operation-specific setting. Validators for filters with their own binding
+// option must use that option so partition-spec projection resolves the same
+// column identifiers used when the operation was staged.
 //
 // When base and current point at the same snapshot on the branch, the
 // returned context has no concurrent snapshots and validators that
@@ -755,7 +756,9 @@ func dataFilesMissingError(missing []string, state string) error {
 //     one actual added file's partition value satisfies the filter.
 //  3. The surviving files are evaluated against their column metrics so
 //     files whose bounds cannot match the filter are ignored.
-func validateAddedDataFilesMatchingFilter(cc *conflictContext, filter iceberg.BooleanExpression) error {
+func validateAddedDataFilesMatchingFilter(
+	cc *conflictContext, filter iceberg.BooleanExpression, caseSensitive bool,
+) error {
 	if len(cc.concurrent) == 0 {
 		return nil
 	}
@@ -771,19 +774,19 @@ func validateAddedDataFilesMatchingFilter(cc *conflictContext, filter iceberg.Bo
 	// buildPartitionEvaluator) so there is one code path that pruning
 	// semantics flow through.
 	partitionFilters := newKeyDefaultMapWrapErr(func(specID int) (iceberg.BooleanExpression, error) {
-		return buildPartitionProjection(specID, cc.current, cc.current.CurrentSchema(), filter, cc.caseSensitive)
+		return buildPartitionProjection(specID, cc.current, cc.current.CurrentSchema(), filter, caseSensitive)
 	})
 	manifestEvals := newKeyDefaultMapWrapErr(func(specID int) (func(iceberg.ManifestFile) (bool, error), error) {
-		return buildManifestEvaluator(specID, cc.current, cc.current.CurrentSchema(), partitionFilters, cc.caseSensitive)
+		return buildManifestEvaluator(specID, cc.current, cc.current.CurrentSchema(), partitionFilters, caseSensitive)
 	})
 	partitionEvals := newKeyDefaultMapWrapErr(func(specID int) (func(iceberg.DataFile) (bool, error), error) {
-		return buildPartitionEvaluator(specID, cc.current, cc.current.CurrentSchema(), partitionFilters, cc.caseSensitive)
+		return buildPartitionEvaluator(specID, cc.current, cc.current.CurrentSchema(), partitionFilters, caseSensitive)
 	})
 	// Eval copies each file's metrics into fresh evaluator state, so this
 	// evaluator can be reused across concurrent manifests.
 	// includeEmptyFiles=false is intentional: an empty file has no rows that
 	// can match the filter and must not create a conflict.
-	metricsEval, err := newInclusiveMetricsEvaluator(cc.current.CurrentSchema(), filter, cc.caseSensitive, false)
+	metricsEval, err := newInclusiveMetricsEvaluator(cc.current.CurrentSchema(), filter, caseSensitive, false)
 	if err != nil {
 		return fmt.Errorf("failed to build metrics evaluator: %w", err)
 	}
@@ -858,7 +861,7 @@ func validateNoConflictingDataFiles(cc *conflictContext, filter iceberg.BooleanE
 		return nil
 	}
 
-	return validateAddedDataFilesMatchingFilter(cc, filter)
+	return validateAddedDataFilesMatchingFilter(cc, filter, cc.caseSensitive)
 }
 
 // validateNoConflictingDataFilesInPartitions is like
