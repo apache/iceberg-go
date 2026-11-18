@@ -255,12 +255,12 @@ Source: [`catalog/glue/options.go`](https://github.com/apache/iceberg-go/blob/ma
 
 ### SQL (`catalog/sql`)
 
-Construct a SQL catalog with `NewCatalogWithOptions` and `sqlcat.WithIORegistry(registry)` to select isolated FileIO. The original `NewCatalog` retains its function signature:
+The original `NewCatalog(ctx, ...)` remains available. Use `NewCatalogWithOptions(ctx, ...)` with `sqlcat.WithIORegistry(registry)` to select isolated FileIO:
 
 ```go
 db, _ := sql.Open(sqliteshim.ShimName, "file:catalog.db")
 registry := io.NewRegistry() // copy currently registered global schemes
-cat, err := sqlcat.NewCatalogWithOptions("default", db, sqlcat.SQLite, iceberg.Properties{
+cat, err := sqlcat.NewCatalogWithOptions(ctx, "default", db, sqlcat.SQLite, iceberg.Properties{
     "warehouse": "file:///tmp/warehouse",
 }, sqlcat.WithIORegistry(registry)) // omit option for global FileIO
 ```

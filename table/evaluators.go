@@ -750,8 +750,11 @@ func (m *manifestEvalVisitor) VisitBound(pred iceberg.BoundPredicate) bool {
 		return rowsMightMatch
 	}
 
-	return iceberg.VisitBoundPredicateRef(pred, m, iceberginternal.BoundPredicateRef{})
+	return iceberg.VisitBoundPredicate(pred, m)
 }
+
+// BorrowBoundSets lets VisitBoundPredicate pass the predicate's own sets.
+func (*manifestEvalVisitor) BorrowBoundSets(iceberginternal.BoundPredicateRef) {}
 
 func (m *manifestEvalVisitor) VisitNot(child bool) bool       { return !child }
 func (m *manifestEvalVisitor) VisitAnd(left, right bool) bool { return left && right }
@@ -1093,8 +1096,11 @@ func (m *inclusiveMetricsEval) VisitBound(pred iceberg.BoundPredicate) bool {
 		return rowsMightMatch
 	}
 
-	return iceberg.VisitBoundPredicateRef(pred, m, iceberginternal.BoundPredicateRef{})
+	return iceberg.VisitBoundPredicate(pred, m)
 }
+
+// BorrowBoundSets lets VisitBoundPredicate pass the predicate's own sets.
+func (*inclusiveMetricsEval) BorrowBoundSets(iceberginternal.BoundPredicateRef) {}
 
 func (m *inclusiveMetricsEval) VisitIsNull(t iceberg.BoundTerm) bool {
 	if _, ok := t.(iceberg.BoundExtract); ok {
@@ -1605,8 +1611,11 @@ func (m *strictMetricsEval) VisitBound(pred iceberg.BoundPredicate) bool {
 		return rowsMightNotMatch
 	}
 
-	return iceberg.VisitBoundPredicateRef(pred, m, iceberginternal.BoundPredicateRef{})
+	return iceberg.VisitBoundPredicate(pred, m)
 }
+
+// BorrowBoundSets lets VisitBoundPredicate pass the predicate's own sets.
+func (*strictMetricsEval) BorrowBoundSets(iceberginternal.BoundPredicateRef) {}
 
 func (m *strictMetricsEval) VisitIsNull(t iceberg.BoundTerm) bool {
 	fieldID := t.Ref().Field().ID
@@ -2089,8 +2098,11 @@ func (c *bloomPredicateCollector) VisitBound(pred iceberg.BoundPredicate) []inte
 		return nil
 	}
 
-	return iceberg.VisitBoundPredicateRef(pred, c, iceberginternal.BoundPredicateRef{})
+	return iceberg.VisitBoundPredicate(pred, c)
 }
+
+// BorrowBoundSets lets VisitBoundPredicate pass the predicate's own sets.
+func (*bloomPredicateCollector) BorrowBoundSets(iceberginternal.BoundPredicateRef) {}
 
 func (c *bloomPredicateCollector) VisitEqual(t iceberg.BoundTerm, lit iceberg.Literal) []internal.RowGroupBloomPred {
 	field := t.Ref().Field()

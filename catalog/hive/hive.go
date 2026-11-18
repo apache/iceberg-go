@@ -50,7 +50,7 @@ var (
 
 func init() {
 	catalog.MustRegister("hive", catalog.RegistrarFunc(func(ctx context.Context, name string, props iceberg.Properties) (catalog.Catalog, error) {
-		return NewCatalog(props, WithName(name))
+		return NewCatalog(ctx, props, WithName(name))
 	}))
 }
 
@@ -62,7 +62,7 @@ type Catalog struct {
 	reporter metrics.CachedReporter
 }
 
-func NewCatalog(props iceberg.Properties, opts ...Option) (*Catalog, error) {
+func NewCatalog(ctx context.Context, props iceberg.Properties, opts ...Option) (*Catalog, error) {
 	o := NewHiveOptions()
 	o.ApplyProperties(props)
 
@@ -74,7 +74,7 @@ func NewCatalog(props iceberg.Properties, opts ...Option) (*Catalog, error) {
 		return nil, errors.New("hive.uri is required")
 	}
 
-	client, err := newHiveClient(o.URI, o)
+	client, err := newHiveClient(ctx, o.URI, o)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Hive client: %w", err)
 	}

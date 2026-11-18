@@ -19,6 +19,7 @@ package iceberg_test
 
 import (
 	"math"
+	"reflect"
 	"slices"
 	"strconv"
 	"testing"
@@ -40,6 +41,42 @@ type containsBoundSetVisitor struct {
 func (v *containsBoundSetVisitor) VisitIn(_ iceberg.BoundTerm, literals iceberg.Set[iceberg.Literal]) []string {
 	v.found = literals.Contains(v.needle)
 	literals.Add(iceberg.NewLiteral("visitor-injected"))
+
+	return nil
+}
+
+// detachedSetVisitor mutates every set it gets and declares
+// VisitInWithExtrema, which must never be called for it.
+type detachedSetVisitor struct {
+	FooBoundExprVisitor
+	sets          []iceberg.Set[iceberg.Literal]
+	lens          []int
+	extremaCalled bool
+}
+
+func (v *detachedSetVisitor) receive(literals iceberg.Set[iceberg.Literal]) []string {
+	v.sets = append(v.sets, literals)
+	v.lens = append(v.lens, literals.Len())
+	for _, lit := range literals.Members() {
+		if b, ok := lit.(iceberg.BinaryLiteral); ok && len(b) > 0 {
+			b[0] = 0
+		}
+	}
+	literals.Add(iceberg.NewLiteral("visitor-injected"))
+
+	return nil
+}
+
+func (v *detachedSetVisitor) VisitIn(_ iceberg.BoundTerm, literals iceberg.Set[iceberg.Literal]) []string {
+	return v.receive(literals)
+}
+
+func (v *detachedSetVisitor) VisitNotIn(_ iceberg.BoundTerm, literals iceberg.Set[iceberg.Literal]) []string {
+	return v.receive(literals)
+}
+
+func (v *detachedSetVisitor) VisitInWithExtrema(_ iceberg.BoundTerm, _ iceberg.Set[iceberg.Literal], _, _ iceberg.Literal) []string {
+	v.extremaCalled = true
 
 	return nil
 }
@@ -604,6 +641,51 @@ func TestInNotInSimplifications(t *testing.T) {
 		iceberg.VisitBoundPredicate(predicate, visitor)
 		assert.True(t, visitor.found)
 		assert.Equal(t, 2, predicate.(iceberg.BoundSetPredicate).Literals().Len())
+	})
+
+	t.Run("external visitors receive detached sets without extrema", func(t *testing.T) {
+		schema := iceberg.NewSchema(1,
+			iceberg.NestedField{ID: 1, Name: "s", Type: iceberg.PrimitiveTypes.String},
+			iceberg.NestedField{ID: 2, Name: "b", Type: iceberg.PrimitiveTypes.Binary},
+		)
+		tests := []struct {
+			name string
+			expr iceberg.BooleanExpression
+		}{
+			{"string in", iceberg.IsIn(iceberg.Reference("s"), "hello", "world")},
+			{"string not in", iceberg.NotIn(iceberg.Reference("s"), "hello", "world")},
+			{"binary in", iceberg.IsIn(iceberg.Reference("b"), []byte("hello"), []byte("world"))},
+			{"binary not in", iceberg.NotIn(iceberg.Reference("b"), []byte("hello"), []byte("world"))},
+		}
+
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				bound, err := tt.expr.(iceberg.UnboundPredicate).Bind(schema, true)
+				require.NoError(t, err)
+				predicate := bound.(iceberg.BoundPredicate)
+				// Clone binary literals so the snapshot shares no memory with the predicate.
+				var before []iceberg.Literal
+				for _, lit := range predicate.(iceberg.BoundSetPredicate).Literals().Members() {
+					if b, ok := lit.(iceberg.BinaryLiteral); ok {
+						lit = iceberg.BinaryLiteral(slices.Clone(b))
+					}
+					before = append(before, lit)
+				}
+				visitor := &detachedSetVisitor{}
+
+				iceberg.VisitBoundPredicate(predicate, visitor)
+				iceberg.VisitBoundPredicate(predicate, visitor)
+
+				assert.False(t, visitor.extremaCalled)
+				require.Len(t, visitor.sets, 2)
+				assert.NotEqual(t, reflect.ValueOf(visitor.sets[0]).Pointer(),
+					reflect.ValueOf(visitor.sets[1]).Pointer(),
+					"each visit must receive its own set, not the predicate's")
+				assert.Equal(t, []int{2, 2}, visitor.lens,
+					"an Add in one visit must not reach the next")
+				assert.ElementsMatch(t, before, predicate.(iceberg.BoundSetPredicate).Literals().Members())
+			})
+		}
 	})
 
 	t.Run("bind dedup to eq", func(t *testing.T) {

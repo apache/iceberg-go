@@ -63,18 +63,25 @@ func (*boundSetVisitVisitor) VisitNotStartsWith(BoundTerm, Literal) bool {
 	return false
 }
 
-func TestVisitBoundPredicateRefDoesNotAllocate(t *testing.T) {
+// trustedBoundSetVisitVisitor has the marker the table evaluators use.
+type trustedBoundSetVisitVisitor struct {
+	boundSetVisitVisitor
+}
+
+func (*trustedBoundSetVisitVisitor) BorrowBoundSets(internal.BoundPredicateRef) {}
+
+func TestVisitBoundPredicateTrustedDoesNotAllocate(t *testing.T) {
 	predicate, err := IsIn(Reference("value"), "hello", "world").(UnboundPredicate).Bind(
 		NewSchema(1, NestedField{ID: 1, Name: "value", Type: PrimitiveTypes.String}), true,
 	)
 	require.NoError(t, err)
 
-	visitor := &boundSetVisitVisitor{needle: NewLiteral("hello")}
+	visitor := &trustedBoundSetVisitVisitor{boundSetVisitVisitor{needle: NewLiteral("hello")}}
 	bound := predicate.(BoundPredicate)
 	var found bool
 
 	assert.Zero(t, testing.AllocsPerRun(100, func() {
-		found = VisitBoundPredicateRef(bound, visitor, internal.BoundPredicateRef{})
+		found = VisitBoundPredicate(bound, visitor)
 	}))
 	assert.True(t, found)
 }
