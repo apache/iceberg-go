@@ -20,10 +20,12 @@ package table_test
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/arrow-go/v18/parquet"
@@ -38,7 +40,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func writePartialMetricsParquet(t *testing.T, schema *iceberg.Schema, groups [][]*int32, omit string) string {
+func writePartialMetricsParquet[T int32 | string](t *testing.T, schema *iceberg.Schema, groups [][]*T, omit string) string {
 	t.Helper()
 	arrowSchema, err := table.SchemaToArrowSchema(schema, nil, true, false)
 	require.NoError(t, err)
@@ -47,13 +49,13 @@ func writePartialMetricsParquet(t *testing.T, schema *iceberg.Schema, groups [][
 	require.NoError(t, err)
 	builder := array.NewRecordBuilder(memory.DefaultAllocator, arrowSchema)
 	defer builder.Release()
-	col := builder.Field(0).(*array.Int32Builder)
+	col := builder.Field(0)
 	for _, group := range groups {
 		for _, v := range group {
 			if v == nil {
 				col.AppendNull()
 			} else {
-				col.Append(*v)
+				require.NoError(t, col.AppendValueFromString(fmt.Sprint(*v)))
 			}
 		}
 		batch := builder.NewRecordBatch()
@@ -66,13 +68,38 @@ func writePartialMetricsParquet(t *testing.T, schema *iceberg.Schema, groups [][
 	require.NoError(t, err)
 	footer := reader.MetaData()
 	require.Len(t, footer.RowGroups, len(groups))
+	if omit == "legacy" || omit == "legacy_max" {
+		footer.ColumnOrders = nil
+	}
 	for rg, rowGroup := range footer.RowGroups {
+		chunk := rowGroup.Columns[0].MetaData
+		stats := chunk.Statistics
+		require.NotNil(t, stats.NullCount)
+		if omit == "legacy" {
+			require.NotEmpty(t, stats.Min)
+			require.NotEmpty(t, stats.Max)
+			stats.MinValue, stats.MaxValue = nil, nil
+		}
+		switch omit {
+		case "first_statistics":
+			if rg == 0 {
+				chunk.Statistics = nil
+			}
+		case "statistics":
+			if rg > 0 {
+				chunk.Statistics = nil
+			}
+		case "all_statistics":
+			chunk.Statistics = nil
+		}
 		if rg == 0 && omit != "all_max" {
 			continue
 		}
-		stats := rowGroup.Columns[0].MetaData.Statistics
-		require.NotNil(t, stats.NullCount)
 		switch omit {
+		case "legacy_max":
+			require.NotEmpty(t, stats.Min)
+			require.NotEmpty(t, stats.Max)
+			stats.Max = nil
 		case "null_count":
 			require.NotEmpty(t, stats.MinValue)
 			require.NotEmpty(t, stats.MaxValue)
@@ -115,6 +142,8 @@ func TestImportedParquetPartialMetrics(t *testing.T) {
 		{"missing_null_count", "null_count", [][]*int32{{&ten}, {&hundred, nil}}, false, true, 0, 1, false},
 		{"missing_min_max", "min_max", [][]*int32{{&ten}, {&hundred, nil}}, true, false, 1, 1, false},
 		{"missing_only_max", "max", [][]*int32{{&ten}, {&hundred, nil}}, true, false, 1, 1, false},
+		{"legacy_complete", "legacy", [][]*int32{{&ten}, {&hundred, nil}}, true, true, 1, 1, false},
+		{"legacy_missing_only_max", "legacy_max", [][]*int32{{&ten}, {&hundred, nil}}, true, false, 1, 1, false},
 		{"all_null_chunk", "", [][]*int32{{&ten}, {nil}}, true, true, 1, 0, false},
 		{"delete_missing_null_count", "null_count", [][]*int32{{&hundred}, {&hundred, nil}}, false, true, 0, 2, true},
 	} {
@@ -204,4 +233,80 @@ func TestPartialParquetBoundsPartitionInference(t *testing.T) {
 	_, err = table.FileToDataFile(t.Context(), iceio.LocalFS{}, path, schema, spec, 0, nil)
 	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
 	require.ErrorContains(t, err, "incomplete Parquet bounds")
+}
+
+func TestMissingParquetStatisticsPartitionInference(t *testing.T) {
+	value := int32(7)
+	schema := iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "amount", Type: iceberg.PrimitiveTypes.Int32})
+	spec := iceberg.NewPartitionSpecID(0, iceberg.PartitionField{SourceIDs: []int{1}, FieldID: 1000, Name: "amount", Transform: iceberg.IdentityTransform{}})
+	for _, omit := range []string{"first_statistics", "statistics", "all_statistics"} {
+		t.Run(omit, func(t *testing.T) {
+			path := writePartialMetricsParquet(t, schema, [][]*int32{{&value}, {&value}}, omit)
+			_, err := table.FileToDataFile(t.Context(), iceio.LocalFS{}, path, schema, spec, 0, nil)
+			require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+			require.ErrorContains(t, err, "incomplete Parquet bounds")
+
+			dataFile, err := table.FileToDataFileWithOptions(t.Context(), iceio.LocalFS{}, path, schema, spec, 0, nil, table.WithFilePartitionValues(map[int]any{1000: value}))
+			require.NoError(t, err)
+			assert.Equal(t, value, dataFile.Partition()[1000])
+			assert.NotContains(t, dataFile.NullValueCounts(), 1)
+			assert.NotContains(t, dataFile.LowerBoundValues(), 1)
+			assert.NotContains(t, dataFile.UpperBoundValues(), 1)
+			if omit != "all_statistics" {
+				_, err = table.FileToDataFileWithOptions(t.Context(), iceio.LocalFS{}, path, schema, spec, 0, nil, table.WithFilePartitionValues(map[int]any{1000: int32(8)}))
+				require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+				require.ErrorContains(t, err, "does not match Parquet bounds")
+			}
+		})
+	}
+}
+
+func TestImportedParquetStringBounds(t *testing.T) {
+	first, last := "apple", "pear"
+	schema := iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "fruit", Type: iceberg.PrimitiveTypes.String})
+	for _, omit := range []string{"", "max"} {
+		path := writePartialMetricsParquet(t, schema, [][]*string{{&first}, {&last, nil}}, omit)
+		dataFile, err := table.FileToDataFile(t.Context(), iceio.LocalFS{}, path, schema, *iceberg.UnpartitionedSpec, 0, nil)
+		require.NoError(t, err)
+		assert.EqualValues(t, 1, dataFile.NullValueCounts()[1])
+		if omit == "" {
+			assert.Equal(t, []byte(first), dataFile.LowerBoundValues()[1])
+			assert.Equal(t, []byte(last), dataFile.UpperBoundValues()[1])
+		} else {
+			assert.NotContains(t, dataFile.LowerBoundValues(), 1)
+			assert.NotContains(t, dataFile.UpperBoundValues(), 1)
+		}
+	}
+}
+
+func TestWriteNullPartitionWithoutParquetStatistics(t *testing.T) {
+	ctx := t.Context()
+	schema := iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "amount", Type: iceberg.PrimitiveTypes.Int32})
+	spec := iceberg.NewPartitionSpecID(0, iceberg.PartitionField{SourceIDs: []int{1}, FieldID: 1000, Name: "amount", Transform: iceberg.IdentityTransform{}})
+	cat, err := hadoop.NewCatalog(ctx, "local", t.TempDir(), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, cat.Close()) })
+	require.NoError(t, cat.CreateNamespace(ctx, catalog.ToIdentifier("db"), nil))
+	tbl, err := cat.CreateTable(ctx, catalog.ToIdentifier("db", "amounts"), schema,
+		catalog.WithPartitionSpec(&spec),
+		catalog.WithProperties(iceberg.Properties{table.ParquetColumnStatsEnabledKeyPrefix + ".amount": "false"}))
+	require.NoError(t, err)
+
+	arrowSchema, err := table.SchemaToArrowSchema(schema, nil, true, false)
+	require.NoError(t, err)
+	builder := array.NewRecordBuilder(memory.DefaultAllocator, arrowSchema)
+	defer builder.Release()
+	builder.Field(0).AppendNull()
+	record := builder.NewRecordBatch()
+	defer record.Release()
+	reader, err := array.NewRecordReader(arrowSchema, []arrow.RecordBatch{record})
+	require.NoError(t, err)
+	defer reader.Release()
+	tbl, err = tbl.Append(ctx, reader, nil)
+	require.NoError(t, err)
+	files, err := tbl.Scan().PlanFiles(ctx)
+	require.NoError(t, err)
+	require.Len(t, files, 1)
+	assert.Equal(t, map[int]any{1000: nil}, files[0].File.Partition())
+	assert.NotContains(t, files[0].File.NullValueCounts(), 1)
 }

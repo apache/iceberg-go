@@ -225,12 +225,15 @@ type StatsAgg interface {
 }
 
 type DataFileStatistics struct {
-	RecordCount      int64
-	ColSizes         map[int]int64
-	ValueCounts      map[int]int64
-	NullValueCounts  map[int]int64
-	NanValueCounts   map[int]int64
-	ColAggs          map[int]StatsAgg
+	RecordCount     int64
+	ColSizes        map[int]int64
+	ValueCounts     map[int]int64
+	NullValueCounts map[int]int64
+	NanValueCounts  map[int]int64
+	ColAggs         map[int]StatsAgg
+	// incompleteBounds holds source columns whose bounds are missing in at least
+	// one row group. Key presence blocks partition inference. The value is the
+	// partial aggregate from the other row groups and may be nil.
 	incompleteBounds map[int]StatsAgg
 	SplitOffsets     []int64
 	EqualityFieldIDs []int

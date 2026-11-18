@@ -1574,14 +1574,15 @@ func (w *ParquetFileWriter) Close() (_ iceberg.DataFile, err error) {
 	maps.Copy(stats.NanValueCounts, w.nanCounts)
 
 	opts := DataFileOpts{
-		Schema:          w.info.FileSchema,
-		Spec:            w.info.Spec,
-		Path:            w.info.FileName,
-		Format:          iceberg.ParquetFile,
-		Content:         w.info.Content,
-		FileSize:        w.counter.Count,
-		PartitionValues: w.partition,
-		SortOrderID:     w.info.SortOrderID,
+		Schema:                      w.info.FileSchema,
+		Spec:                        w.info.Spec,
+		Path:                        w.info.FileName,
+		Format:                      iceberg.ParquetFile,
+		Content:                     w.info.Content,
+		FileSize:                    w.counter.Count,
+		PartitionValues:             w.partition,
+		PreserveNullPartitionValues: true,
+		SortOrderID:                 w.info.SortOrderID,
 	}
 	if w.info.Content == iceberg.EntryContentPosDeletes {
 		opts.ReferencedDataFile = singleReferencedDataFile(stats)
@@ -1927,9 +1928,10 @@ func resolveParquetStatsColumns(meta *metadata.FileMetaData, statsCols map[int]S
 	return columns
 }
 
-// ParquetColumnStatsPresence reads the optional fields from the footer because
-// Arrow's typed statistics can report an absent null count as zero or a
-// one-sided bound as a min/max pair.
+// ParquetColumnStatsPresence works around arrow-go's typed statistics reporting
+// an absent null count as zero or a one-sided bound as a min/max pair.
+// Columns encrypted with their own key may lack statistics in the raw footer
+// even when arrow-go can decrypt them. Treat their statistics as unavailable.
 func ParquetColumnStatsPresence(meta *metadata.FileMetaData, rowGroup, column int) (nullCount, bounds bool) {
 	chunk := meta.RowGroups[rowGroup].Columns[column].MetaData
 	if chunk == nil || chunk.Statistics == nil {
@@ -2006,14 +2008,16 @@ func (p parquetFormat) DataFileStatsFromMeta(meta Metadata, statsCols map[int]St
 			}
 
 			if !set {
-				invalidateCol[fieldID] = struct{}{}
+				missingNulls[fieldID] = struct{}{}
+				incompleteBounds[fieldID] = nil
 
 				continue
 			}
 
 			stats, err := colChunk.Statistics()
 			if err != nil || stats == nil {
-				invalidateCol[fieldID] = struct{}{}
+				missingNulls[fieldID] = struct{}{}
+				incompleteBounds[fieldID] = nil
 
 				continue
 			}
