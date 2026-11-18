@@ -143,10 +143,15 @@ func readIsolationLevel(props iceberg.Properties, key string, defVal IsolationLe
 var ErrCommitDiverged = errors.New("commit diverged: base snapshot is no longer on the branch")
 
 // ErrConflictingDataFiles is returned when a concurrent commit added data
-// files that satisfy a committer's conflict filter or reused a path staged by
-// a replayed RowDelta. It wraps ErrCommitFailed: a new transaction built from
-// a reloaded table may succeed.
+// files that satisfy the committer's conflict filter. It wraps ErrCommitFailed:
+// a new transaction built from a reloaded table may succeed.
 var ErrConflictingDataFiles = fmt.Errorf("%w: concurrent data files added", ErrCommitFailed)
+
+// ErrDuplicateDataFiles is returned when a RowDelta adds the same data file
+// path twice or when a retry finds a concurrent addition of that path still
+// live. It does not wrap ErrCommitFailed: refreshing the table alone cannot
+// resolve a collision. The caller must use a different data file path.
+var ErrDuplicateDataFiles = errors.New("duplicate data file path")
 
 // ErrConflictingDeleteFiles is returned when a concurrent commit added
 // delete files that could mask rows the committer is writing or replacing.

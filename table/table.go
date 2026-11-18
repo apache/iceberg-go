@@ -98,7 +98,8 @@ var ErrCommitRejected = errors.New("commit rejected")
 // commit branch's head assertion is rebased. A staged update that cannot
 // apply keeps the builder's error as its cause. Transaction.Commit also
 // returns it, on any attempt, when a delete references data files that are
-// missing (ErrDataFilesMissing).
+// missing (ErrDataFilesMissing), or when a RowDelta retry detects a duplicate
+// live data file path (ErrDuplicateDataFiles).
 var ErrTransactionUnusable = errors.New("transaction cannot be committed again")
 
 // ErrWriteIORequired is returned by write paths when the table's file system
@@ -918,14 +919,13 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 			}
 			for _, v := range co.validators {
 				if vErr := v(cc); vErr != nil {
-					// Conflicts with a concurrent commit end the transaction, as
-					// do missing referenced data files, which no retry brings
-					// back. Other validator errors, such as read failures, stay
-					// resumable.
+					// Conflicts and duplicate live paths end the transaction, as
+					// do missing referenced data files. Other validator errors,
+					// such as read failures, stay resumable.
 					if errors.Is(vErr, ErrCommitFailed) {
 						return nil, fmt.Errorf("%w: validation conflict: %w", ErrTransactionUnusable, vErr)
 					}
-					if errors.Is(vErr, ErrDataFilesMissing) {
+					if errors.Is(vErr, ErrDataFilesMissing) || errors.Is(vErr, ErrDuplicateDataFiles) {
 						return nil, fmt.Errorf("%w: validation failed: %w", ErrTransactionUnusable, vErr)
 					}
 

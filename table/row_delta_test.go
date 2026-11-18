@@ -173,6 +173,7 @@ func TestRowDeltaRejectsDuplicateDataFilePaths(t *testing.T) {
 			}
 
 			err := rd.Commit(t.Context())
+			require.ErrorIs(t, err, ErrDuplicateDataFiles)
 			require.ErrorContains(t, err, "duplicate data file path")
 		})
 	}

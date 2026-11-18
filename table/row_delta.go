@@ -155,8 +155,8 @@ func (rd *RowDelta) RemoveDeletes(files ...iceberg.DataFile) *RowDelta {
 // on one data file (a replacement added while the superseded live DV is not
 // removed, or two added replacements for one data file), if an added data
 // file path is repeated in this delta or remains live after a concurrent
-// snapshot adds it during retry, if a position delete references a data file
-// that an operation staged earlier in the transaction removed
+// snapshot adds it during retry (ErrDuplicateDataFiles), if a position delete
+// references a data file that an earlier transaction operation removed
 // (ErrDataFilesMissing), or if the table format version does not support
 // delete files.
 // Deletes require v2 or later, DVs require v3 or later.
@@ -204,7 +204,7 @@ func (rd *RowDelta) Commit(ctx context.Context) error {
 		}
 		path := f.FilePath()
 		if _, exists := seenDataFilePaths[path]; exists {
-			return fmt.Errorf("row delta contains duplicate data file path %q", path)
+			return fmt.Errorf("%w: RowDelta adds %q more than once", ErrDuplicateDataFiles, path)
 		}
 		seenDataFilePaths[path] = struct{}{}
 	}
@@ -782,7 +782,7 @@ func (rd *RowDelta) validateNoConcurrentDuplicateDataPaths(cc *conflictContext) 
 			delete(unresolved, path)
 			if status == iceberg.EntryStatusADDED {
 				return fmt.Errorf("%w: snapshot %d added data file %q already added by RowDelta",
-					ErrConflictingDataFiles, snap.SnapshotID, path)
+					ErrDuplicateDataFiles, snap.SnapshotID, path)
 			}
 		}
 	}
