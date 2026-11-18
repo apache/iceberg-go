@@ -1164,7 +1164,7 @@ func (s *SparkIntegrationTestSuite) TestDynamicPartitionOverwrite() {
 	defer tr.Release()
 	for tr.Next() {
 		rec := tr.RecordBatch()
-		for i := 0; i < int(rec.NumRows()); i++ {
+		for i := range int(rec.NumRows()) {
 			cols := make([]string, rec.NumCols())
 			for c := range cols {
 				col := rec.Column(c)
