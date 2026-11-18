@@ -167,7 +167,7 @@ func CreateViewWithIOProperties(
 	metadataProps iceberg.Properties,
 	opts ...MetadataIOOption,
 ) (*View, error) {
-	version, err := NewVersionFromSQL(
+	viewVersion, err := NewVersionFromSQL(
 		InitialVersionID,
 		schema.ID,
 		representation,
@@ -178,7 +178,7 @@ func CreateViewWithIOProperties(
 		return nil, err
 	}
 
-	return CreateViewFromVersion(ctx, viewIdent, schema, version, loc, ioProps, metadataProps, opts...)
+	return CreateViewFromVersion(ctx, viewIdent, schema, viewVersion, loc, ioProps, metadataProps, opts...)
 }
 
 // CreateViewFromVersion creates a view whose first version is version, kept as

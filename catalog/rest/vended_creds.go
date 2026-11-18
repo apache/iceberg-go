@@ -30,7 +30,6 @@ import (
 	"time"
 
 	"github.com/apache/iceberg-go"
-	cataloginternal "github.com/apache/iceberg-go/catalog/internal"
 	"github.com/apache/iceberg-go/internal/adlsauth"
 	"github.com/apache/iceberg-go/internal/remotesigning"
 	iceio "github.com/apache/iceberg-go/io"
@@ -546,7 +545,11 @@ func (p *prefixScopedIO) Close() error {
 
 // loadRegistryFS preserves the global registry when none is configured.
 func loadRegistryFS(ctx context.Context, registry *iceio.Registry, props iceberg.Properties, location string) (iceio.IO, error) {
-	return cataloginternal.LoadFSWithRegistry(ctx, registry, props, location)
+	if registry == nil {
+		return iceio.LoadFS(ctx, props, location)
+	}
+
+	return registry.LoadFS(ctx, props, location)
 }
 
 // loadRegistryFSFunc preserves the global registry for lazy loads when none is configured.

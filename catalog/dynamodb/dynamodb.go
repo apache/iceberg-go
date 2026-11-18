@@ -30,7 +30,6 @@ import (
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
-	"github.com/apache/iceberg-go/catalog/internal"
 	icebergio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/metrics"
 	"github.com/apache/iceberg-go/table"
@@ -264,7 +263,7 @@ func properties(entry item) iceberg.Properties {
 
 func (c *Catalog) fileSystem(props iceberg.Properties, location string) table.FSysF {
 	return func(ctx context.Context) (icebergio.IO, error) {
-		return internal.LoadFSWithRegistry(utils.WithAWSConfig(ctx, &c.awsConfig), nil, props, location)
+		return icebergio.LoadFS(utils.WithAWSConfig(ctx, &c.awsConfig), props, location)
 	}
 }
 

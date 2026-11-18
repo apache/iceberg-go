@@ -108,9 +108,14 @@ func CreateStagedTable(
 // in its default warehouse location while retaining ident's namespace
 // components for namespace property lookup.
 func CreateStagedTableWithNamespaceKey(
-	ctx context.Context, catprops iceberg.Properties, nspropsFn GetNamespacePropsFn,
-	ident table.Identifier, namespaceKey string, sc *iceberg.Schema,
-	registry *icebergio.Registry, opts ...catalog.CreateTableOpt,
+	ctx context.Context,
+	catprops iceberg.Properties,
+	nspropsFn GetNamespacePropsFn,
+	ident table.Identifier,
+	namespaceKey string,
+	sc *iceberg.Schema,
+	registry *icebergio.Registry,
+	opts ...catalog.CreateTableOpt,
 ) (table.StagedTable, error) {
 	return createStagedTable(ctx, catprops, nspropsFn, ident, namespaceKey, sc, registry, opts...)
 }

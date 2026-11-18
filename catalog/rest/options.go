@@ -29,8 +29,7 @@ import (
 type Option func(*options)
 
 // WithIORegistry selects the registry used to load table and scan FileIOs.
-// A nil registry uses the package-level default. The registry is shared, not
-// copied, so later Register and Unregister calls affect this catalog.
+// A nil registry uses the package-level default.
 func WithIORegistry(registry *iceio.Registry) Option {
 	return func(o *options) { o.ioRegistry = registry }
 }
