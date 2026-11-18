@@ -19,6 +19,7 @@ package maintenance
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"testing"
@@ -26,6 +27,7 @@ import (
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
 
@@ -195,6 +197,72 @@ func TestExecuteOrphanCleanupRejectsPlanForDifferentTable(t *testing.T) {
 	file, err := fs.Open(ctx, dataPath)
 	require.NoError(t, err, "a plan from another table must not delete this file")
 	require.NoError(t, file.Close())
+}
+
+func TestExecuteOrphanCleanupChecksMetadataWhenV1TableHasNoUUID(t *testing.T) {
+	ctx := t.Context()
+	fs := iceio.NewMemFS()
+	const location = "mem://stale-plan/legacy-v1"
+	const metadataLocation = location + "/metadata/v1.metadata.json"
+	const dataPath = location + "/data/live.parquet"
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+	)
+	meta, err := table.NewMetadata(schema, iceberg.UnpartitionedSpec, table.UnsortedSortOrder, location,
+		iceberg.Properties{table.PropertyFormatVersion: "1"})
+	require.NoError(t, err)
+	withoutUUID := func(meta table.Metadata) table.Metadata {
+		t.Helper()
+		data, err := json.Marshal(meta)
+		require.NoError(t, err)
+		var object map[string]json.RawMessage
+		require.NoError(t, json.Unmarshal(data, &object))
+		delete(object, "table-uuid")
+		data, err = json.Marshal(object)
+		require.NoError(t, err)
+		parsed, err := table.ParseMetadataBytes(data)
+		require.NoError(t, err)
+		require.Equal(t, uuid.Nil, parsed.TableUUID())
+
+		return parsed
+	}
+
+	fsF := testFSF(fs)
+	catalog := &orphanCleanupTestCatalog{metadata: withoutUUID(meta), location: metadataLocation, fsF: fsF}
+	tbl := table.New(table.Identifier{"db", "legacy"}, catalog.metadata, metadataLocation, fsF, catalog)
+	require.NoError(t, fs.WriteFile(ctx, dataPath, []byte("data")))
+	plan, err := PlanOrphanFiles(ctx, tbl, WithCleanupFilesOlderThan(0))
+	require.NoError(t, err)
+	require.Equal(t, []string{dataPath}, plan.Files())
+
+	// The catalog may parse a new metadata object on each load.
+	catalog.metadata = withoutUUID(meta)
+	var deleted []string
+	deleteFile := WithCleanupDeleteFunc(func(_ context.Context, path string) error {
+		deleted = append(deleted, path)
+
+		return nil
+	})
+	_, err = ExecuteOrphanCleanup(ctx, tbl, plan, deleteFile)
+	require.NoError(t, err)
+	require.Equal(t, []string{dataPath}, deleted)
+
+	fileBuilder, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec, iceberg.EntryContentData, dataPath,
+		iceberg.ParquetFile, nil, nil, nil, 1, int64(len("data")),
+	)
+	require.NoError(t, err)
+	peer := tbl.NewTransaction()
+	require.NoError(t, peer.AddDataFiles(ctx, []iceberg.DataFile{fileBuilder.Build()}, nil))
+	committed, err := peer.Commit(ctx)
+	require.NoError(t, err)
+
+	// Simulate a legacy catalog reusing the metadata location.
+	catalog.metadata = withoutUUID(committed.Metadata())
+	catalog.location = metadataLocation
+	_, err = ExecuteOrphanCleanup(ctx, tbl, plan, deleteFile)
+	require.ErrorIs(t, err, ErrStaleOrphanCleanupPlan)
+	require.Equal(t, []string{dataPath}, deleted, "a stale plan must not invoke deletion")
 }
 
 func TestOrphanCleanupRequiresCatalogForNonEmptyExecution(t *testing.T) {

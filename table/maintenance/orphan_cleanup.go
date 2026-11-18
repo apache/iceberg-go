@@ -44,6 +44,7 @@ import (
 	"github.com/apache/iceberg-go/internal/fileuri"
 	"github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
+	"github.com/google/uuid"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -249,7 +250,8 @@ type OrphanCleanupPlan struct {
 	orphanFiles         []OrphanFile
 	totalSizeBytes      int64
 	cutoff              time.Time
-	tableUUID           string
+	tableUUID           uuid.UUID
+	metadataWithoutUUID table.Metadata
 	metadataLocation    string
 }
 
@@ -412,16 +414,20 @@ func executeOrphanCleanupPlan(ctx context.Context, tbl *table.Table, plan Orphan
 	if plan.metadataLocation == "" {
 		return OrphanCleanupResult{}, fmt.Errorf("%w: plan has no metadata location", ErrStaleOrphanCleanupPlan)
 	}
-	if plan.tableUUID == "" {
-		return OrphanCleanupResult{}, fmt.Errorf("%w: plan has no table UUID", ErrStaleOrphanCleanupPlan)
-	}
-	if currentUUID := refreshed.Metadata().TableUUID().String(); currentUUID != plan.tableUUID {
+	if currentUUID := refreshed.Metadata().TableUUID(); currentUUID != plan.tableUUID {
 		return OrphanCleanupResult{}, fmt.Errorf("%w: table UUID changed from %q to %q",
 			ErrStaleOrphanCleanupPlan, plan.tableUUID, currentUUID)
 	}
 	if refreshed.MetadataLocation() != plan.metadataLocation {
 		return OrphanCleanupResult{}, fmt.Errorf("%w: metadata location changed from %q to %q",
 			ErrStaleOrphanCleanupPlan, plan.metadataLocation, refreshed.MetadataLocation())
+	}
+
+	// Format v1 metadata may have no UUID. The metadata location alone
+	// cannot confirm that a legacy catalog still points to the same state.
+	if plan.tableUUID == uuid.Nil &&
+		(plan.metadataWithoutUUID == nil || !plan.metadataWithoutUUID.Equals(refreshed.Metadata())) {
+		return OrphanCleanupResult{}, fmt.Errorf("%w: table metadata changed without a UUID", ErrStaleOrphanCleanupPlan)
 	}
 
 	return executeOrphanCleanup(ctx, &refreshed, plan, cfg)
@@ -495,7 +501,10 @@ func planOrphanFiles(ctx context.Context, tbl *table.Table, cfg *orphanCleanupCo
 		return OrphanCleanupPlan{}, err
 	}
 	plan.cutoff = cutoff
-	plan.tableUUID = tbl.Metadata().TableUUID().String()
+	plan.tableUUID = tbl.Metadata().TableUUID()
+	if plan.tableUUID == uuid.Nil {
+		plan.metadataWithoutUUID = tbl.Metadata()
+	}
 	plan.metadataLocation = tbl.MetadataLocation()
 
 	return plan, nil
@@ -540,9 +549,6 @@ func findOrphanFiles(
 }
 
 func executeOrphanCleanup(ctx context.Context, tbl *table.Table, plan OrphanCleanupPlan, cfg *orphanCleanupConfig) (OrphanCleanupResult, error) {
-	if err := validateOrphanCleanupGC(tbl); err != nil {
-		return OrphanCleanupResult{}, err
-	}
 	fs, err := tbl.FS(ctx)
 	if err != nil {
 		return OrphanCleanupResult{}, fmt.Errorf("failed to get filesystem: %w", err)
