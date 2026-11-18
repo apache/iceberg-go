@@ -27,6 +27,7 @@ import (
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/iceberg-go"
+	tblutils "github.com/apache/iceberg-go/table/internal"
 )
 
 // clusteredPartitionedWrite writes records to partitioned data files,
@@ -223,7 +224,7 @@ type closedPartitionSet map[any]closedPartitionSet
 func (s closedPartitionSet) add(rec partitionRecord) {
 	node := s
 	for _, part := range rec {
-		key := comparablePartitionKey(part)
+		key := tblutils.ComparablePartitionKey(part)
 		next, ok := node[key]
 		if !ok {
 			next = make(closedPartitionSet)
@@ -236,7 +237,7 @@ func (s closedPartitionSet) add(rec partitionRecord) {
 func (s closedPartitionSet) contains(rec partitionRecord) bool {
 	node := s
 	for _, part := range rec {
-		next, ok := node[comparablePartitionKey(part)]
+		next, ok := node[tblutils.ComparablePartitionKey(part)]
 		if !ok {
 			return false
 		}

@@ -17,6 +17,6 @@
 
 package internal
 
-// BoundPredicateRef authorizes the zero-copy bound-predicate visitor path for
-// trusted visitors in this module.
+// BoundPredicateRef is the parameter type of the BorrowBoundSets marker,
+// which code outside this module cannot declare.
 type BoundPredicateRef struct{}

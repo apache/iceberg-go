@@ -294,8 +294,10 @@ func (tr *namespaceQueryTransport) RoundTrip(request *http.Request) (*http.Respo
 		if input.IndexName == namespaceIndex {
 			tr.indexQueries.Add(1)
 			if tr.indexResponse != "" {
-				return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"application/x-amz-json-1.0"}},
-					Body: io.NopCloser(strings.NewReader(tr.indexResponse)), Request: request}, nil
+				return &http.Response{
+					StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"application/x-amz-json-1.0"}},
+					Body: io.NopCloser(strings.NewReader(tr.indexResponse)), Request: request,
+				}, nil
 			}
 		}
 	}

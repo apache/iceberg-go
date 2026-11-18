@@ -335,6 +335,136 @@ func TestAddColumn(t *testing.T) {
 	})
 }
 
+func TestAddColumnNameAlreadyExists(t *testing.T) {
+	str := iceberg.PrimitiveTypes.String
+
+	rejected := []struct {
+		name          string
+		caseSensitive bool
+		build         func(*UpdateSchema) *UpdateSchema
+		wantErr       string
+	}{
+		{
+			name:          "top-level column",
+			caseSensitive: true,
+			build: func(u *UpdateSchema) *UpdateSchema {
+				return u.AddColumn([]string{"name"}, str, "", false, nil)
+			},
+			wantErr: "cannot add column, name already exists: name",
+		},
+		{
+			name:          "nested column",
+			caseSensitive: true,
+			build: func(u *UpdateSchema) *UpdateSchema {
+				return u.AddColumn([]string{"address", "city"}, str, "", false, nil)
+			},
+			wantErr: "cannot add column, name already exists: address.city",
+		},
+		{
+			name:          "column with different case in case-insensitive mode",
+			caseSensitive: false,
+			build: func(u *UpdateSchema) *UpdateSchema {
+				return u.AddColumn([]string{"NAME"}, str, "", false, nil)
+			},
+			wantErr: "cannot add column, name already exists: NAME",
+		},
+		{
+			name:          "column with only a doc update",
+			caseSensitive: true,
+			build: func(u *UpdateSchema) *UpdateSchema {
+				return u.UpdateColumn([]string{"name"}, ColumnUpdate{Doc: iceberg.Optional[string]{Valid: true, Val: "doc"}}).
+					AddColumn([]string{"name"}, str, "", false, nil)
+			},
+			wantErr: "cannot add column, name already exists: name",
+		},
+		{
+			name:          "name another column is renamed to",
+			caseSensitive: true,
+			build: func(u *UpdateSchema) *UpdateSchema {
+				return u.RenameColumn([]string{"age"}, "years").
+					AddColumn([]string{"years"}, str, "", false, nil)
+			},
+			wantErr: "field already exists: years",
+		},
+		{
+			name:          "name another column is renamed to, by union",
+			caseSensitive: true,
+			build: func(u *UpdateSchema) *UpdateSchema {
+				return u.RenameColumn([]string{"age"}, "years").
+					UnionByNameWith(iceberg.NewSchema(0,
+						iceberg.NestedField{ID: 1, Name: "years", Type: str},
+					))
+			},
+			wantErr: "field already exists: years",
+		},
+		{
+			name:          "column added with different case in case-insensitive mode",
+			caseSensitive: false,
+			build: func(u *UpdateSchema) *UpdateSchema {
+				return u.AddColumn([]string{"x"}, str, "", false, nil).
+					AddColumn([]string{"X"}, str, "", false, nil)
+			},
+			wantErr: "field already exists in adds: X",
+		},
+	}
+
+	for _, tt := range rejected {
+		t.Run(tt.name, func(t *testing.T) {
+			txn := New([]string{"id"}, testMetadata, "", nil, nil).NewTransaction()
+
+			_, err := tt.build(NewUpdateSchema(txn, tt.caseSensitive, false)).Apply()
+			require.ErrorContains(t, err, tt.wantErr)
+
+			err = tt.build(NewUpdateSchema(txn, tt.caseSensitive, false)).Commit()
+			require.ErrorContains(t, err, tt.wantErr)
+		})
+	}
+
+	allowed := []struct {
+		name    string
+		build   func(*UpdateSchema) *UpdateSchema
+		checkID func(t *testing.T, s *iceberg.Schema)
+	}{
+		{
+			name: "name of a deleted column",
+			build: func(u *UpdateSchema) *UpdateSchema {
+				return u.DeleteColumn([]string{"name"}).
+					AddColumn([]string{"name"}, str, "", false, nil)
+			},
+			checkID: func(t *testing.T, s *iceberg.Schema) {
+				f, ok := s.FindFieldByName("name")
+				require.True(t, ok)
+				assert.Equal(t, 12, f.ID)
+			},
+		},
+		{
+			name: "name of a column renamed away",
+			build: func(u *UpdateSchema) *UpdateSchema {
+				return u.RenameColumn([]string{"name"}, "full_name").
+					AddColumn([]string{"name"}, str, "", false, nil)
+			},
+			checkID: func(t *testing.T, s *iceberg.Schema) {
+				f, ok := s.FindFieldByName("name")
+				require.True(t, ok)
+				assert.Equal(t, 12, f.ID)
+				f, ok = s.FindFieldByName("full_name")
+				require.True(t, ok)
+				assert.Equal(t, 2, f.ID)
+			},
+		},
+	}
+
+	for _, tt := range allowed {
+		t.Run(tt.name, func(t *testing.T) {
+			txn := New([]string{"id"}, testMetadata, "", nil, nil).NewTransaction()
+
+			s, err := tt.build(NewUpdateSchema(txn, true, false)).Apply()
+			require.NoError(t, err)
+			tt.checkID(t, s)
+		})
+	}
+}
+
 func TestApplyChanges(t *testing.T) {
 	t.Run("test apply changes on schema", func(t *testing.T) {
 		deletes := map[int]struct{}{

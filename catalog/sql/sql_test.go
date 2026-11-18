@@ -28,10 +28,10 @@ import (
 	"io"
 	"maps"
 	"math/rand/v2"
-	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -117,8 +117,34 @@ func TestNewCatalogInvalidDialect(t *testing.T) {
 	assert.NoError(t, err)
 	defer sqldb.Close()
 
-	_, err = sqlcat.NewCatalog("default", sqldb, "foobar", nil)
+	_, err = sqlcat.NewCatalog(context.Background(), "default", sqldb, "foobar", nil)
 	assert.ErrorContains(t, err, "unsupported sql dialect")
+}
+
+func TestNewCatalogCancelledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	for _, initTables := range []string{"true", "false"} {
+		t.Run("init_catalog_tables="+initTables, func(t *testing.T) {
+			sqldb, err := sql.Open(sqliteshim.ShimName, ":memory:")
+			require.NoError(t, err)
+			defer sqldb.Close()
+
+			_, err = sqlcat.NewCatalog(ctx, "default", sqldb, sqlcat.SQLite, iceberg.Properties{
+				"init_catalog_tables": initTables,
+			})
+			assert.ErrorIs(t, err, context.Canceled)
+		})
+	}
+
+	_, err := catalog.Load(ctx, "sql", iceberg.Properties{
+		sqlcat.DriverKey:  sqliteshim.ShimName,
+		sqlcat.DialectKey: string(sqlcat.SQLite),
+		"uri":             ":memory:",
+		"type":            "sql",
+	})
+	assert.ErrorIs(t, err, context.Canceled)
 }
 
 func randomString(n int) string {
@@ -176,8 +202,18 @@ func (s *SqliteCatalogTestSuite) SetupTest() {
 	s.Require().NoError(err)
 }
 
+// catalogUri returns the file-backed SQLite DSN the whole suite shares, with a
+// busy timeout on every pooled connection; mattn and modernc both read
+// _busy_timeout. Catalog write transactions take the write lock before they
+// read, so a contended writer waits up to the timeout.
 func (s *SqliteCatalogTestSuite) catalogUri() string {
-	return "file://" + filepath.Join(s.warehouse, "sql-catalog.db")
+	return s.catalogURIWithBusyTimeout(5 * time.Second)
+}
+
+// catalogURIWithBusyTimeout returns the suite's DSN with another busy timeout.
+func (s *SqliteCatalogTestSuite) catalogURIWithBusyTimeout(timeout time.Duration) string {
+	return "file://" + filepath.Join(s.warehouse, "sql-catalog.db") +
+		"?_busy_timeout=" + strconv.FormatInt(timeout.Milliseconds(), 10)
 }
 
 func (s *SqliteCatalogTestSuite) confirmNoTables(db *sql.DB) {
@@ -1182,30 +1218,233 @@ func (s *SqliteCatalogTestSuite) TestListNamespaces() {
 		s.Require().NoError(cat.CreateNamespace(ctx, ns1, nil))
 		s.Require().NoError(cat.CreateNamespace(ctx, ns2, nil))
 
+		// The root lists first levels only, so ns2 appears as its first level.
 		nslist, err := cat.ListNamespaces(ctx, nil)
 		s.Require().NoError(err)
-		s.Len(nslist, 2)
-		s.Contains(nslist, ns1)
-		s.Contains(nslist, ns2)
+		s.ElementsMatch([]table.Identifier{ns1, ns2[:1]}, nslist)
 
 		ns, err := cat.ListNamespaces(ctx, ns1)
 		s.Require().NoError(err)
-		s.Len(ns, 1)
-		s.Equal(ns1, ns[0])
+		s.Empty(ns)
 
 		ns, err = cat.ListNamespaces(ctx, ns2)
 		s.Require().NoError(err)
-		s.Len(ns, 1)
-		s.Equal(ns2, ns[0])
+		s.Empty(ns)
 
 		_, err = cat.ListNamespaces(ctx, table.Identifier{"does_not_exist"})
 		s.ErrorIs(err, catalog.ErrNoSuchNamespace)
 
-		ns, err = cat.ListNamespaces(ctx, nil)
+		// A parent created only through its child is listed, and exists for
+		// every read, so the hierarchy can be walked from the root.
+		implied := table.Identifier{databaseName()}
+		impliedChild := append(slices.Clone(implied), "child")
+		s.Require().NoError(cat.CreateNamespace(ctx, impliedChild, nil))
+
+		nslist, err = cat.ListNamespaces(ctx, nil)
 		s.Require().NoError(err)
-		s.Len(ns, 2)
-		s.Equal(ns1, ns[0])
-		s.Equal(ns2, ns[1])
+		s.Contains(nslist, implied)
+		ns, err = cat.ListNamespaces(ctx, implied)
+		s.Require().NoError(err)
+		s.Equal([]table.Identifier{impliedChild}, ns)
+		ns, err = cat.ListNamespaces(ctx, impliedChild)
+		s.Require().NoError(err)
+		s.Empty(ns)
+
+		exists, err := cat.CheckNamespaceExists(ctx, implied)
+		s.Require().NoError(err)
+		s.True(exists)
+		exists, err = cat.CheckNamespaceExists(ctx, nil)
+		s.Require().NoError(err)
+		s.False(exists)
+		props, err := cat.LoadNamespaceProperties(ctx, implied)
+		s.Require().NoError(err)
+		s.Empty(props)
+		for _, err := range cat.ListTables(ctx, implied) {
+			s.Require().NoError(err)
+		}
+		for _, err := range cat.ListViews(ctx, implied) {
+			s.Require().NoError(err)
+		}
+		s.ErrorIs(cat.DropNamespace(ctx, implied), catalog.ErrNamespaceNotEmpty)
+
+		// Creating the parent itself still succeeds.
+		s.Require().NoError(cat.CreateNamespace(ctx, implied, nil))
+		s.ErrorIs(cat.CreateNamespace(ctx, implied, nil), catalog.ErrNamespaceAlreadyExists)
+	}
+}
+
+func (s *SqliteCatalogTestSuite) TestCreateInNamespaceWithOnlyChildren() {
+	for _, cat := range []*sqlcat.Catalog{s.getCatalogMemory(), s.getCatalogSqlite()} {
+		ctx := context.Background()
+		schema := iceberg.NewSchema(1, iceberg.NestedField{
+			ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true,
+		})
+
+		// Each operation gets its own namespace that has only a child and no
+		// row of its own, so one operation's table row cannot satisfy another
+		// operation's existence check.
+		childrenOnly := func() table.Identifier {
+			ns := table.Identifier{databaseName()}
+			s.Require().NoError(cat.CreateNamespace(ctx, append(slices.Clone(ns), "child"), nil))
+
+			exists, err := cat.CheckNamespaceExists(ctx, ns)
+			s.Require().NoError(err)
+			s.Require().True(exists)
+
+			return ns
+		}
+
+		// CheckNamespaceExists is true, so tables and views can be created
+		// there, and a table can be renamed into it.
+		createNS := childrenOnly()
+		_, err := cat.CreateTable(ctx, append(slices.Clone(createNS), tableName()), tableSchemaNested)
+		s.Require().NoError(err)
+
+		renameNS := childrenOnly()
+		other := table.Identifier{databaseName()}
+		s.Require().NoError(cat.CreateNamespace(ctx, other, nil))
+		moved := append(slices.Clone(renameNS), tableName())
+		_, err = cat.CreateTable(ctx, append(slices.Clone(other), tableName()), tableSchemaNested)
+		s.Require().NoError(err)
+		for id, err := range cat.ListTables(ctx, other) {
+			s.Require().NoError(err)
+			_, err = cat.RenameTable(ctx, id, moved)
+			s.Require().NoError(err)
+		}
+
+		viewNS := childrenOnly()
+		createdView := append(slices.Clone(viewNS), tableName())
+		s.Require().NoError(createTestView(ctx, cat, createdView, schema,
+			view.Representation{SQL: "SELECT 1", Dialect: "spark"}, nil))
+
+		renameViewNS := childrenOnly()
+		movedView := append(slices.Clone(renameViewNS), tableName())
+		_, err = cat.RenameView(ctx, createdView, movedView)
+		s.Require().NoError(err)
+
+		commitNS := childrenOnly()
+		_, _, err = cat.CommitTable(ctx, append(slices.Clone(commitNS), tableName()),
+			[]table.Requirement{table.AssertCreate()}, []table.Update{
+				table.NewSetLocationUpdate("file:///tmp/warehouse/" + strings.Join(commitNS, "/")),
+			})
+		s.Require().NoError(err)
+
+		// A namespace with neither a row nor children still does not exist.
+		missing := table.Identifier{databaseName()}
+		_, err = cat.CreateTable(ctx, append(slices.Clone(missing), tableName()), tableSchemaNested)
+		s.ErrorIs(err, catalog.ErrNoSuchNamespace)
+		_, err = cat.RenameTable(ctx, moved, append(slices.Clone(missing), tableName()))
+		s.ErrorIs(err, catalog.ErrNoSuchNamespace)
+		s.ErrorIs(createTestView(ctx, cat, append(slices.Clone(missing), tableName()), schema,
+			view.Representation{SQL: "SELECT 1", Dialect: "spark"}, nil), catalog.ErrNoSuchNamespace)
+		_, err = cat.RenameView(ctx, movedView, append(slices.Clone(missing), tableName()))
+		s.ErrorIs(err, catalog.ErrNoSuchNamespace)
+		_, _, err = cat.CommitTable(ctx, append(slices.Clone(missing), tableName()),
+			[]table.Requirement{table.AssertCreate()}, []table.Update{
+				table.NewSetLocationUpdate("file:///tmp/warehouse/" + strings.Join(missing, "/")),
+			})
+		s.ErrorIs(err, catalog.ErrNoSuchNamespace)
+	}
+}
+
+func (s *SqliteCatalogTestSuite) TestDropNamespaceWithChildOnlyInTableRow() {
+	cat := s.getCatalogSqlite()
+	ctx := context.Background()
+	parent := table.Identifier{databaseName()}
+	child := append(slices.Clone(parent), "child")
+	s.Require().NoError(cat.CreateNamespace(ctx, parent, nil))
+	s.Require().NoError(cat.CreateNamespace(ctx, child, nil))
+	_, err := cat.CreateTable(ctx, append(slices.Clone(child), tableName()), tableSchemaNested)
+	s.Require().NoError(err)
+
+	// Leave the child only in iceberg_tables, as catalogs without
+	// namespace property rows do.
+	sqldb := s.getDB()
+	defer sqldb.Close()
+	_, err = sqldb.Exec(`DELETE FROM iceberg_namespace_properties WHERE catalog_name = ? AND namespace = ?`,
+		cat.Name(), strings.Join(child, "."))
+	s.Require().NoError(err)
+
+	children, err := cat.ListNamespaces(ctx, parent)
+	s.Require().NoError(err)
+	s.Equal([]table.Identifier{child}, children)
+	s.ErrorIs(cat.DropNamespace(ctx, parent), catalog.ErrNamespaceNotEmpty)
+}
+
+func (s *SqliteCatalogTestSuite) TestDropNamespaceWithDottedChild() {
+	for _, cat := range []*sqlcat.Catalog{s.getCatalogMemory(), s.getCatalogSqlite()} {
+		ctx := context.Background()
+		parent := table.Identifier{databaseName()}
+		// The dotted level forces the JSON-encoded storage key.
+		child := append(slices.Clone(parent), "x.y")
+		s.Require().NoError(cat.CreateNamespace(ctx, parent, nil))
+		s.Require().NoError(cat.CreateNamespace(ctx, child, nil))
+
+		children, err := cat.ListNamespaces(ctx, parent)
+		s.Require().NoError(err)
+		s.Equal([]table.Identifier{child}, children)
+		s.ErrorIs(cat.DropNamespace(ctx, parent), catalog.ErrNamespaceNotEmpty)
+
+		s.Require().NoError(cat.DropNamespace(ctx, child))
+		s.Require().NoError(cat.DropNamespace(ctx, parent))
+	}
+}
+
+func (s *SqliteCatalogTestSuite) TestNamespaceLevelsCompareCase() {
+	for _, cat := range []*sqlcat.Catalog{s.getCatalogMemory(), s.getCatalogSqlite()} {
+		ctx := context.Background()
+		lower := table.Identifier{databaseName()}
+		// SQLite's LIKE ignores ASCII case, so the query alone would treat
+		// this as a child of lower.
+		upperChild := table.Identifier{strings.ToUpper(lower[0]), "eu"}
+		s.Require().NoError(cat.CreateNamespace(ctx, lower, nil))
+		s.Require().NoError(cat.CreateNamespace(ctx, upperChild, nil))
+
+		root, err := cat.ListNamespaces(ctx, nil)
+		s.Require().NoError(err)
+		s.ElementsMatch([]table.Identifier{lower, upperChild[:1]}, root)
+		children, err := cat.ListNamespaces(ctx, lower)
+		s.Require().NoError(err)
+		s.Empty(children)
+		s.ErrorIs(cat.DropNamespace(ctx, upperChild[:1]), catalog.ErrNamespaceNotEmpty)
+		s.Require().NoError(cat.DropNamespace(ctx, lower))
+
+		exists, err := cat.CheckNamespaceExists(ctx, lower)
+		s.Require().NoError(err)
+		s.False(exists)
+		exists, err = cat.CheckNamespaceExists(ctx, upperChild[:1])
+		s.Require().NoError(err)
+		s.True(exists)
+	}
+}
+
+func (s *SqliteCatalogTestSuite) TestNestedNamespaces() {
+	catalogs := []*sqlcat.Catalog{s.getCatalogMemory(), s.getCatalogSqlite()}
+
+	for _, cat := range catalogs {
+		ctx := context.Background()
+		parent := table.Identifier{databaseName()}
+		child := append(slices.Clone(parent), "child")
+		grandchild := append(slices.Clone(child), "grandchild")
+		for _, ns := range []table.Identifier{parent, child, grandchild} {
+			s.Require().NoError(cat.CreateNamespace(ctx, ns, nil))
+		}
+
+		root, err := cat.ListNamespaces(ctx, nil)
+		s.Require().NoError(err)
+		s.Equal([]table.Identifier{parent}, root)
+		children, err := cat.ListNamespaces(ctx, parent)
+		s.Require().NoError(err)
+		s.Equal([]table.Identifier{child}, children)
+		children, err = cat.ListNamespaces(ctx, child)
+		s.Require().NoError(err)
+		s.Equal([]table.Identifier{grandchild}, children)
+
+		s.ErrorIs(cat.DropNamespace(ctx, parent), catalog.ErrNamespaceNotEmpty)
+		s.ErrorIs(cat.DropNamespace(ctx, child), catalog.ErrNamespaceNotEmpty)
+		for _, ns := range []table.Identifier{grandchild, child, parent} {
+			s.Require().NoError(cat.DropNamespace(ctx, ns))
+		}
 	}
 }
 
@@ -1224,19 +1463,21 @@ func (s *SqliteCatalogTestSuite) TestDottedNamespaceComponentsRemainDistinct() {
 		s.Require().NoError(cat.CreateNamespace(ctx, dottedChild, nil))
 		s.Require().NoError(cat.CreateNamespace(ctx, hierarchicalChild, nil))
 
+		// "company_.<tag>" is one level of dotted, but only a prefix of
+		// hierarchical's first two levels, so the root lists both separately.
 		namespaces, err := cat.ListNamespaces(ctx, nil)
 		s.Require().NoError(err)
-		s.Contains(namespaces, dotted)
-		s.Contains(namespaces, hierarchical)
-		s.Contains(namespaces, dottedChild)
-		s.Contains(namespaces, hierarchicalChild)
+		s.Contains(namespaces, dotted[:1])
+		s.Contains(namespaces, hierarchical[:1])
+		s.NotContains(namespaces, dotted)
+		s.NotContains(namespaces, hierarchical)
 
 		dottedNamespaces, err := cat.ListNamespaces(ctx, dotted)
 		s.Require().NoError(err)
-		s.ElementsMatch([]table.Identifier{dotted, dottedChild}, dottedNamespaces)
+		s.ElementsMatch([]table.Identifier{dottedChild}, dottedNamespaces)
 		hierarchicalNamespaces, err := cat.ListNamespaces(ctx, hierarchical)
 		s.Require().NoError(err)
-		s.ElementsMatch([]table.Identifier{hierarchical, hierarchicalChild}, hierarchicalNamespaces)
+		s.ElementsMatch([]table.Identifier{hierarchicalChild}, hierarchicalNamespaces)
 
 		dottedProps, err := cat.LoadNamespaceProperties(ctx, dotted)
 		s.Require().NoError(err)
@@ -1334,7 +1575,7 @@ func (s *SqliteCatalogTestSuite) TestLegacyNamespaceEncodingPrefixRemainsReadabl
 	s.True(exists)
 	children, err := cat.ListNamespaces(ctx, legacyIdent)
 	s.Require().NoError(err)
-	s.Contains(children, legacyIdent)
+	s.Empty(children)
 	props, err := cat.LoadNamespaceProperties(ctx, legacyIdent)
 	s.Require().NoError(err)
 	s.Equal("legacy", props["owner"])
@@ -1372,7 +1613,7 @@ func (s *SqliteCatalogTestSuite) TestListNamespacesEscapesLikeWildcards() {
 
 		namespaces, err := cat.ListNamespaces(ctx, parent)
 		s.Require().NoError(err)
-		s.ElementsMatch([]table.Identifier{parent, child}, namespaces)
+		s.ElementsMatch([]table.Identifier{child}, namespaces)
 
 		s.Require().NoError(cat.DropNamespace(ctx, child))
 		s.Require().NoError(cat.DropNamespace(ctx, parent))
@@ -2550,8 +2791,7 @@ func (s *SqliteCatalogTestSuite) TestCreateaNamespaceWithCommentAndLocation() {
 		s.Require().NoError(tt.cat.CreateNamespace(ctx, tt.namespace, testProps))
 		loadedList, err := tt.cat.ListNamespaces(ctx, nil)
 		s.Require().NoError(err)
-		s.Len(loadedList, 1)
-		s.Equal(tt.namespace, loadedList[0])
+		s.Equal([]table.Identifier{tt.namespace[:1]}, loadedList)
 
 		props, err := tt.cat.LoadNamespaceProperties(ctx, tt.namespace)
 		s.Require().NoError(err)
@@ -2577,8 +2817,7 @@ func (s *SqliteCatalogTestSuite) TestDropNamespace() {
 
 		nslist, err := tt.cat.ListNamespaces(ctx, nil)
 		s.Require().NoError(err)
-		s.Len(nslist, 1)
-		s.Equal(ns, nslist[0])
+		s.Equal([]table.Identifier{ns[:1]}, nslist)
 
 		_, err = tt.cat.CreateTable(ctx, tt.tblID, tableSchemaNested)
 		s.Require().NoError(err)
@@ -2659,10 +2898,11 @@ func (s *SqliteCatalogTestSuite) TestCreateNamespaceConcurrent() {
 	// gets ErrNamespaceAlreadyExists, not the driver's duplicate-key error.
 	const writers = 8
 
-	// A busy timeout so the writers queue on the sqlite lock instead of failing
-	// with SQLITE_BUSY, which is a different contention problem to this one.
+	// The shared catalogUri() DSN carries a busy timeout, so the writers queue
+	// on the sqlite lock instead of failing with SQLITE_BUSY, which is a
+	// different contention problem to this one.
 	loaded, err := catalog.Load(context.Background(), "default", iceberg.Properties{
-		"uri":             s.catalogUri() + "?_pragma=" + url.QueryEscape("busy_timeout(10000)"),
+		"uri":             s.catalogUri(),
 		sqlcat.DriverKey:  sqliteshim.ShimName,
 		sqlcat.DialectKey: string(sqlcat.SQLite),
 		"type":            "sql",
@@ -2893,7 +3133,7 @@ func (s *SqliteCatalogTestSuite) newAbortCatalog(mode insertFailure) (*sqlcat.Ca
 
 	// Postgres dialect so the savepoint-backed recovery path runs; the driver
 	// above emulates Postgres aborting the tx over an sqlite base.
-	cat, err := sqlcat.NewCatalog("default", sqldb, sqlcat.Postgres, iceberg.Properties{"warehouse": "file://" + s.warehouse})
+	cat, err := sqlcat.NewCatalog(context.Background(), "default", sqldb, sqlcat.Postgres, iceberg.Properties{"warehouse": "file://" + s.warehouse})
 	s.Require().NoError(err)
 
 	return cat, drv
@@ -2982,7 +3222,7 @@ func (s *SqliteCatalogTestSuite) newDupCatalog() (*sqlcat.Catalog, *dupInsertDri
 
 	// SQLite dialect so the non-Postgres recovery branch (plain insert + re-check)
 	// runs; the driver rolls back only the failing statement, so no savepoint.
-	cat, err := sqlcat.NewCatalog("default", sqldb, sqlcat.SQLite, iceberg.Properties{"warehouse": "file://" + s.warehouse})
+	cat, err := sqlcat.NewCatalog(context.Background(), "default", sqldb, sqlcat.SQLite, iceberg.Properties{"warehouse": "file://" + s.warehouse})
 	s.Require().NoError(err)
 
 	return cat, drv
@@ -3569,6 +3809,119 @@ func (s *SqliteCatalogTestSuite) TestConcurrentTableViewCollisionUnderLockConten
 	} else {
 		s.ErrorIs(second.err, catalog.ErrViewAlreadyExists)
 	}
+}
+
+// TestCreateWaitsOnBusyTimeoutWhileWriteLockHeld pins that SQLite write transactions
+// queue on the DSN's busy_timeout. A write transaction that reads before it writes
+// cannot wait for the write lock: SQLite skips the busy handler for that upgrade and
+// returns SQLITE_BUSY at once. The lock is held for longer than the whole lock-retry
+// budget in retrySerializableWriteTx, so only a create that waits on busy_timeout can
+// succeed.
+func (s *SqliteCatalogTestSuite) TestCreateWaitsOnBusyTimeoutWhileWriteLockHeld() {
+	const holdWriteLockFor = 500 * time.Millisecond
+
+	tests := []struct {
+		name   string
+		create func(context.Context, *sqlcat.Catalog, table.Identifier) error
+	}{
+		{
+			name: "table",
+			create: func(ctx context.Context, cat *sqlcat.Catalog, identifier table.Identifier) error {
+				_, err := cat.CreateTable(ctx, identifier, tableSchemaNested)
+
+				return err
+			},
+		},
+		{
+			name: "view",
+			create: func(ctx context.Context, cat *sqlcat.Catalog, identifier table.Identifier) error {
+				return createTestView(ctx, cat, identifier, tableSchemaNested, view.Representation{SQL: "SELECT 1", Dialect: "spark"}, nil)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		s.Run(tt.name, func() {
+			ctx := context.Background()
+			sqlDB := s.getDB()
+			_, err := sqlDB.Exec("PRAGMA journal_mode=WAL")
+			s.Require().NoError(err)
+			_, err = sqlDB.Exec("CREATE TABLE IF NOT EXISTS lock_holder(x)")
+			s.Require().NoError(err)
+			s.Require().NoError(sqlDB.Close())
+
+			cat, err := catalog.Load(ctx, "default", iceberg.Properties{
+				"uri":             s.catalogURIWithBusyTimeout(5 * time.Second),
+				sqlcat.DriverKey:  sqliteshim.ShimName,
+				sqlcat.DialectKey: string(sqlcat.SQLite),
+				"type":            "sql",
+				"warehouse":       "file://" + s.warehouse,
+			})
+			s.Require().NoError(err)
+			db := cat.(*sqlcat.Catalog)
+			identifier := s.randomTableIdentifier()
+			s.Require().NoError(db.CreateNamespace(ctx, catalog.NamespaceFromIdent(identifier), nil))
+
+			holder := s.getDB()
+			tx, err := holder.BeginTx(ctx, nil)
+			s.Require().NoError(err)
+			_, err = tx.ExecContext(ctx, "INSERT INTO lock_holder VALUES (1)")
+			s.Require().NoError(err)
+
+			released := make(chan struct{})
+			time.AfterFunc(holdWriteLockFor, func() {
+				_ = tx.Rollback()
+				_ = holder.Close()
+				close(released)
+			})
+
+			s.Require().NoError(tt.create(ctx, db, identifier))
+			<-released
+		})
+	}
+}
+
+// TestCreateFailsAfterOneBusyTimeoutWhileWriteLockHeld pins that a write lock SQLite
+// did not grant within busy_timeout is returned, not retried: retrying would wait
+// busy_timeout once per attempt in retrySerializableWriteTx.
+func (s *SqliteCatalogTestSuite) TestCreateFailsAfterOneBusyTimeoutWhileWriteLockHeld() {
+	const busyTimeout = 500 * time.Millisecond
+
+	ctx := context.Background()
+	sqlDB := s.getDB()
+	_, err := sqlDB.Exec("PRAGMA journal_mode=WAL")
+	s.Require().NoError(err)
+	_, err = sqlDB.Exec("CREATE TABLE IF NOT EXISTS lock_holder(x)")
+	s.Require().NoError(err)
+	s.Require().NoError(sqlDB.Close())
+
+	cat, err := catalog.Load(ctx, "default", iceberg.Properties{
+		"uri":             s.catalogURIWithBusyTimeout(busyTimeout),
+		sqlcat.DriverKey:  sqliteshim.ShimName,
+		sqlcat.DialectKey: string(sqlcat.SQLite),
+		"type":            "sql",
+		"warehouse":       "file://" + s.warehouse,
+	})
+	s.Require().NoError(err)
+	db := cat.(*sqlcat.Catalog)
+	identifier := s.randomTableIdentifier()
+	s.Require().NoError(db.CreateNamespace(ctx, catalog.NamespaceFromIdent(identifier), nil))
+
+	holder := s.getDB()
+	defer holder.Close()
+	tx, err := holder.BeginTx(ctx, nil)
+	s.Require().NoError(err)
+	defer func() { _ = tx.Rollback() }()
+	_, err = tx.ExecContext(ctx, "INSERT INTO lock_holder VALUES (1)")
+	s.Require().NoError(err)
+
+	start := time.Now()
+	_, err = db.CreateTable(ctx, identifier, tableSchemaNested)
+	elapsed := time.Since(start)
+
+	s.Require().ErrorContains(err, "within busy_timeout")
+	// One wait is busy_timeout; a retried one would be six of them plus backoff.
+	s.Less(elapsed, 3*busyTimeout, "create waited %v", elapsed)
 }
 
 func (s *SqliteCatalogTestSuite) TestCreateRemovesMetadataIfCatalogInsertFails() {

@@ -128,7 +128,11 @@ func (LocalFS) Remove(_ context.Context, name string) error {
 	return os.Remove(path)
 }
 
-func (LocalFS) RemoveAll(name string) error {
+func (LocalFS) RemoveAll(ctx context.Context, name string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	path, err := localPath(name)
 	if err != nil {
 		return err
@@ -165,7 +169,11 @@ func (LocalFS) ReadDir(name string) ([]fs.DirEntry, error) {
 	return os.ReadDir(path)
 }
 
-func (LocalFS) MkdirAll(name string) error {
+func (LocalFS) MkdirAll(ctx context.Context, name string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	path, err := localPath(name)
 	if err != nil {
 		return err
