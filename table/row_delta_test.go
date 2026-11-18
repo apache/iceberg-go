@@ -523,6 +523,130 @@ func TestRowDeltaMultipleCommitsOnSameTransaction(t *testing.T) {
 	assert.Equal(t, strconv.Itoa(2), snap.Summary.Properties["total-data-files"])
 }
 
+// Why: a reused RowDelta builder re-stages every file it already holds,
+// so a data file staged by the first Commit goes live twice.
+// Condition: Commit is called a second time on the same builder, after a
+// successful first call or after a failed one.
+// Assertion: the second Commit fails with ErrInvalidOperation and stages
+// nothing, so the table holds each file once.
+func TestRowDeltaCommitSingleShot(t *testing.T) {
+	t.Run("data files are not staged twice", func(t *testing.T) {
+		tbl := newRowDeltaCommitTestTable(t)
+		tx := tbl.NewTransaction()
+
+		rd := tx.NewRowDelta(nil).AddRows(buildDataFile(t, "s3://bucket/data/f1.parquet"))
+		require.NoError(t, rd.Commit(t.Context()))
+
+		rd.AddRows(buildDataFile(t, "s3://bucket/data/f2.parquet"))
+		err := rd.Commit(t.Context())
+		require.Error(t, err)
+		assert.ErrorIs(t, err, table.ErrInvalidOperation)
+		assert.Contains(t, err.Error(), "already called")
+
+		result, err := tx.Commit(t.Context())
+		require.NoError(t, err)
+
+		snap := result.CurrentSnapshot()
+		require.NotNil(t, snap)
+		assert.Equal(t, "1", snap.Summary.Properties["total-data-files"])
+		assert.Equal(t, "10", snap.Summary.Properties["total-records"])
+	})
+
+	t.Run("deletion vector supersession", func(t *testing.T) {
+		tbl, location, dataPath, dv1 := newTableWithLiveDV(t)
+
+		dv2 := writeDV(t, location, "dv-002.puffin", dataPath, []int64{0, 1})
+		tx := tbl.NewTransaction()
+		rd := tx.NewRowDelta(nil).AddDeletes(dv2).RemoveDeletes(dv1)
+		require.NoError(t, rd.Commit(t.Context()))
+
+		err := rd.Commit(t.Context())
+		require.Error(t, err)
+		assert.ErrorIs(t, err, table.ErrInvalidOperation)
+		assert.Contains(t, err.Error(), "already called")
+
+		tbl, err = tx.Commit(t.Context())
+		require.NoError(t, err)
+		assertRowCount(t, tbl, 0)
+	})
+
+	t.Run("after a failed first call", func(t *testing.T) {
+		tbl := newRowDeltaCommitTestTable(t)
+		rd := tbl.NewTransaction().NewRowDelta(nil)
+
+		err := rd.Commit(t.Context())
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "at least one data file or delete file")
+
+		rd.AddRows(buildDataFile(t, "s3://bucket/data/f1.parquet"))
+		err = rd.Commit(t.Context())
+		require.Error(t, err)
+		assert.ErrorIs(t, err, table.ErrInvalidOperation)
+		assert.Contains(t, err.Error(), "already called")
+	})
+}
+
+// Why: a DV removal that cannot be resolved on the staged snapshot was
+// always reported as "do not belong to the table", even when an earlier
+// row delta in the same transaction had removed the DV.
+// Condition: after an earlier row delta in the transaction removes a DV,
+// a second row delta removes that DV, a DV that was never committed, or
+// a DV removed before the transaction, on main and on a branch the
+// transaction creates.
+// Assertion: only the DV removed earlier in the transaction is reported
+// as already removed; the others still do not belong to the table.
+func TestRowDeltaRemoveDeletesMissingFromStagedSnapshot(t *testing.T) {
+	const (
+		removedEarlier = "already removed it"
+		notInTable     = "do not belong to the table"
+	)
+
+	for _, branch := range []string{table.MainBranch, "feature"} {
+		t.Run(branch, func(t *testing.T) {
+			tbl, location, dataPath, dv1 := newTableWithLiveDV(t)
+
+			dv2 := writeDV(t, location, "dv-002.puffin", dataPath, []int64{0, 1})
+			tx := tbl.NewTransaction()
+			require.NoError(t, tx.NewRowDelta(nil).AddDeletes(dv2).RemoveDeletes(dv1).Commit(t.Context()))
+			tbl, err := tx.Commit(t.Context())
+			require.NoError(t, err)
+
+			dv3 := writeDV(t, location, "dv-003.puffin", dataPath, []int64{0, 1})
+			dv4 := writeDV(t, location, "dv-004.puffin", dataPath, []int64{0, 1})
+			neverCommitted := writeDV(t, location, "dv-never.puffin", dataPath, []int64{1})
+
+			tests := []struct {
+				name      string
+				remove    iceberg.DataFile
+				want      string
+				notWant   string
+				invalidOp bool
+			}{
+				{"removed earlier in the transaction", dv2, removedEarlier, notInTable, true},
+				{"never committed", neverCommitted, notInTable, removedEarlier, false},
+				{"removed before the transaction", dv1, notInTable, removedEarlier, false},
+			}
+			for _, tt := range tests {
+				t.Run(tt.name, func(t *testing.T) {
+					tx, err := tbl.NewTransactionOnBranch(branch)
+					require.NoError(t, err)
+					require.NoError(t, tx.NewRowDelta(nil).AddDeletes(dv3).RemoveDeletes(dv2).Commit(t.Context()))
+
+					err = tx.NewRowDelta(nil).AddDeletes(dv4).RemoveDeletes(tt.remove).Commit(t.Context())
+					require.Error(t, err)
+					assert.Contains(t, err.Error(), tt.want)
+					assert.NotContains(t, err.Error(), tt.notWant)
+					if tt.invalidOp {
+						assert.ErrorIs(t, err, table.ErrInvalidOperation)
+					} else {
+						assert.NotErrorIs(t, err, table.ErrInvalidOperation)
+					}
+				})
+			}
+		})
+	}
+}
+
 // writeParquetFile writes Arrow records to a Parquet file on local disk.
 func writeParquetFile(t testing.TB, path string, sc *arrow.Schema, jsonData string) {
 	t.Helper()
@@ -1824,7 +1948,8 @@ func TestRowDeltaFastAppendRejectsDuplicateAddedDVs(t *testing.T) {
 // Condition: Writer A adds a DV for data file D; a concurrent writer commits
 // the first DV for D before A's commit lands, forcing A to retry.
 // Assertion: A's commit fails on the retry (after one refresh, before a second
-// commit attempt) with the concurrent-DV conflict error.
+// commit attempt) with ErrConflictingDeleteFiles, and the transaction becomes
+// unusable.
 func TestRowDeltaRejectsConcurrentFirstDVOnRetry(t *testing.T) {
 	localFS := func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil }
 
@@ -1895,12 +2020,22 @@ func TestRowDeltaRejectsConcurrentFirstDVOnRetry(t *testing.T) {
 
 	_, err = txA.Commit(t.Context())
 	require.Error(t, err)
+	assert.ErrorIs(t, err, table.ErrConflictingDeleteFiles)
+	assert.ErrorIs(t, err, table.ErrCommitFailed)
+	assert.ErrorIs(t, err, table.ErrTransactionUnusable)
 	assert.Contains(t, err.Error(), "concurrent snapshot")
 	assert.Contains(t, err.Error(), dataPath)
 	assert.Equal(t, int32(1), catA.loadTableCalls.Load(),
 		"the commit must refresh once for the retry before rejecting")
 	assert.Equal(t, int32(1), catA.commitTableCalls.Load(),
 		"the validator must reject on the refreshed retry, before a second commit attempt")
+
+	// The conflict leaves the transaction unusable: committing it again fails
+	// before reaching the catalog.
+	_, err = txA.Commit(t.Context())
+	require.ErrorIs(t, err, table.ErrTransactionUnusable)
+	assert.Equal(t, int32(1), catA.loadTableCalls.Load())
+	assert.Equal(t, int32(1), catA.commitTableCalls.Load())
 }
 
 func writeRowDeltaDataFile(t *testing.T, tbl *table.Table, path string, ids ...int64) iceberg.DataFile {

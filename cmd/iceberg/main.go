@@ -456,7 +456,7 @@ func initCatalog(ctx context.Context, args Args) catalog.Catalog {
 			props[hive.Warehouse] = args.Warehouse
 		}
 
-		if cat, err = hive.NewCatalog(props); err != nil {
+		if cat, err = hive.NewCatalog(ctx, props); err != nil {
 			logFatal(err)
 		}
 	case catalog.Hadoop:

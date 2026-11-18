@@ -79,6 +79,7 @@ type RowDelta struct {
 	delFiles    []iceberg.DataFile
 	removedDels []iceberg.DataFile
 	props       iceberg.Properties
+	committed   bool
 }
 
 // NewRowDelta creates a new RowDelta for committing row-level changes
@@ -170,7 +171,17 @@ func (rd *RowDelta) RemoveDeletes(files ...iceberg.DataFile) *RowDelta {
 // optimistic-concurrency conflict fails the transaction's Commit with
 // ErrCommitFailed rather than refreshing and retrying (see
 // RemoveDeletes).
+//
+// Commit is single-shot: any second call returns an error wrapping
+// ErrInvalidOperation, whether or not the first call succeeded, and
+// stages nothing. Reusing the builder would otherwise stage every file
+// it holds a second time and register its conflict validator again.
 func (rd *RowDelta) Commit(ctx context.Context) error {
+	if rd.committed {
+		return fmt.Errorf("%w: RowDelta.Commit already called on this builder", ErrInvalidOperation)
+	}
+	rd.committed = true
+
 	meta, err := rd.txn.txnMeta()
 	if err != nil {
 		return err
@@ -540,13 +551,15 @@ func (rd *RowDelta) findReplacedLiveDVs(ctx context.Context, fs iceio.IO, meta *
 //
 // A removed file that does not resolve to a live delete entry is an
 // error: the producer would otherwise silently skip the removal and
-// the commit would strand two live DVs on one data file. Two removals
-// resolving to live entries that reference the same data file are also
-// an error — the producer keys DV removals by referenced data file, so
-// letting both through would silently drop one, and two live DVs on
-// one data file is a spec violation to surface, not paper over. For
-// the same reason a removal whose referenced data file matches more
-// than one live entry at the path is rejected: the producer would
+// the commit would strand two live DVs on one data file. When the file
+// is live on the snapshot the transaction started from, the error says
+// an operation staged earlier in the transaction removed it. Two
+// removals resolving to live entries that reference the same data file
+// are also an error — the producer keys DV removals by referenced data
+// file, so letting both through would silently drop one, and two live
+// DVs on one data file is a spec violation to surface, not paper over.
+// For the same reason a removal whose referenced data file matches
+// more than one live entry at the path is rejected: the producer would
 // tombstone every matching entry while the snapshot summary counts
 // only one removal.
 func (rd *RowDelta) resolveRemovedDeletes(ctx context.Context, fs iceio.IO, meta *MetadataBuilder) (resolved []iceberg.DataFile, _ error) {
@@ -580,6 +593,15 @@ func (rd *RowDelta) resolveRemovedDeletes(ctx context.Context, fs iceio.IO, meta
 		var live iceberg.DataFile
 		switch {
 		case len(candidates) == 0:
+			removed, err := rd.removedEarlierInTransaction(ctx, fs, snap, f.FilePath())
+			if err != nil {
+				return nil, err
+			}
+			if removed {
+				return nil, fmt.Errorf("%w: cannot remove delete file %s: an operation staged earlier in this transaction already removed it",
+					ErrInvalidOperation, f.FilePath())
+			}
+
 			return nil, fmt.Errorf("cannot remove delete files that do not belong to the table: %s", f.FilePath())
 		case len(candidates) == 1:
 			live = candidates[0]
@@ -632,6 +654,41 @@ func (rd *RowDelta) resolveRemovedDeletes(ctx context.Context, fs iceio.IO, meta
 	}
 
 	return resolved, nil
+}
+
+// removedEarlierInTransaction reports whether path is a live delete
+// entry on the snapshot the transaction started from.
+// resolveRemovedDeletes calls it only for a removal with no live entry
+// at that path on staged, the snapshot this delta plans against, so
+// true means a change staged earlier in the transaction left the file
+// no longer live. A delete file that was not live on the start
+// snapshot, such as one added and then removed earlier in the same
+// transaction, reports false, and the removal keeps the "do not belong
+// to the table" error. The start snapshot is resolved with
+// planningSnapshot, as staged is, so for a branch that did not exist
+// when the transaction started it is the main branch head. Because it
+// runs only after a removal has failed, a RowDelta.Commit that
+// succeeds never pays for this scan.
+func (rd *RowDelta) removedEarlierInTransaction(ctx context.Context, fs iceio.IO, staged *Snapshot, path string) (bool, error) {
+	startMeta, err := MetadataBuilderFromBase(rd.txn.tbl.metadata, rd.txn.tbl.metadataLocation)
+	if err != nil {
+		return false, err
+	}
+	start := rd.txn.planningSnapshot(startMeta)
+	if start == nil || start.SnapshotID == staged.SnapshotID {
+		return false, nil
+	}
+
+	for entry, err := range start.entries(ctx, fs, iceberg.ManifestContentDeletes, true) {
+		if err != nil {
+			return false, err
+		}
+		if entry.DataFile().FilePath() == path {
+			return true, nil
+		}
+	}
+
+	return false, nil
 }
 
 // validate is the client-side conflict check for a RowDelta commit. It
@@ -799,6 +856,12 @@ func (rd *RowDelta) validateNoConcurrentDuplicateDataPaths(cc *conflictContext) 
 // this delta also adds a DV for would strand two live DVs on one data file —
 // reject. A removal-carrying delta is non-replayable (see RemoveDeletes), so a
 // retry never has removals to reconcile against the concurrent DV here.
+// A conflict is reported as an error wrapping ErrConflictingDeleteFiles, and
+// so ErrCommitFailed, which makes Transaction.Commit fail with
+// ErrTransactionUnusable. To resolve it, build a new row delta from the
+// reloaded table that adds a DV holding both DVs' positions and removes the
+// concurrent DV with RemoveDeletes. Errors reading the concurrent snapshots'
+// manifests do not wrap ErrConflictingDeleteFiles.
 func (rd *RowDelta) validateNoConcurrentReplacedDVs(cc *conflictContext) error {
 	addedRefs := make(map[string]struct{}, len(rd.delFiles))
 	for _, f := range rd.delFiles {
@@ -806,23 +869,9 @@ func (rd *RowDelta) validateNoConcurrentReplacedDVs(cc *conflictContext) error {
 			addedRefs[ref] = struct{}{}
 		}
 	}
-	if len(addedRefs) == 0 {
-		return nil
-	}
 
-	return cc.forEachAddedEntry(iceberg.ManifestContentDeletes, func(snap Snapshot, entry iceberg.ManifestEntry) error {
-		df := entry.DataFile()
-		ref := explicitReferencedDataFile(df)
-		if !IsDeletionVector(df) || ref == "" {
-			return nil
-		}
-		if _, ok := addedRefs[ref]; ok {
-			return fmt.Errorf("cannot add a deletion vector for data file %s: concurrent snapshot %d committed a live deletion vector %s for it; reload the table and rewrite the DV to supersede the concurrent one, removing the superseded DV in the same row delta",
-				ref, snap.SnapshotID, df.FilePath())
-		}
-
-		return nil
-	})
+	return validateNoConcurrentDVs(cc, addedRefs,
+		"reload the table and rewrite the DV to supersede the concurrent one, removing the superseded DV in the same row delta")
 }
 
 // Operation returns the snapshot operation type that will be used when

@@ -45,9 +45,8 @@ type BooleanExprVisitor[T any] interface {
 // methods for visiting bound expressions, because we do casting of literals
 // during binding you can assume that the BoundTerm and the Literal passed
 // to a method have the same type. Sets passed to VisitIn and VisitNotIn are
-// detached when dispatched through VisitBoundPredicate. The internal
-// VisitBoundPredicateRef path may pass borrowed sets to trusted built-in
-// visitors, which must not call Add or mutate their literal values.
+// detached when dispatched through VisitBoundPredicate, so a visitor may
+// modify them without affecting the predicate.
 type BoundBooleanExprVisitor[T any] interface {
 	BooleanExprVisitor[T]
 
@@ -82,9 +81,8 @@ type BoundGeospatialExprVisitor[T any] interface {
 	VisitBBoxNotIntersects(BoundTerm, BoundingBox) T
 }
 
-// boundSetExtremaExprVisitor is consulted only by the borrowed
-// VisitBoundPredicateRef path. It is used by trusted evaluators that can prune
-// an IN predicate from its precomputed minimum and maximum literals.
+// boundSetExtremaExprVisitor lets trusted evaluators prune an IN predicate
+// from its precomputed minimum and maximum literals.
 type boundSetExtremaExprVisitor[T any] interface {
 	VisitInWithExtrema(BoundTerm, Set[Literal], Literal, Literal) T
 }
@@ -193,17 +191,18 @@ func visitEvaluator(e BooleanExpression, visitor BooleanExprVisitor[bool]) bool 
 // panics with an error wrapping ErrNotImplemented. When reached through VisitExpr
 // that panic is recovered into a returned error; a caller invoking this directly
 // must implement the extension or recover the panic itself.
-// Set predicates are dispatched with detached literal sets. Trusted built-in
-// visitors that need the zero-copy path can use [VisitBoundPredicateRef].
+// Set predicates are dispatched with detached literal sets.
 func VisitBoundPredicate[T any](e BoundPredicate, visitor BoundBooleanExprVisitor[T]) T {
-	return visitBoundPredicate(e, visitor, false)
+	_, trusted := visitor.(trustedBoundSetVisitor)
+
+	return visitBoundPredicate(e, visitor, trusted)
 }
 
-// VisitBoundPredicateRef is the zero-copy dispatch path for trusted visitors
-// inside this module. It is gated by an internal token so external visitors
-// use VisitBoundPredicate and receive a detached set.
-func VisitBoundPredicateRef[T any](e BoundPredicate, visitor BoundBooleanExprVisitor[T], _ internal.BoundPredicateRef) T {
-	return visitBoundPredicate(e, visitor, true)
+// trustedBoundSetVisitor is implemented only inside this module, since
+// outside code cannot name internal.BoundPredicateRef. Such visitors get the
+// predicate's own sets and VisitInWithExtrema, and must not modify the sets.
+type trustedBoundSetVisitor interface {
+	BorrowBoundSets(internal.BoundPredicateRef)
 }
 
 func visitBoundPredicate[T any](e BoundPredicate, visitor BoundBooleanExprVisitor[T], borrowed bool) T {

@@ -137,9 +137,14 @@ func parseHiveURI(uri string) (string, int, error) {
 	return host, port, nil
 }
 
-func newHiveClient(uri string, opts *HiveOptions) (HiveClient, error) {
+// newHiveClient checks ctx only before dialing, because gohive's
+// ConnectToMetastore does not accept a context.
+func newHiveClient(ctx context.Context, uri string, opts *HiveOptions) (HiveClient, error) {
 	host, port, err := parseHiveURI(uri)
 	if err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	config := gohive.NewMetastoreConnectConfiguration()

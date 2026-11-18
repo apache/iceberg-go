@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-package table
+package internal_test
 
 import (
 	"math"
@@ -27,6 +27,8 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/arrow-go/v18/arrow/scalar"
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/table"
+	"github.com/apache/iceberg-go/table/internal"
 	"github.com/stretchr/testify/require"
 )
 
@@ -150,7 +152,7 @@ func TestPartitionStructBuilderAppendsTypedAndFallbackValues(t *testing.T) {
 		values[i+2] = tt.value
 	}
 	builder, partitionBuilder := newPartitionStructBuilderForTest(t, fields)
-	require.NoError(t, partitionBuilder.append(values))
+	require.NoError(t, partitionBuilder.Append(values))
 
 	partition := builder.NewArray().(*array.Struct)
 	defer partition.Release()
@@ -165,7 +167,7 @@ func TestPartitionStructBuilderAppendsNullValues(t *testing.T) {
 	builder, partitionBuilder := newPartitionStructBuilderForTest(t, []iceberg.NestedField{
 		{ID: 2, Name: "value", Type: iceberg.PrimitiveTypes.Int32},
 	})
-	require.NoError(t, partitionBuilder.append(nil))
+	require.NoError(t, partitionBuilder.Append(nil))
 
 	partition := builder.NewArray().(*array.Struct)
 	defer partition.Release()
@@ -190,7 +192,7 @@ func TestPartitionStructBuilderScalarFallbackPreservesValidation(t *testing.T) {
 			builder, partitionBuilder := newPartitionStructBuilderForTest(t, []iceberg.NestedField{
 				{ID: 2, Name: "value", Type: tt.typ},
 			})
-			err := partitionBuilder.append(map[int]any{2: tt.value})
+			err := partitionBuilder.Append(map[int]any{2: tt.value})
 			if tt.wantErr != "" {
 				require.ErrorContains(t, err, tt.wantErr)
 
@@ -207,10 +209,10 @@ func TestPartitionStructBuilderScalarFallbackPreservesValidation(t *testing.T) {
 func newPartitionStructBuilderForTest(
 	t *testing.T,
 	fields []iceberg.NestedField,
-) (*array.StructBuilder, *partitionStructBuilder) {
+) (*array.StructBuilder, *internal.PartitionStructBuilder) {
 	t.Helper()
 	partitionType := iceberg.NewStructType(fields...)
-	schema, err := SchemaToArrowSchema(iceberg.NewSchema(0, iceberg.NestedField{
+	schema, err := table.SchemaToArrowSchema(iceberg.NewSchema(0, iceberg.NestedField{
 		ID: 1, Name: "partition", Type: partitionType, Required: true,
 	}), nil, true, false)
 	require.NoError(t, err)
@@ -218,7 +220,7 @@ func newPartitionStructBuilderForTest(
 	require.True(t, ok)
 	builder := array.NewStructBuilder(memory.DefaultAllocator, structType)
 	t.Cleanup(builder.Release)
-	partitionBuilder, err := newPartitionStructBuilder(builder, partitionType)
+	partitionBuilder, err := internal.NewPartitionStructBuilder(builder, partitionType)
 	require.NoError(t, err)
 
 	return builder, partitionBuilder
@@ -238,8 +240,8 @@ func TestPartitionStructBuilderPreservesEmptyAndSpecialValues(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			builder, partitionBuilder := newPartitionStructBuilderForTest(t, []iceberg.NestedField{{ID: 2, Name: "value", Type: tt.typ}})
-			require.NoError(t, partitionBuilder.append(map[int]any{2: tt.value}))
-			require.NoError(t, partitionBuilder.append(nil))
+			require.NoError(t, partitionBuilder.Append(map[int]any{2: tt.value}))
+			require.NoError(t, partitionBuilder.Append(nil))
 			partition := builder.NewArray().(*array.Struct)
 			defer partition.Release()
 			require.True(t, partition.Field(0).IsValid(0))
@@ -252,7 +254,7 @@ func TestPartitionStructBuilderPreservesEmptyAndSpecialValues(t *testing.T) {
 func TestPartitionStructBuilderCopiesBinaryValues(t *testing.T) {
 	builder, partitionBuilder := newPartitionStructBuilderForTest(t, []iceberg.NestedField{{ID: 2, Name: "value", Type: iceberg.PrimitiveTypes.Binary}})
 	value := []byte("abc")
-	require.NoError(t, partitionBuilder.append(map[int]any{2: value}))
+	require.NoError(t, partitionBuilder.Append(map[int]any{2: value}))
 	value[0] = 'x'
 	partition := builder.NewArray().(*array.Struct)
 	defer partition.Release()
@@ -264,7 +266,7 @@ func TestPartitionValueScalarDecimal(t *testing.T) {
 	arrowType := &arrow.Decimal128Type{Precision: 10, Scale: 2}
 	value := iceberg.DecimalLiteral{Val: decimal128.FromI64(123), Scale: 2}
 
-	got, err := partitionValueScalar(value, typ, arrowType)
+	got, err := internal.PartitionValueScalar(value, typ, arrowType)
 	require.NoError(t, err)
 	require.Equal(t, value.Val, got.(*scalar.Decimal128).Value)
 }
@@ -286,7 +288,7 @@ func TestPartitionValueScalarRejectsMismatchedPartitionValues(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := partitionValueScalar(tt.value, tt.typ, tt.arrowType)
+			_, err := internal.PartitionValueScalar(tt.value, tt.typ, tt.arrowType)
 			require.ErrorContains(t, err, tt.want)
 		})
 	}

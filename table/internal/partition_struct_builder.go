@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-package table
+package internal
 
 import (
 	"fmt"
@@ -27,7 +27,7 @@ import (
 	"github.com/google/uuid"
 )
 
-type partitionStructBuilder struct {
+type PartitionStructBuilder struct {
 	builder *array.StructBuilder
 	fields  []partitionFieldBuilder
 }
@@ -41,15 +41,15 @@ type partitionFieldBuilder struct {
 	appendValue func(any) error
 }
 
-func newPartitionStructBuilder(
+func NewPartitionStructBuilder(
 	builder *array.StructBuilder,
 	partitionType *iceberg.StructType,
-) (*partitionStructBuilder, error) {
+) (*PartitionStructBuilder, error) {
 	arrowType, ok := builder.Type().(*arrow.StructType)
 	if !ok {
 		return nil, fmt.Errorf("partition builder has type %T, want struct", builder.Type())
 	}
-	lookup, err := newBuilderLookup("partition", arrowType.Fields(), builder.FieldBuilder)
+	lookup, err := NewBuilderLookup("partition", arrowType.Fields(), builder.FieldBuilder)
 	if err != nil {
 		return nil, err
 	}
@@ -57,7 +57,7 @@ func newPartitionStructBuilder(
 	for _, field := range partitionType.Fields() {
 		expected[field.ID] = struct{}{}
 	}
-	if err := validateBuilderLookup("partition", lookup, expected); err != nil {
+	if err := ValidateBuilderLookup("partition", lookup, expected); err != nil {
 		return nil, err
 	}
 
@@ -75,10 +75,10 @@ func newPartitionStructBuilder(
 		fields = append(fields, partitionField)
 	}
 
-	return &partitionStructBuilder{builder: builder, fields: fields}, nil
+	return &PartitionStructBuilder{builder: builder, fields: fields}, nil
 }
 
-func (b *partitionStructBuilder) append(values map[int]any) error {
+func (b *PartitionStructBuilder) Append(values map[int]any) error {
 	b.builder.Append(true)
 	for _, field := range b.fields {
 		if err := field.appendValue(values[field.id]); err != nil {
@@ -91,7 +91,7 @@ func (b *partitionStructBuilder) append(values map[int]any) error {
 
 func newPartitionFieldAppender(field partitionFieldBuilder) func(any) error {
 	appendScalar := func(value any) error {
-		sc, err := partitionValueScalar(value, field.typ, field.arrowType)
+		sc, err := PartitionValueScalar(value, field.typ, field.arrowType)
 		if err != nil {
 			return fmt.Errorf("partition field %q: %w", field.name, err)
 		}
@@ -165,7 +165,7 @@ func newTypedPartitionAppender[T any](
 	}
 }
 
-func partitionValueScalar(value any, typ iceberg.Type, arrowType arrow.DataType) (scalar.Scalar, error) {
+func PartitionValueScalar(value any, typ iceberg.Type, arrowType arrow.DataType) (scalar.Scalar, error) {
 	switch typ.(type) {
 	case iceberg.DateType:
 		switch value := value.(type) {
@@ -214,7 +214,7 @@ func partitionValueScalar(value any, typ iceberg.Type, arrowType arrow.DataType)
 	return scalar.MakeScalarParam(value, arrowType)
 }
 
-func newBuilderLookup(scope string, fields []arrow.Field, builder func(int) array.Builder) (map[int]array.Builder, error) {
+func NewBuilderLookup(scope string, fields []arrow.Field, builder func(int) array.Builder) (map[int]array.Builder, error) {
 	lookup := make(map[int]array.Builder, len(fields))
 	for idx, field := range fields {
 		id := getFieldID(field)
@@ -230,7 +230,7 @@ func newBuilderLookup(scope string, fields []arrow.Field, builder func(int) arra
 	return lookup, nil
 }
 
-func validateBuilderLookup(scope string, lookup map[int]array.Builder, expected map[int]struct{}) error {
+func ValidateBuilderLookup(scope string, lookup map[int]array.Builder, expected map[int]struct{}) error {
 	if len(lookup) != len(expected) {
 		return fmt.Errorf("%s schema has %d fields, want %d", scope, len(lookup), len(expected))
 	}
