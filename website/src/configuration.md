@@ -257,7 +257,7 @@ The SQL catalog has no functional-option surface. Construct it with `NewCatalog`
 
 ```go
 db, _ := sql.Open(sqliteshim.ShimName, "file:catalog.db")
-cat, err := sqlcat.NewCatalog("default", db, sqlcat.SQLite, iceberg.Properties{
+cat, err := sqlcat.NewCatalog(ctx, "default", db, sqlcat.SQLite, iceberg.Properties{
     "warehouse": "file:///tmp/warehouse",
 })
 ```

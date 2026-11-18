@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"github.com/apache/iceberg-go"
+	tblutils "github.com/apache/iceberg-go/table/internal"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -141,7 +142,7 @@ func TestSnapshotSummaryCollectorPartitionPathParity(t *testing.T) {
 
 	var collector SnapshotSummaryCollector
 	for _, partition := range partitions {
-		want := spec.PartitionToPath(newPartitionRecord(partition, spec.PartitionType(schema)), schema)
+		want := spec.PartitionToPath(tblutils.NewPartitionRecord(partition, spec.PartitionType(schema)), schema)
 		assert.Equal(t, want, collector.partitionPath(partition, schema, spec))
 	}
 	require.Len(t, collector.partitionPathPlans, 1)
@@ -150,7 +151,7 @@ func TestSnapshotSummaryCollectorPartitionPathParity(t *testing.T) {
 		iceberg.PartitionField{SourceIDs: []int{2}, FieldID: 1100, Name: "other#text", Transform: iceberg.IdentityTransform{}},
 	)
 	otherPartition := map[int]any{1100: "a/b c"}
-	want := otherSpec.PartitionToPath(newPartitionRecord(otherPartition, otherSpec.PartitionType(schema)), schema)
+	want := otherSpec.PartitionToPath(tblutils.NewPartitionRecord(otherPartition, otherSpec.PartitionType(schema)), schema)
 	assert.Equal(t, want, collector.partitionPath(otherPartition, schema, otherSpec))
 	require.Len(t, collector.partitionPathPlans, 2)
 
@@ -161,7 +162,7 @@ func TestSnapshotSummaryCollectorPartitionPathParity(t *testing.T) {
 	)
 	sameIDPartition := map[int]any{1101: "a/b c"}
 	want = sameIDSpec.PartitionToPath(
-		newPartitionRecord(sameIDPartition, sameIDSpec.PartitionType(schema)), schema)
+		tblutils.NewPartitionRecord(sameIDPartition, sameIDSpec.PartitionType(schema)), schema)
 	assert.Equal(t, want, collector.partitionPath(sameIDPartition, schema, sameIDSpec))
 	require.Len(t, collector.partitionPathPlans, 3)
 
@@ -172,7 +173,7 @@ func TestSnapshotSummaryCollectorPartitionPathParity(t *testing.T) {
 		iceberg.NestedField{ID: 3, Name: "integer", Type: iceberg.PrimitiveTypes.Int32},
 		iceberg.NestedField{ID: 4, Name: "bytes", Type: iceberg.PrimitiveTypes.Binary},
 	)
-	want = spec.PartitionToPath(newPartitionRecord(partitions[0], spec.PartitionType(alternateSchema)), alternateSchema)
+	want = spec.PartitionToPath(tblutils.NewPartitionRecord(partitions[0], spec.PartitionType(alternateSchema)), alternateSchema)
 	assert.Equal(t, want, collector.partitionPath(partitions[0], alternateSchema, spec))
 	require.Len(t, collector.partitionPathPlans, 4)
 }

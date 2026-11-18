@@ -23,6 +23,7 @@ import (
 
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/iceberg-go"
+	tblutils "github.com/apache/iceberg-go/table/internal"
 )
 
 // Entries returns every manifest entry in the current snapshot, including
@@ -38,7 +39,7 @@ func (i InspectTable) inspectEntries(
 	allSnapshots bool,
 	schemaFn func(*iceberg.StructType) *iceberg.Schema,
 ) (array.RecordReader, error) {
-	partitionType, err := unifiedPartitionType(i.tbl.Metadata())
+	partitionType, err := tblutils.UnifiedPartitionType(i.tbl.Metadata().PartitionSpecs(), i.tbl.Schema())
 	if err != nil {
 		return nil, fmt.Errorf("inspect %s: %w", name, err)
 	}

@@ -20,6 +20,7 @@ package sql
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -201,7 +202,7 @@ func init() {
 
 		// Here, name is the loader-supplied catalog name and is persisted as the
 		// catalog_name partition key on every row in the iceberg_tables and iceberg_namespace_properties.
-		cat, err := NewCatalog(name, sqldb, SupportedDialect(dialect), p)
+		cat, err := NewCatalog(ctx, name, sqldb, SupportedDialect(dialect), p)
 		if err != nil {
 			_ = sqldb.Close()
 
@@ -300,18 +301,184 @@ func withReadTx[R any](ctx context.Context, db *bun.DB, fn func(context.Context,
 }
 
 func withWriteTx(ctx context.Context, db *bun.DB, fn func(context.Context, bun.Tx) error) error {
-	return db.RunInTx(ctx, &sql.TxOptions{Isolation: sql.LevelDefault}, func(ctx context.Context, tx bun.Tx) error {
+	return runWriteTx(ctx, db, &sql.TxOptions{Isolation: sql.LevelDefault}, fn)
+}
+
+// runWriteTx runs fn in a write transaction. On SQLite it runs on a dedicated pooled
+// connection whose busy_timeout it caps to ctx's deadline for the transaction and then
+// restores, and it takes the write lock before fn reads anything.
+func runWriteTx(ctx context.Context, db *bun.DB, opts *sql.TxOptions, fn func(context.Context, bun.Tx) error) error {
+	if db.Dialect().Name() != dialect.SQLite {
+		return db.RunInTx(ctx, opts, fn)
+	}
+
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	capped, restore, err := capSQLiteBusyTimeout(ctx, conn)
+	if err != nil {
+		return err
+	}
+	defer restore()
+
+	return conn.RunInTx(ctx, opts, func(ctx context.Context, tx bun.Tx) error {
+		if err := lockSQLiteForWrite(ctx, tx, capped); err != nil {
+			return err
+		}
+
 		return fn(ctx, tx)
 	})
 }
 
+// lockSQLiteForWrite takes SQLite's write lock as the transaction's first statement.
+//
+// database/sql begins SQLite transactions as DEFERRED, so a write transaction that
+// reads first holds a read snapshot when its first write asks for the write lock.
+// SQLite does not consult the busy handler for that upgrade: it returns SQLITE_BUSY
+// at once, whatever busy_timeout the connection sets. A write that matches no rows,
+// issued before any read, requests the lock from no transaction, which is the one case
+// where SQLite waits on the busy handler. Writers then queue on busy_timeout instead of
+// failing fast, and the reads that follow see the latest committed state.
+//
+// The statement takes the lock even when the transaction goes on to return a sentinel
+// without writing, such as an identifier that already exists, so those paths wait for
+// a concurrent writer too.
+//
+// capped reports that busy_timeout was lowered to ctx's deadline, so a lock timeout
+// means the deadline ended the wait even if ctx has not yet noticed: busy_timeout is
+// whole milliseconds and can run out just before the deadline does.
+func lockSQLiteForWrite(ctx context.Context, tx bun.Tx, capped bool) error {
+	// The statement writes no rows; issuing it takes the write lock.
+	_, err := tx.NewUpdate().Model((*sqlIcebergTable)(nil)).
+		Set("catalog_name = catalog_name").Where("0").Exec(ctx)
+
+	return classifySQLiteLockError(ctx, err, capped, func() int64 {
+		// Read only now, so an uncontended transaction does not pay for it. A
+		// failed read counts as no busy_timeout, which keeps the error retryable.
+		var busyTimeout int64
+		_ = tx.QueryRowContext(ctx, "PRAGMA busy_timeout").Scan(&busyTimeout)
+
+		return busyTimeout
+	})
+}
+
+// classifySQLiteLockError turns the lock statement's error into what the
+// transaction should do. busyTimeout returns the connection's busy_timeout in
+// milliseconds and is called only for a lock SQLite may have waited on.
+func classifySQLiteLockError(ctx context.Context, err error, capped bool, busyTimeout func() int64) error {
+	switch {
+	case err == nil:
+		return nil
+	case ctx.Err() != nil, capped && isSQLiteBusyError(err):
+		// mattn reports a lock timeout here even when ctx's deadline ended the
+		// wait; keep the context error so callers can match it.
+		cause := context.Cause(ctx)
+		if cause == nil {
+			cause = context.DeadlineExceeded
+		}
+
+		return fmt.Errorf("failed to acquire sqlite write lock: %w", errors.Join(cause, err))
+	case isSQLiteReadOnlyError(err):
+		// Nothing can be written, so there is no lock to take and no upgrade to
+		// protect. Carry on without it: reads still return the catalog sentinels,
+		// such as an identifier that already exists, and a real write fails with
+		// the driver's own read-only error.
+		return nil
+	case isSQLiteBusyError(err) && busyTimeout() > 0:
+		return &sqliteLockWaitError{err: err}
+	default:
+		// This includes a shared-cache table lock, which SQLite reports at once
+		// without consulting the busy handler; isRetryableSerializableError
+		// retries it.
+		return fmt.Errorf("failed to acquire sqlite write lock: %w", err)
+	}
+}
+
+// capSQLiteBusyTimeout lowers conn's busy_timeout to the time remaining when ctx
+// has a deadline that comes sooner, and reports whether it did. Neither driver
+// interrupts the busy handler when ctx ends, so without the cap a deadline would
+// wait out the full busy_timeout. A cancellation without a deadline still does.
+// restore puts the connection's own busy_timeout back, or discards the connection
+// if it cannot, since the pragma would otherwise outlive this call in the pool.
+func capSQLiteBusyTimeout(ctx context.Context, conn bun.Conn) (bool, func(), error) {
+	noRestore := func() {}
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return false, noRestore, nil
+	}
+
+	var busyTimeout int64
+	if err := conn.QueryRowContext(ctx, "PRAGMA busy_timeout").Scan(&busyTimeout); err != nil {
+		return false, noRestore, fmt.Errorf("failed to read sqlite busy_timeout: %w", err)
+	}
+	if busyTimeout <= 0 {
+		return false, noRestore, nil
+	}
+	remaining := time.Until(deadline).Milliseconds()
+	if remaining <= 0 {
+		return false, noRestore, fmt.Errorf("failed to acquire sqlite write lock: %w", context.DeadlineExceeded)
+	}
+	if remaining >= busyTimeout {
+		return false, noRestore, nil
+	}
+
+	if _, err := conn.ExecContext(ctx, fmt.Sprintf("PRAGMA busy_timeout = %d", remaining)); err != nil {
+		return false, noRestore, fmt.Errorf("failed to cap sqlite busy_timeout: %w", err)
+	}
+	restore := func() {
+		query := fmt.Sprintf("PRAGMA busy_timeout = %d", busyTimeout)
+		if _, err := conn.ExecContext(context.WithoutCancel(ctx), query); err != nil {
+			_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+		}
+	}
+
+	return true, restore, nil
+}
+
+// sqliteshim selects different SQLite drivers by build target; their typed error
+// APIs are incompatible, but both expose the stable messages matched below.
+
+// isSQLiteLockError reports a lock conflict of either kind.
+func isSQLiteLockError(err error) bool {
+	return isSQLiteBusyError(err) || strings.Contains(err.Error(), "database table is locked")
+}
+
+// isSQLiteBusyError reports SQLITE_BUSY, the lock another connection holds on the
+// database file and the only one the busy handler waits on. SQLITE_LOCKED, a
+// shared-cache table lock ("database table is locked"), is not one.
+func isSQLiteBusyError(err error) bool {
+	return strings.Contains(err.Error(), "database is locked")
+}
+
+// isSQLiteReadOnlyError reports SQLITE_READONLY: a read-only file, a mode=ro
+// DSN or PRAGMA query_only.
+func isSQLiteReadOnlyError(err error) bool {
+	return strings.Contains(err.Error(), "readonly database")
+}
+
+// sqliteLockWaitError reports a write lock SQLite did not grant within the
+// connection's busy_timeout. SQLite has already waited, so retrySerializableWriteTx
+// returns it as is: retrying would multiply busy_timeout by the attempt count.
+type sqliteLockWaitError struct{ err error }
+
+func (e *sqliteLockWaitError) Error() string {
+	return "failed to acquire sqlite write lock within busy_timeout: " + e.err.Error()
+}
+
+func (e *sqliteLockWaitError) Unwrap() error { return e.err }
+
 const (
 	// The retry budget has to outlast a competing writer's transaction, not just a
-	// scheduling hiccup. SQLite serializes writers and reports a lock conflict on
-	// upgrade immediately, without consulting the busy handler, so a losing
-	// CreateTable/CreateView only observes the catalog-level conflict it should
-	// report once the winner commits. At 3 attempts the budget was 30ms, which a
-	// loaded machine exceeds, surfacing SQLITE_BUSY instead of
+	// scheduling hiccup. On SQLite it applies only when the connection's busy_timeout
+	// is 0, as with modernc's default: lockSQLiteForWrite then fails at once on a held
+	// lock, and a losing CreateTable/CreateView observes the catalog-level conflict it
+	// should report only once the winner commits. With a busy_timeout, including
+	// mattn's 5000ms default, SQLite waits on the lock itself and a timeout is not
+	// retried. At 3 attempts the budget was 30ms,
+	// which a loaded machine exceeds, surfacing SQLITE_BUSY instead of
 	// ErrTableAlreadyExists/ErrViewAlreadyExists.
 	//
 	// Attempts fire at 0/10/30/70/150/310ms (delay doubles per attempt), so the
@@ -325,9 +492,7 @@ const (
 
 func withSerializableWriteTx(ctx context.Context, db *bun.DB, fn func(context.Context, bun.Tx) error) error {
 	return retrySerializableWriteTx(ctx, func() error {
-		return db.RunInTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable}, func(ctx context.Context, tx bun.Tx) error {
-			return fn(ctx, tx)
-		})
+		return runWriteTx(ctx, db, &sql.TxOptions{Isolation: sql.LevelSerializable}, fn)
 	})
 }
 
@@ -356,6 +521,10 @@ func retrySerializableWriteTx(ctx context.Context, run func() error) error {
 }
 
 func isRetryableSerializableError(err error) bool {
+	if _, ok := errors.AsType[*sqliteLockWaitError](err); ok {
+		return false
+	}
+
 	var stateErr interface{ SQLState() string }
 	if errors.As(err, &stateErr) {
 		switch stateErr.SQLState() {
@@ -373,10 +542,7 @@ func isRetryableSerializableError(err error) bool {
 
 	msg := err.Error()
 
-	// sqliteshim selects different SQLite drivers by build target. Their typed
-	// error APIs are incompatible, but both expose these stable lock messages.
-	return strings.Contains(msg, "database is locked") ||
-		strings.Contains(msg, "database table is locked") ||
+	return isSQLiteLockError(err) ||
 		strings.Contains(msg, "ORA-08177") ||
 		strings.Contains(msg, "ORA-00060")
 }
@@ -411,7 +577,7 @@ func (c *Catalog) isV0() bool { return c.schemaVersion == schemaV0 }
 //
 // If the "init_catalog_tables" property is set to "true", then creating the catalog will also attempt to
 // to verify whether the necessary tables (iceberg_tables and iceberg_namespace_properties) exist, creating
-// them if they do not already exist.
+// them if they do not already exist. The table creation and schema version queries run on ctx.
 //
 // The environment variable ICEBERG_SQL_DEBUG can be set to automatically log the sql queries to the terminal:
 // - ICEBERG_SQL_DEBUG=1 logs only failed queries
@@ -421,8 +587,13 @@ func (c *Catalog) isV0() bool { return c.schemaVersion == schemaV0 }
 // of catalog changes.
 //
 // SQLite callers that allow concurrent writers should configure WAL and a busy timeout in the driver DSN so the
-// settings apply to every pooled connection. NewCatalog does not mutate connection settings on the caller-owned db.
-func NewCatalog(name string, db *sql.DB, dialect SupportedDialect, props iceberg.Properties) (*Catalog, error) {
+// settings apply to every pooled connection, for example "?_busy_timeout=5000", which both drivers sqliteshim
+// selects accept. Write transactions take SQLite's write lock before they read, so concurrent writers queue for up
+// to the busy timeout, or until the context's deadline if that is sooner, instead of failing with SQLITE_BUSY.
+// The driver's default applies when the DSN sets none: mattn waits 5000ms, while modernc does not wait, so
+// CreateTable, CreateView and the other operations that retry on a lock conflict give up after about 310ms and the
+// rest fail at once. NewCatalog does not mutate connection settings on the caller-owned db.
+func NewCatalog(ctx context.Context, name string, db *sql.DB, dialect SupportedDialect, props iceberg.Properties) (*Catalog, error) {
 	d, err := getDialect(dialect)
 	if err != nil {
 		return nil, err
@@ -435,8 +606,6 @@ func NewCatalog(name string, db *sql.DB, dialect SupportedDialect, props iceberg
 		// ICEBERG_SQL_DEBUG=1 logs only failed queries
 		// ICEBERG_SQL_DEBUG=2 log all queries
 		bundebug.FromEnv("ICEBERG_SQL_DEBUG")))
-
-	ctx := context.Background()
 
 	if cat.props.GetBool(initCatalogTablesKey, true) {
 		if err := cat.CreateSQLTables(ctx); err != nil {
@@ -913,11 +1082,11 @@ func (c *Catalog) CommitTable(ctx context.Context, ident table.Identifier, reqs 
 		return nil, "", err
 	}
 
-	runWriteTx := withWriteTx
+	commitTx := withWriteTx
 	if current == nil {
-		runWriteTx = withSerializableWriteTx
+		commitTx = withSerializableWriteTx
 	}
-	err = runWriteTx(ctx, c.db, func(ctx context.Context, tx bun.Tx) error {
+	err = commitTx(ctx, c.db, func(ctx context.Context, tx bun.Tx) error {
 		if current != nil {
 			// On V1, the model-driven UPDATE emits every non-PK field, writing
 			// iceberg_type=TABLE; this also heals legacy NULLs on commit, and the

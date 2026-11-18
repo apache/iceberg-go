@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"github.com/apache/iceberg-go"
+	tblutils "github.com/apache/iceberg-go/table/internal"
 )
 
 type inspectPartitionAggregationBenchmarkCase struct {
@@ -63,38 +64,38 @@ func benchmarkInspectPartitionAggregation(
 	b.ReportAllocs()
 	b.ReportMetric(float64(len(files)), "files/op")
 	for b.Loop() {
-		tree := newPartitionAggregateTree()
+		tree := tblutils.NewPartitionAggregateTree()
 		aggregateCount := 0
 		for _, file := range files {
-			var aggregate *partitionAggregate
+			var aggregate *tblutils.PartitionAggregate
 			if materialize {
-				partition := coercePartition(file.Partition(), partitionType)
-				record := newPartitionRecord(partition, partitionType)
-				aggregate = tree.lookup(record)
+				partition := tblutils.CoercePartition(file.Partition(), partitionType)
+				record := tblutils.NewPartitionRecord(partition, partitionType)
+				aggregate = tree.Lookup(record)
 				if aggregate == nil {
-					aggregate = &partitionAggregate{
-						partition:   clonePartition(partition),
-						orderingKey: inspectPartitionKey(partition),
+					aggregate = &tblutils.PartitionAggregate{
+						Partition:   tblutils.ClonePartition(partition),
+						OrderingKey: inspectPartitionKey(partition),
 					}
-					tree.insert(record, aggregate)
+					tree.Insert(record, aggregate)
 					aggregateCount++
 				}
 			} else {
 				partitionValues := dataFilePartition(file)
-				aggregate = tree.lookupPartition(partitionValues, partitionType)
+				aggregate = tree.LookupPartition(partitionValues, partitionType)
 				if aggregate == nil {
-					partition := coercePartition(partitionValues, partitionType)
-					record := newPartitionRecord(partition, partitionType)
-					aggregate = &partitionAggregate{
-						partition:   clonePartition(partition),
-						orderingKey: inspectPartitionKey(partition),
+					partition := tblutils.CoercePartition(partitionValues, partitionType)
+					record := tblutils.NewPartitionRecord(partition, partitionType)
+					aggregate = &tblutils.PartitionAggregate{
+						Partition:   tblutils.ClonePartition(partition),
+						OrderingKey: inspectPartitionKey(partition),
 					}
-					tree.insert(record, aggregate)
+					tree.Insert(record, aggregate)
 					aggregateCount++
 				}
 			}
 
-			aggregate.dataFileCount++
+			aggregate.DataFileCount++
 		}
 		inspectPartitionAggregationBenchmarkSink = aggregateCount
 	}
@@ -166,7 +167,7 @@ func BenchmarkInspectPartitionBinaryLookup(b *testing.B) {
 	}
 	partitionType := iceberg.NewStructType(fields...)
 
-	tree := newPartitionAggregateTree()
+	tree := tblutils.NewPartitionAggregateTree()
 	partitions := make([]map[int]any, partitionCount)
 	for i := range partitions {
 		record := make(partitionRecord, fieldCount)
@@ -176,7 +177,7 @@ func BenchmarkInspectPartitionBinaryLookup(b *testing.B) {
 			record[j] = value
 			partition[field.ID] = value
 		}
-		tree.insert(record, &partitionAggregate{})
+		tree.Insert(record, &tblutils.PartitionAggregate{})
 		partitions[i] = partition
 	}
 
@@ -184,7 +185,7 @@ func BenchmarkInspectPartitionBinaryLookup(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for b.Loop() {
-		if tree.lookupPartition(partitions[index], partitionType) == nil {
+		if tree.LookupPartition(partitions[index], partitionType) == nil {
 			b.Fatal("partition not found")
 		}
 		index++

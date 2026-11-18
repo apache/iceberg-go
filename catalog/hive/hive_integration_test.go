@@ -81,7 +81,7 @@ func createTestCatalog(t *testing.T) *Catalog {
 		Warehouse: getTestTableLocation(),
 	}
 
-	cat, err := NewCatalog(props)
+	cat, err := NewCatalog(context.Background(), props)
 	require.NoError(t, err)
 
 	return cat

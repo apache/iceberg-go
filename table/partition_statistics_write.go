@@ -32,6 +32,7 @@ import (
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
+	tblutils "github.com/apache/iceberg-go/table/internal"
 	"github.com/google/uuid"
 	"github.com/twmb/avro/ocf"
 )
@@ -171,7 +172,7 @@ func (t *Transaction) ComputePartitionStatistics(ctx context.Context) (*Partitio
 	if err := validatePartitionStatisticsSourceTypes(t.tbl.Metadata()); err != nil {
 		return nil, err
 	}
-	partitionType, err := unifiedPartitionType(t.tbl.Metadata())
+	partitionType, err := tblutils.UnifiedPartitionType(t.tbl.Metadata().PartitionSpecs(), t.tbl.Schema())
 	if err != nil {
 		return nil, fmt.Errorf("partition statistics: %w", err)
 	}
@@ -320,7 +321,7 @@ func collectPartitionStatistics(
 	specs []iceberg.PartitionSpec,
 	formatVersion int,
 	snapshotTimes map[int64]int64,
-) ([]*partitionAggregate, error) {
+) ([]*tblutils.PartitionAggregate, error) {
 	specByID := make(map[int32]iceberg.PartitionSpec, len(specs))
 	for _, spec := range specs {
 		specByID[int32(spec.ID())] = spec
@@ -330,7 +331,7 @@ func collectPartitionStatistics(
 		return nil, err
 	}
 
-	trees := make(map[int32]*partitionAggregateTree)
+	trees := make(map[int32]*tblutils.PartitionAggregateTree)
 	files := partitionStatisticsFileIndex{paths: make(map[string]string)}
 	var dataFiles map[string]partitionStatisticsDataFile
 	if formatVersion == 3 {
@@ -338,7 +339,7 @@ func collectPartitionStatistics(
 	}
 	vectors := make(map[string][]partitionStatisticsVector)
 	exactTotals := true
-	rows := make([]*partitionAggregate, 0)
+	rows := make([]*tblutils.PartitionAggregate, 0)
 	for _, manifest := range manifests {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -356,7 +357,7 @@ func collectPartitionStatistics(
 		}
 		tree := trees[specID]
 		if tree == nil {
-			tree = newPartitionAggregateTree()
+			tree = tblutils.NewPartitionAggregateTree()
 			trees[specID] = tree
 		}
 
@@ -397,7 +398,7 @@ func collectPartitionStatistics(
 			if err := validatePartitionStatisticsTuple(spec, file.FilePath(), values); err != nil {
 				return nil, err
 			}
-			partition := coercePartition(values, partitionType)
+			partition := tblutils.CoercePartition(values, partitionType)
 			for i := range partitionType.NumFields() {
 				field := partitionType.Field(i)
 				value := partition[field.ID]
@@ -418,19 +419,19 @@ func collectPartitionStatistics(
 					return nil, fmt.Errorf("partition field %q: %w", field.Name, err)
 				}
 			}
-			row := tree.lookupPartition(partition, partitionType)
+			row := tree.LookupPartition(partition, partitionType)
 			if row == nil {
-				row = &partitionAggregate{
-					specID:    specID,
-					partition: clonePartition(partition),
+				row = &tblutils.PartitionAggregate{
+					SpecID:    specID,
+					Partition: tblutils.ClonePartition(partition),
 				}
 				rows = append(rows, row)
-				tree.insert(newPartitionRecord(partition, partitionType), row)
+				tree.Insert(tblutils.NewPartitionRecord(partition, partitionType), row)
 			}
 			if timestamp, ok := snapshotTimes[entry.SnapshotID()]; ok &&
-				(row.statisticsUpdatedAt == nil || timestamp > *row.statisticsUpdatedAt) {
-				row.statisticsUpdatedAt = new(timestamp)
-				row.statisticsUpdatedSnapshot = new(entry.SnapshotID())
+				(row.StatisticsUpdatedAt == nil || timestamp > *row.StatisticsUpdatedAt) {
+				row.StatisticsUpdatedAt = new(timestamp)
+				row.StatisticsUpdatedSnapshot = new(entry.SnapshotID())
 			}
 			if entry.Status() == iceberg.EntryStatusDELETED {
 				continue
@@ -464,7 +465,7 @@ func collectPartitionStatistics(
 }
 
 type partitionStatisticsDataFile struct {
-	row      *partitionAggregate
+	row      *tblutils.PartitionAggregate
 	count    int64
 	sequence int64
 }
@@ -526,23 +527,23 @@ func (i *partitionStatisticsFileIndex) add(file iceberg.DataFile, manifest strin
 	return vector, nil
 }
 
-func accumulatePartitionStatistics(row *partitionAggregate, file iceberg.DataFile) error {
+func accumulatePartitionStatistics(row *tblutils.PartitionAggregate, file iceberg.DataFile) error {
 	var records *int64
 	var files *int32
 	switch file.ContentType() {
 	case iceberg.EntryContentData:
-		records, files = &row.dataRecordCount, &row.dataFileCount
-		if row.dataFileSize > math.MaxInt64-file.FileSizeBytes() {
+		records, files = &row.DataRecordCount, &row.DataFileCount
+		if row.DataFileSize > math.MaxInt64-file.FileSizeBytes() {
 			return fmt.Errorf("%w: partition statistics size overflow", iceberg.ErrInvalidArgument)
 		}
-		row.dataFileSize += file.FileSizeBytes()
+		row.DataFileSize += file.FileSizeBytes()
 	case iceberg.EntryContentPosDeletes:
-		records, files = &row.positionDeleteCount, &row.positionDeleteFiles
+		records, files = &row.PositionDeleteCount, &row.PositionDeleteFiles
 		if IsDeletionVector(file) {
-			files = &row.deletionVectorCount
+			files = &row.DeletionVectorCount
 		}
 	case iceberg.EntryContentEqDeletes:
-		records, files = &row.equalityDeleteCount, &row.equalityDeleteFiles
+		records, files = &row.EqualityDeleteCount, &row.EqualityDeleteFiles
 	default:
 		return fmt.Errorf("%w: unsupported statistics file content %d", iceberg.ErrInvalidArgument, file.ContentType())
 	}
@@ -555,11 +556,11 @@ func accumulatePartitionStatistics(row *partitionAggregate, file iceberg.DataFil
 	return nil
 }
 
-func finishPartitionStatistics(ctx context.Context, rows []*partitionAggregate, dataFiles map[string]partitionStatisticsDataFile, vectors map[string][]partitionStatisticsVector, exactTotals bool) error {
+func finishPartitionStatistics(ctx context.Context, rows []*tblutils.PartitionAggregate, dataFiles map[string]partitionStatisticsDataFile, vectors map[string][]partitionStatisticsVector, exactTotals bool) error {
 	for _, row := range rows {
-		row.totalRecordCount = nil
+		row.TotalRecordCount = nil
 		if exactTotals {
-			row.totalRecordCount = new(row.dataRecordCount)
+			row.TotalRecordCount = new(row.DataRecordCount)
 		}
 	}
 	for target, targetVectors := range vectors {
@@ -569,30 +570,30 @@ func finishPartitionStatistics(ctx context.Context, rows []*partitionAggregate, 
 		data, found := dataFiles[target]
 		if !found || len(targetVectors) != 1 {
 			for _, vector := range targetVectors {
-				vector.row.totalRecordCount = nil
+				vector.row.TotalRecordCount = nil
 			}
 			if found {
-				data.row.totalRecordCount = nil
+				data.row.TotalRecordCount = nil
 			}
 
 			continue
 		}
 		vector := targetVectors[0]
 		if vector.row != data.row {
-			vector.row.totalRecordCount = nil
-			data.row.totalRecordCount = nil
+			vector.row.TotalRecordCount = nil
+			data.row.TotalRecordCount = nil
 
 			continue
 		}
 		if vector.count > data.count || (data.sequence >= 0 && vector.sequence >= 0 && data.sequence > vector.sequence) {
-			data.row.totalRecordCount = nil
+			data.row.TotalRecordCount = nil
 
 			continue
 		}
 		if data.sequence < 0 || vector.sequence < 0 {
-			data.row.totalRecordCount = nil
-		} else if data.row.totalRecordCount != nil {
-			*data.row.totalRecordCount -= vector.count
+			data.row.TotalRecordCount = nil
+		} else if data.row.TotalRecordCount != nil {
+			*data.row.TotalRecordCount -= vector.count
 		}
 	}
 
@@ -612,14 +613,14 @@ func validatePartitionStatisticsTuple(spec iceberg.PartitionSpec, path string, v
 // sortPartitionStatistics obeys the spec's NULL FIRST tuple ordering, not
 // inspectPartitionKey's text ordering (where "10" sorts before "2").
 // A spec ID only breaks equal tuple ties; it is not the primary sort key.
-func sortPartitionStatistics(rows []*partitionAggregate, partitionType *iceberg.StructType) error {
+func sortPartitionStatistics(rows []*tblutils.PartitionAggregate, partitionType *iceberg.StructType) error {
 	// Collection already validates each partition value before using it as
 	// an aggregate key. Do not repeat that validation for every output row.
 	var sortErr error
-	slices.SortStableFunc(rows, func(a, b *partitionAggregate) int {
+	slices.SortStableFunc(rows, func(a, b *tblutils.PartitionAggregate) int {
 		for i := range partitionType.NumFields() {
 			field := partitionType.Field(i)
-			comp, err := comparePartitionStatisticValues(a.partition[field.ID], b.partition[field.ID])
+			comp, err := comparePartitionStatisticValues(a.Partition[field.ID], b.Partition[field.ID])
 			if err != nil {
 				sortErr = fmt.Errorf("partition field %q: %w", field.Name, err)
 
@@ -630,9 +631,9 @@ func sortPartitionStatistics(rows []*partitionAggregate, partitionType *iceberg.
 			}
 		}
 		switch {
-		case a.specID < b.specID:
+		case a.SpecID < b.SpecID:
 			return -1
-		case a.specID > b.specID:
+		case a.SpecID > b.SpecID:
 			return 1
 		default:
 			return 0
@@ -790,7 +791,7 @@ func writePartitionStatisticsParquet(
 	fs iceio.WriteFileIO,
 	path string,
 	partitionType *iceberg.StructType,
-	rows []*partitionAggregate,
+	rows []*tblutils.PartitionAggregate,
 	formatVersion int,
 ) (_ int64, err error) {
 	statsSchema, err := PartitionStatisticsSchema(partitionType, formatVersion)
@@ -821,56 +822,56 @@ func writePartitionStatisticsParquet(
 	bldr := array.NewRecordBuilder(memory.DefaultAllocator, sc)
 	defer bldr.Release()
 
-	part, err := newPartitionStructBuilder(bldr.Field(0).(*array.StructBuilder), partitionType)
+	part, err := tblutils.NewPartitionStructBuilder(bldr.Field(0).(*array.StructBuilder), partitionType)
 	if err != nil {
 		_ = writer.Close()
 		_ = fw.Close()
 
 		return 0, err
 	}
-	for start := 0; start < len(rows); start += recordBatchSize {
+	for start := 0; start < len(rows); start += tblutils.RecordBatchSize {
 		if err := ctx.Err(); err != nil {
 			_ = writer.Close()
 			_ = fw.Close()
 
 			return 0, err
 		}
-		end := min(start+recordBatchSize, len(rows))
+		end := min(start+tblutils.RecordBatchSize, len(rows))
 		for _, row := range rows[start:end] {
-			if err := part.append(row.partition); err != nil {
+			if err := part.Append(row.Partition); err != nil {
 				_ = writer.Close()
 				_ = fw.Close()
 
 				return 0, err
 			}
-			bldr.Field(1).(*array.Int32Builder).Append(row.specID)
-			bldr.Field(2).(*array.Int64Builder).Append(row.dataRecordCount)
-			bldr.Field(3).(*array.Int32Builder).Append(row.dataFileCount)
-			bldr.Field(4).(*array.Int64Builder).Append(row.dataFileSize)
+			bldr.Field(1).(*array.Int32Builder).Append(row.SpecID)
+			bldr.Field(2).(*array.Int64Builder).Append(row.DataRecordCount)
+			bldr.Field(3).(*array.Int32Builder).Append(row.DataFileCount)
+			bldr.Field(4).(*array.Int64Builder).Append(row.DataFileSize)
 			if formatVersion == 1 {
-				bldr.Field(5).(*array.Int64Builder).Append(row.dataRecordCount)
+				bldr.Field(5).(*array.Int64Builder).Append(row.DataRecordCount)
 			} else {
-				bldr.Field(5).(*array.Int64Builder).Append(row.positionDeleteCount)
-				bldr.Field(6).(*array.Int32Builder).Append(row.positionDeleteFiles)
-				bldr.Field(7).(*array.Int64Builder).Append(row.equalityDeleteCount)
-				bldr.Field(8).(*array.Int32Builder).Append(row.equalityDeleteFiles)
+				bldr.Field(5).(*array.Int64Builder).Append(row.PositionDeleteCount)
+				bldr.Field(6).(*array.Int32Builder).Append(row.PositionDeleteFiles)
+				bldr.Field(7).(*array.Int64Builder).Append(row.EqualityDeleteCount)
+				bldr.Field(8).(*array.Int32Builder).Append(row.EqualityDeleteFiles)
 				total := bldr.Field(9).(*array.Int64Builder)
-				if row.totalRecordCount == nil {
+				if row.TotalRecordCount == nil {
 					total.AppendNull()
 				} else {
-					total.Append(*row.totalRecordCount)
+					total.Append(*row.TotalRecordCount)
 				}
 				updatedAt := bldr.Field(10).(*array.Int64Builder)
 				updatedSnapshot := bldr.Field(11).(*array.Int64Builder)
-				if row.statisticsUpdatedAt == nil {
+				if row.StatisticsUpdatedAt == nil {
 					updatedAt.AppendNull()
 					updatedSnapshot.AppendNull()
 				} else {
-					updatedAt.Append(*row.statisticsUpdatedAt)
-					updatedSnapshot.Append(*row.statisticsUpdatedSnapshot)
+					updatedAt.Append(*row.StatisticsUpdatedAt)
+					updatedSnapshot.Append(*row.StatisticsUpdatedSnapshot)
 				}
 				if formatVersion == 3 {
-					bldr.Field(12).(*array.Int32Builder).Append(row.deletionVectorCount)
+					bldr.Field(12).(*array.Int32Builder).Append(row.DeletionVectorCount)
 				}
 			}
 		}
