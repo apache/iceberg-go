@@ -756,11 +756,7 @@ func dataFilesMissingError(missing []string, state string) error {
 //     one actual added file's partition value satisfies the filter.
 //  3. The surviving files are evaluated against their column metrics so
 //     files whose bounds cannot match the filter are ignored.
-func validateAddedDataFilesMatchingFilter(cc *conflictContext, filter iceberg.BooleanExpression) error {
-	return validateAddedDataFilesMatchingFilterWithCaseSensitivity(cc, filter, cc.caseSensitive)
-}
-
-func validateAddedDataFilesMatchingFilterWithCaseSensitivity(
+func validateAddedDataFilesMatchingFilter(
 	cc *conflictContext, filter iceberg.BooleanExpression, caseSensitive bool,
 ) error {
 	if len(cc.concurrent) == 0 {
@@ -865,7 +861,7 @@ func validateNoConflictingDataFiles(cc *conflictContext, filter iceberg.BooleanE
 		return nil
 	}
 
-	return validateAddedDataFilesMatchingFilter(cc, filter)
+	return validateAddedDataFilesMatchingFilter(cc, filter, cc.caseSensitive)
 }
 
 // validateNoConflictingDataFilesInPartitions is like

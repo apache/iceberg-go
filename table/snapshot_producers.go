@@ -527,7 +527,7 @@ func (of *overwriteFiles) validate(cc *conflictContext) error {
 		filter = iceberg.AlwaysTrue{}
 	}
 
-	return validateAddedDataFilesMatchingFilterWithCaseSensitivity(cc, filter, of.caseSensitive)
+	return validateAddedDataFilesMatchingFilter(cc, filter, of.caseSensitive)
 }
 
 func (of *overwriteFiles) needsValidation() bool { return true }
