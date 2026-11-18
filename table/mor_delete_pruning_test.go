@@ -231,7 +231,7 @@ func TestV3MergeOnReadDoubleDeletePartitionedMergesDeletionVectors(t *testing.T)
 
 	// Two categories produce two partition data files.
 	tbl = appendRows(t, tbl,
-		`[{"id":1,"category":"x"},{"id":2,"category":"x"},{"id":3,"category":"x"},` +
+		`[{"id":1,"category":"x"},{"id":2,"category":"x"},{"id":3,"category":"x"},`+
 			`{"id":4,"category":"y"},{"id":5,"category":"y"},{"id":6,"category":"y"}]`)
 	var err error
 	require.Equal(t, []int64{1, 2, 3, 4, 5, 6}, idsInTable(t, tbl))
@@ -567,7 +567,7 @@ func TestV3MergeOnReadMixedExistingDVsKeepsUnchangedFile(t *testing.T) {
 	ctx := t.Context()
 	tbl := newPartitionedMergeOnReadTestTable(t)
 	tbl = appendRows(t, tbl,
-		`[{"id":1,"category":"x"},{"id":2,"category":"x"},{"id":3,"category":"x"},` +
+		`[{"id":1,"category":"x"},{"id":2,"category":"x"},{"id":3,"category":"x"},`+
 			`{"id":4,"category":"y"},{"id":5,"category":"y"},{"id":6,"category":"y"}]`)
 	var err error
 
@@ -691,7 +691,7 @@ func TestV3MergeOnReadUpgradePreservesPartitionedPositionDeletes(t *testing.T) {
 	tbl := newPartitionedMergeOnReadTestTableVersion(t, "2")
 
 	tbl = appendRows(t, tbl,
-		`[{"id":1,"category":"x"},{"id":2,"category":"x"},{"id":3,"category":"x"},` +
+		`[{"id":1,"category":"x"},{"id":2,"category":"x"},{"id":3,"category":"x"},`+
 			`{"id":4,"category":"y"},{"id":5,"category":"y"},{"id":6,"category":"y"}]`)
 	var err error
 	tbl, err = tbl.Delete(ctx, iceberg.EqualTo(iceberg.Reference("id"), int64(1)), nil)
