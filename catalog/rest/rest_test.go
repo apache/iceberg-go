@@ -2050,6 +2050,8 @@ func (r *RestCatalogSuite) TestLoadTableWithSnapshotModeRefs() {
 	tbl, err := cat.LoadTable(context.Background(), catalog.ToIdentifier("fokko", "table"))
 	r.Require().NoError(err)
 
+	r.True(tbl.SnapshotHistoryLimitedToRefs())
+
 	// Only the snapshot referenced by main is returned.
 	r.Len(tbl.Metadata().Snapshots(), 1)
 	r.EqualValues(3497810964824022504, tbl.Metadata().Snapshots()[0].SnapshotID)
@@ -2116,6 +2118,8 @@ func (r *RestCatalogSuite) TestLoadTableWithSnapshotModeAll() {
 
 	tbl, err := cat.LoadTable(context.Background(), catalog.ToIdentifier("fokko", "table"))
 	r.Require().NoError(err)
+
+	r.False(tbl.SnapshotHistoryLimitedToRefs())
 
 	// Both the current and the unreferenced historical snapshot are returned.
 	r.Len(tbl.Metadata().Snapshots(), 2)

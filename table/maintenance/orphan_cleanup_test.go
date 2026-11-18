@@ -208,6 +208,166 @@ func TestOrphanCleanupPlanDoesNotExpandAfterPlanning(t *testing.T) {
 	assert.NoError(t, file.Close())
 }
 
+func TestPlanOrphanFilesRejectsRefsOnlySnapshotHistory(t *testing.T) {
+	fs := iceio.NewMemFS()
+	var fsCalls atomic.Int32
+	location := "mem://refs-only/table"
+	metadataLocation := location + "/metadata/v1.metadata.json"
+
+	meta, err := table.NewMetadata(iceberg.NewSchema(0), nil, table.UnsortedSortOrder, location, nil)
+	require.NoError(t, err)
+	tbl := table.New(
+		[]string{"db", "refs_only"},
+		meta,
+		metadataLocation,
+		func(context.Context) (iceio.IO, error) {
+			fsCalls.Add(1)
+
+			return fs, nil
+		},
+		nil,
+		table.WithSnapshotHistoryLimitedToRefs(true),
+	)
+
+	checks := map[string]func() error{
+		"plan": func() error {
+			_, err := PlanOrphanFiles(context.Background(), tbl)
+
+			return err
+		},
+		"delete": func() error {
+			_, err := DeleteOrphanFiles(context.Background(), tbl)
+
+			return err
+		},
+		"delete dry run": func() error {
+			_, err := DeleteOrphanFiles(context.Background(), tbl, WithCleanupDryRun(true))
+
+			return err
+		},
+		"execute": func() error {
+			_, err := ExecuteOrphanCleanup(context.Background(), tbl, OrphanCleanupPlan{})
+
+			return err
+		},
+		"execute dry run": func() error {
+			_, err := ExecuteOrphanCleanup(context.Background(), tbl, OrphanCleanupPlan{}, WithCleanupDryRun(true))
+
+			return err
+		},
+	}
+	for name, check := range checks {
+		t.Run(name, func(t *testing.T) {
+			err := check()
+			require.ErrorIs(t, err, table.ErrInvalidOperation)
+			require.ErrorContains(t, err, "snapshot-loading-mode=refs")
+			require.ErrorContains(t, err, "snapshot-loading-mode=all")
+			require.Zero(t, fsCalls.Load(), "cleanup must reject before acquiring the filesystem")
+		})
+	}
+}
+
+func TestOrphanCleanupChecksGCBeforeRefsOnlyHistory(t *testing.T) {
+	ctx := t.Context()
+	location := "mem://refs-only-gc-disabled/table"
+	meta, err := table.NewMetadata(iceberg.NewSchema(0), nil, table.UnsortedSortOrder,
+		location, iceberg.Properties{table.GCEnabledKey: "false"})
+	require.NoError(t, err)
+
+	fsCalls := 0
+	tbl := table.New(
+		table.Identifier{"db", "refs_only_gc_disabled"}, meta,
+		location+"/metadata/v1.metadata.json",
+		func(context.Context) (iceio.IO, error) {
+			fsCalls++
+
+			return nil, errors.New("filesystem must not be accessed")
+		},
+		nil, table.WithSnapshotHistoryLimitedToRefs(true),
+	)
+
+	checks := map[string]func() error{
+		"plan": func() error {
+			_, err := PlanOrphanFiles(ctx, tbl)
+
+			return err
+		},
+		"delete": func() error {
+			_, err := DeleteOrphanFiles(ctx, tbl)
+
+			return err
+		},
+		"delete dry run": func() error {
+			_, err := DeleteOrphanFiles(ctx, tbl, WithCleanupDryRun(true))
+
+			return err
+		},
+		"execute": func() error {
+			_, err := ExecuteOrphanCleanup(ctx, tbl, OrphanCleanupPlan{})
+
+			return err
+		},
+		"execute dry run": func() error {
+			_, err := ExecuteOrphanCleanup(ctx, tbl, OrphanCleanupPlan{}, WithCleanupDryRun(true))
+
+			return err
+		},
+	}
+	for name, check := range checks {
+		t.Run(name, func(t *testing.T) {
+			err := check()
+			require.ErrorContains(t, err, "GC is disabled")
+			require.False(t, errors.Is(err, table.ErrInvalidOperation))
+			require.Zero(t, fsCalls, "rejection must happen before filesystem access")
+		})
+	}
+}
+
+// PurgeFiles runs after catalogs have dropped a table. A refs-only load must
+// not block that cleanup: when GC is enabled the directory walk covers files
+// in the table location, while disabled GC still permits metadata removal.
+func TestPurgeFilesAllowsRefsOnlySnapshotHistory(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		gcEnabled  string
+		removeData bool
+	}{
+		{name: "gc enabled", gcEnabled: "true", removeData: true},
+		{name: "gc disabled", gcEnabled: "false", removeData: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			location := t.TempDir()
+			metadataLocation := filepath.Join(location, "metadata", "v1.metadata.json")
+			dataLocation := filepath.Join(location, "data", "part-0001.parquet")
+			for _, filename := range []string{metadataLocation, dataLocation} {
+				require.NoError(t, os.MkdirAll(filepath.Dir(filename), 0o755))
+				require.NoError(t, os.WriteFile(filename, []byte("test"), 0o644))
+			}
+
+			meta, err := table.NewMetadata(iceberg.NewSchema(0), nil,
+				table.UnsortedSortOrder, location, iceberg.Properties{table.GCEnabledKey: tc.gcEnabled})
+			require.NoError(t, err)
+			tbl := table.New(
+				table.Identifier{"db", "refs_only"}, meta, metadataLocation,
+				func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil },
+				nil, table.WithSnapshotHistoryLimitedToRefs(true),
+			)
+			require.True(t, tbl.SnapshotHistoryLimitedToRefs())
+
+			require.NoError(t, PurgeFiles(ctx, tbl),
+				"purge must not reject refs-only history after catalog drop")
+			require.NoFileExists(t, metadataLocation)
+			if tc.removeData {
+				require.NoFileExists(t, dataLocation)
+			} else {
+				require.FileExists(t, dataLocation,
+					"gc.enabled=false must protect data even when history is refs-only")
+			}
+		})
+	}
+}
+
 func TestExecuteOrphanCleanupRejectsPlanningOptions(t *testing.T) {
 	tests := []struct {
 		name string
@@ -2357,8 +2517,9 @@ func (c *inMemoryCatalog) LoadTable(ctx context.Context, ident table.Identifier)
 	return nil, nil
 }
 
-func TestGetReferencedFiles_OverwriteThenExpireExcludesTombstones(t *testing.T) {
-	ctx := context.Background()
+func newOverwriteHistoryTable(t *testing.T) (*table.Table, iceio.LocalFS, string, string, int64) {
+	t.Helper()
+	ctx := t.Context()
 	tableLocation := t.TempDir()
 
 	schema := iceberg.NewSchema(0,
@@ -2394,6 +2555,7 @@ func TestGetReferencedFiles_OverwriteThenExpireExcludesTombstones(t *testing.T) 
 	pathA := dataFilePathsFromSnapshot(t, snap1, fs, iceberg.EntryStatusADDED)
 	require.Len(t, pathA, 1, "expected one ADDED data file after append")
 	fileA := pathA[0]
+	snapshot1ID := snap1.SnapshotID
 
 	// Step 2: overwrite with id=2. Produces snapshot 2 whose manifest list
 	// contains [added-fileB-manifest, deleted-fileA-manifest]. fileA still
@@ -2409,7 +2571,61 @@ func TestGetReferencedFiles_OverwriteThenExpireExcludesTombstones(t *testing.T) 
 	require.Len(t, pathB, 1, "expected one ADDED data file after overwrite")
 	fileB := pathB[0]
 
-	// Step 3: expire snapshot 1, keeping only the overwrite snapshot.
+	return tbl, fs, fileA, fileB, snapshot1ID
+}
+
+func TestPlanOrphanFilesRejectsRefsOnlyWithLiveHistoricalData(t *testing.T) {
+	ctx := t.Context()
+	tbl, fs, historicalFile, _, historicalSnapshotID := newOverwriteHistoryTable(t)
+	location := tbl.Metadata().Location()
+	cleanupLocation := location + "/data"
+
+	// Both snapshots are valid in complete metadata, so the overwritten file
+	// remains protected even though the current snapshot has a tombstone for it.
+	fullPlan, err := PlanOrphanFiles(ctx, tbl,
+		WithCleanupLocation(cleanupLocation), WithCleanupFilesOlderThan(0))
+	require.NoError(t, err)
+	assert.NotContains(t, fullPlan.Files(), historicalFile)
+
+	// Model a REST snapshots=refs response: snapshot 1 is omitted while the
+	// branch still points to snapshot 2. Without the loading-mode marker, the
+	// cleanup planner would treat snapshot 1's data file as an orphan.
+	partialBuilder, err := table.MetadataBuilderFromBase(tbl.Metadata(), "")
+	require.NoError(t, err)
+	require.NoError(t, partialBuilder.RemoveSnapshots([]int64{historicalSnapshotID}, false))
+	partialMetadata, err := partialBuilder.Build()
+	require.NoError(t, err)
+	require.Len(t, partialMetadata.Snapshots(), 1)
+	require.Nil(t, partialMetadata.SnapshotByID(historicalSnapshotID))
+
+	metadataLocation := location + "/metadata/v0.metadata.json"
+	unmarkedTable := table.New(
+		table.Identifier{"db", "refs_only_history"}, partialMetadata,
+		metadataLocation, testFSF(fs), nil,
+	)
+	unsafePlan, err := PlanOrphanFiles(ctx, unmarkedTable,
+		WithCleanupLocation(cleanupLocation), WithCleanupFilesOlderThan(0))
+	require.NoError(t, err)
+	assert.Contains(t, unsafePlan.Files(), historicalFile,
+		"partial metadata alone would classify the valid historical file as orphaned")
+
+	refsOnlyTable := table.New(
+		unmarkedTable.Identifier(), partialMetadata, metadataLocation, testFSF(fs), nil,
+		table.WithSnapshotHistoryLimitedToRefs(true),
+	)
+	_, err = PlanOrphanFiles(ctx, refsOnlyTable,
+		WithCleanupLocation(cleanupLocation), WithCleanupFilesOlderThan(0))
+	require.ErrorIs(t, err, table.ErrInvalidOperation)
+	file, err := fs.Open(ctx, historicalFile)
+	require.NoError(t, err, "the historical data file must remain on disk")
+	require.NoError(t, file.Close())
+}
+
+func TestGetReferencedFiles_OverwriteThenExpireExcludesTombstones(t *testing.T) {
+	ctx := t.Context()
+	tbl, fs, fileA, fileB, _ := newOverwriteHistoryTable(t)
+
+	// Expire snapshot 1, keeping only the overwrite snapshot.
 	// WithPostCommit(false) keeps fileA on disk so the test only exercises
 	// metadata reachability, not the side-effect of file removal.
 	tx := tbl.NewTransaction()
@@ -2418,7 +2634,7 @@ func TestGetReferencedFiles_OverwriteThenExpireExcludesTombstones(t *testing.T) 
 		table.WithOlderThan(0),
 		table.WithPostCommit(false),
 	))
-	tbl, err = tx.Commit(ctx)
+	tbl, err := tx.Commit(ctx)
 	require.NoError(t, err)
 	require.Len(t, tbl.Metadata().Snapshots(), 1,
 		"only the overwrite snapshot should remain after expiration")
