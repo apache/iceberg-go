@@ -30,7 +30,8 @@
 //	}
 //
 // Each test gets its own catalog from Config.NewCatalog, so tests never share
-// state and may run in any order.
+// state and may run in any order. The view tests run only for catalogs that
+// implement [catalog.ViewCatalog].
 package catalogtest
 
 import (
@@ -160,6 +161,16 @@ func RunCatalogTests(t *testing.T, cfg Config) {
 		t.Run("RemoveNamespacePropertiesNamespaceDoesNotExist", func(t *testing.T) { testRemoveNamespacePropertiesNamespaceDoesNotExist(t, cfg) })
 	} else {
 		t.Run("NamespacePropertiesNotSupported", func(t *testing.T) { testNamespacePropertiesNotSupported(t, cfg) })
+	}
+
+	if _, ok := catalog.As[catalog.ViewCatalog](cfg.NewCatalog(t)); ok {
+		t.Run("BasicCreateView", func(t *testing.T) { testBasicCreateView(t, cfg) })
+		t.Run("CreateViewThatAlreadyExists", func(t *testing.T) { testCreateViewThatAlreadyExists(t, cfg) })
+		t.Run("LoadMissingView", func(t *testing.T) { testLoadMissingView(t, cfg) })
+		t.Run("ListViews", func(t *testing.T) { testListViews(t, cfg) })
+		t.Run("DropView", func(t *testing.T) { testDropView(t, cfg) })
+		t.Run("DropMissingView", func(t *testing.T) { testDropMissingView(t, cfg) })
+		t.Run("DropNamespaceWithView", func(t *testing.T) { testDropNamespaceWithView(t, cfg) })
 	}
 }
 
