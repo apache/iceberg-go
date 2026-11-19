@@ -1591,6 +1591,24 @@ func enrichRecordsWithPosDeleteFields(ctx context.Context, filePath iceberg.Data
 	}
 }
 
+func allPassRecordMask(mask compute.Datum, rows int64) bool {
+	arrayMask, ok := mask.(*compute.ArrayDatum)
+	if !ok || rows <= 0 || arrayMask.Len() != rows || arrayMask.Type().ID() != arrow.BOOL {
+		return false
+	}
+	data := arrayMask.Value
+	if data.NullN() > 0 {
+		return false
+	}
+	validity, values := data.Buffers()[0], data.Buffers()[1]
+	if values == nil || !bitutil.BitmapAllSet(values.Bytes(), data.Offset(), data.Len()) {
+		return false
+	}
+
+	// Arrow slices can report an unknown null count even when every row is valid.
+	return data.NullN() == 0 || validity == nil || bitutil.BitmapAllSet(validity.Bytes(), data.Offset(), data.Len())
+}
+
 func filterRecords(ctx context.Context, recordFilter expr.Expression) recProcessFn {
 	return func(rec arrow.RecordBatch) (arrow.RecordBatch, error) {
 		defer rec.Release()
@@ -1602,17 +1620,10 @@ func filterRecords(ctx context.Context, recordFilter expr.Expression) recProcess
 		}
 		defer mask.Release()
 
-		if arrayMask, ok := mask.(*compute.ArrayDatum); ok {
-			data := arrayMask.Value
-			if data.DataType().ID() == arrow.BOOL && data.Len() > 0 &&
-				int64(data.Len()) == rec.NumRows() && data.NullN() == 0 {
-				if values := data.Buffers()[1]; values != nil &&
-					bitutil.BitmapAllSet(values.Bytes(), data.Offset(), data.Len()) {
-					rec.Retain()
+		if allPassRecordMask(mask, rec.NumRows()) {
+			rec.Retain()
 
-					return rec, nil
-				}
-			}
+			return rec, nil
 		}
 
 		result, err := compute.Filter(ctx, input, mask, *compute.DefaultFilterOptions())

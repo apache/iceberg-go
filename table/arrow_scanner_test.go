@@ -40,6 +40,31 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestAllPassRecordMaskSlicedValidity(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+	builder := array.NewBooleanBuilder(mem)
+	defer builder.Release()
+	builder.AppendValues([]bool{false, true, true, true, true}, []bool{false, true, true, false, true})
+	values := builder.NewBooleanArray()
+	defer values.Release()
+
+	for _, tc := range []struct {
+		start, end int64
+		want       bool
+	}{
+		{start: 1, end: 3, want: true},
+		{start: 1, end: 4, want: false},
+		{start: 4, end: 5, want: true},
+	} {
+		sliced := array.NewSlice(values, tc.start, tc.end)
+		mask := compute.NewDatumWithoutOwning(sliced)
+		require.Equal(t, array.UnknownNullCount, sliced.Data().NullN())
+		require.Equal(t, tc.want, allPassRecordMask(mask, tc.end-tc.start))
+		sliced.Release()
+	}
+}
+
 func TestRecordFilterAllPassingBatch(t *testing.T) {
 	schema := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "keep", Type: iceberg.PrimitiveTypes.Bool},
