@@ -20,12 +20,11 @@ package compaction
 import (
 	"fmt"
 	"math"
-	"slices"
-	"strconv"
+	"strings"
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/internal"
-	"github.com/google/uuid"
+	tblutils "github.com/apache/iceberg-go/table/internal"
 )
 
 // SurvivorSurvey describes the surviving data files in a snapshot after a
@@ -43,6 +42,7 @@ type SurvivorSurvey struct {
 
 	minSeq         int64
 	specPartMinSeq map[string]int64
+	partitionErr   error
 }
 
 // PartitionSpecLookup resolves the partition spec used to write a data file.
@@ -70,39 +70,44 @@ func NewSurvivorSurvey() *SurvivorSurvey {
 // against every eq-delete. Better to preserve uncertain state than to
 // drop deletes that may still apply.
 func (s *SurvivorSurvey) AddSurvivor(partition map[int]any, seq int64) {
-	if seq < 0 {
-		seq = 0
-	}
+	seq = max(seq, 0)
 	if len(partition) == 0 {
 		s.EmptyPartMinSeq = min(seq, s.EmptyPartMinSeq)
 
 		return
 	}
 
-	updatePartitionMinSeq(s.PartMinSeq, partitionMatchKey(partition), seq)
+	// An unsupported tuple uses the empty key. This API takes the minimum
+	// across all buckets, so the survivor still protects older data.
+	var storage [256]byte
+	tuple, _ := tblutils.AppendPartitionTuple(storage[:0], partition)
+	updatePartitionMinSeq(s.PartMinSeq, string(tuple), seq)
 }
 
 // AddSurvivorWithSpec records a surviving data file's spec ID, partition, and
 // sequence number for exact equality-delete matching. It also maintains the
-// conservative survey used by [DecideDeadEqualityDeletes].
+// conservative survey used by [DecideDeadEqualityDeletes]. If a partition
+// cannot be encoded, [DecideDeadEqualityDeletesWithSpecs] returns an error.
 func (s *SurvivorSurvey) AddSurvivorWithSpec(specID int32, partition map[int]any, seq int64) {
-	if seq < 0 {
-		seq = 0
-	}
-
-	var specKey string
-	if len(partition) == 0 {
-		s.EmptyPartMinSeq = min(seq, s.EmptyPartMinSeq)
-		specKey = partitionBucketKey(specID, partition)
-	} else {
-		tuple := appendPartitionTuple(nil, partition)
-		updatePartitionMinSeq(s.PartMinSeq, string(tuple), seq)
-		specKey = partitionBucketKeyFromTuple(specID, tuple)
-	}
-
+	seq = max(seq, 0)
 	s.minSeq = min(seq, s.minSeq)
 
-	updatePartitionMinSeq(s.specPartMinSeq, specKey, seq)
+	key, err := tblutils.CanonicalPartitionKey(specID, partition)
+	if err != nil {
+		if s.partitionErr == nil {
+			s.partitionErr = fmt.Errorf("encoding survivor partition for spec %d: %w", specID, err)
+		}
+		updatePartitionMinSeq(s.PartMinSeq, "", seq)
+
+		return
+	}
+	if len(partition) == 0 {
+		s.EmptyPartMinSeq = min(seq, s.EmptyPartMinSeq)
+	} else {
+		_, tuple, _ := strings.Cut(key, ":")
+		updatePartitionMinSeq(s.PartMinSeq, tuple, seq)
+	}
+	updatePartitionMinSeq(s.specPartMinSeq, key, seq)
 }
 
 func (s *SurvivorSurvey) conservativeMinSeq() int64 {
@@ -118,15 +123,19 @@ func (s *SurvivorSurvey) specAwareApplicableMinSeq(
 	eqSpecID int32,
 	eqPartition map[int]any,
 	isUnpartitioned bool,
-) int64 {
+) (int64, error) {
 	if isUnpartitioned {
-		return s.minSeq
+		return s.minSeq, nil
 	}
-	if v, ok := s.specPartMinSeq[partitionBucketKey(eqSpecID, eqPartition)]; ok {
-		return v
+	key, err := tblutils.CanonicalPartitionKey(eqSpecID, eqPartition)
+	if err != nil {
+		return 0, err
+	}
+	if v, ok := s.specPartMinSeq[key]; ok {
+		return v, nil
 	}
 
-	return math.MaxInt64
+	return math.MaxInt64, nil
 }
 
 // DecideDeadEqualityDeletes conservatively returns equality-delete files that
@@ -190,6 +199,9 @@ func DecideDeadEqualityDeletesWithSpecs(
 	if survey == nil || len(candidates) == 0 {
 		return nil, nil
 	}
+	if survey.partitionErr != nil {
+		return nil, survey.partitionErr
+	}
 
 	dead := make([]iceberg.DataFile, 0, len(candidates))
 	seen := make(map[string]struct{}, len(candidates))
@@ -213,153 +225,19 @@ func DecideDeadEqualityDeletesWithSpecs(
 			isUnpartitioned = spec.IsUnpartitioned()
 			unpartitionedBySpecID[df.SpecID()] = isUnpartitioned
 		}
-		if survey.specAwareApplicableMinSeq(
+		minSeq, err := survey.specAwareApplicableMinSeq(
 			df.SpecID(), internal.BorrowedDataFilePartition(df), isUnpartitioned,
-		) >= e.DataSequenceNumber() {
+		)
+		if err != nil {
+			return nil, fmt.Errorf("deciding equality delete file %q: %w", path, err)
+		}
+		if minSeq >= e.DataSequenceNumber() {
 			seen[path] = struct{}{}
 			dead = append(dead, df)
 		}
 	}
 
 	return dead, nil
-}
-
-// partitionMatchKey returns a deterministic key for a partition tuple without
-// a spec ID. It is used only by the conservative compatibility API.
-func partitionMatchKey(part map[int]any) string {
-	if len(part) == 0 {
-		return ""
-	}
-
-	return string(appendPartitionTuple(nil, part))
-}
-
-// partitionBucketKey returns a deterministic string key for a
-// (specID, partition) tuple. Used by the planner to group tasks for
-// bin-packing — different specs must NOT mix because a compacted
-// output file inherits a single spec.
-func partitionBucketKey(specID int32, part map[int]any) string {
-	if len(part) == 0 {
-		return fmt.Sprintf("%d:_", specID)
-	}
-
-	return partitionBucketKeyFromTuple(specID, appendPartitionTuple(nil, part))
-}
-
-func partitionBucketKeyFromTuple(specID int32, tuple []byte) string {
-	key := make([]byte, 0, len(tuple)+12)
-	key = strconv.AppendInt(key, int64(specID), 10)
-	key = append(key, ':')
-
-	return string(append(key, tuple...))
-}
-
-// appendPartitionTuple writes a collision-free partition identity into dst.
-// The type marker and byte length distinguish null from text and delimit each
-// value even when string or binary values contain '=' or ';'. Normalize
-// integer wrappers and floating point widths to keep independently decoded
-// representations of the same partition in one bucket.
-// Caller is responsible for any leading prefix (e.g. specID).
-func appendPartitionTuple(dst []byte, part map[int]any) []byte {
-	var inlineIDs [8]int
-	ids := inlineIDs[:0]
-	if len(part) > len(inlineIDs) {
-		ids = make([]int, 0, len(part))
-	}
-	for id := range part {
-		ids = append(ids, id)
-	}
-	slices.Sort(ids)
-
-	for _, id := range ids {
-		dst = strconv.AppendInt(dst, int64(id), 10)
-		dst = append(dst, '=')
-
-		var scratch [64]byte
-		value := scratch[:0]
-		var kind byte
-		switch v := part[id].(type) {
-		case nil:
-			kind = 'n'
-		case string:
-			kind = 's'
-			value = append(value, v...)
-		case []byte:
-			kind = 'x'
-			value = append(value, v...)
-		case uuid.UUID:
-			kind = 'x'
-			value = append(value, v[:]...)
-		case bool:
-			kind = 'b'
-			value = strconv.AppendBool(value, v)
-		case int:
-			kind = 'i'
-			value = strconv.AppendInt(value, int64(v), 10)
-		case int32:
-			kind = 'i'
-			value = strconv.AppendInt(value, int64(v), 10)
-		case int64:
-			kind = 'i'
-			value = strconv.AppendInt(value, v, 10)
-		case iceberg.Date:
-			kind = 'i'
-			value = strconv.AppendInt(value, int64(v), 10)
-		case iceberg.Time:
-			kind = 'i'
-			value = strconv.AppendInt(value, int64(v), 10)
-		case iceberg.Timestamp:
-			kind = 'i'
-			value = strconv.AppendInt(value, int64(v), 10)
-		case iceberg.TimestampNano:
-			kind = 'i'
-			value = strconv.AppendInt(value, int64(v), 10)
-		case float32:
-			kind = 'f'
-			value = appendPartitionFloat(value, float64(v))
-		case float64:
-			kind = 'f'
-			value = appendPartitionFloat(value, v)
-		case iceberg.Decimal:
-			kind = 'd'
-			value = appendPartitionDecimal(value, v)
-		case iceberg.DecimalLiteral:
-			kind = 'd'
-			value = appendPartitionDecimal(value, iceberg.Decimal(v))
-		default:
-			// Unexpected types are included with their Go type to avoid
-			// collisions with ordinary partition values.
-			kind = 'v'
-			value = fmt.Appendf(value, "%T=%v", v, v)
-		}
-
-		dst = append(dst, kind)
-		if kind != 'n' {
-			dst = strconv.AppendInt(dst, int64(len(value)), 10)
-			dst = append(dst, ':')
-			dst = append(dst, value...)
-		}
-		dst = append(dst, ';')
-	}
-
-	return dst
-}
-
-// Canonicalize NaN payloads but preserve signed zero, matching Iceberg's
-// partition-value equality. Float32 promotion to float64 is exact.
-func appendPartitionFloat(dst []byte, v float64) []byte {
-	if math.IsNaN(v) {
-		return append(dst, "nan"...)
-	}
-
-	return strconv.AppendUint(dst, math.Float64bits(v), 16)
-}
-
-func appendPartitionDecimal(dst []byte, v iceberg.Decimal) []byte {
-	dst = strconv.AppendInt(dst, int64(v.Scale), 10)
-	dst = append(dst, ':')
-
-	return append(dst, v.Val.BigInt().String()...)
 }
 
 func updatePartitionMinSeq(partitions map[string]int64, key string, seq int64) {

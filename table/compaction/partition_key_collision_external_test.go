@@ -33,16 +33,24 @@ func TestPlanCompactionSeparatesAmbiguousPartitionKeys(t *testing.T) {
 		name string
 		a, b map[int]any
 	}{
-		{name: "separators in multi-field strings",
-			a: map[int]any{1: "a;2=b", 2: "c"},
-			b: map[int]any{1: "a", 2: "b;2=c"}},
-		{name: "null and literal text",
-			a: map[int]any{1: nil}, b: map[int]any{1: "<nil>"}},
-		{name: "signed zero",
-			a: map[int]any{1: math.Copysign(0, -1)}, b: map[int]any{1: float64(0)}},
-		{name: "binary and string",
-			a: map[int]any{1: []byte{0, 1}},
-			b: map[int]any{1: string([]byte{0, 1})}},
+		{
+			name: "separators in multi-field strings",
+			a:    map[int]any{1: "a;2=b", 2: "c"},
+			b:    map[int]any{1: "a", 2: "b;2=c"},
+		},
+		{
+			name: "null and literal text",
+			a:    map[int]any{1: nil}, b: map[int]any{1: "<nil>"},
+		},
+		{
+			name: "signed zero",
+			a:    map[int]any{1: math.Copysign(0, -1)}, b: map[int]any{1: float64(0)},
+		},
+		{
+			name: "binary and string",
+			a:    map[int]any{1: []byte{0, 1}},
+			b:    map[int]any{1: string([]byte{0, 1})},
+		},
 	}
 	cfg := compaction.DefaultConfig()
 	cfg.RewriteAll = true
@@ -104,4 +112,18 @@ func TestPlanCompactionKeepsEquivalentIntegerWidthsTogether(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, plan.Groups, 1)
 	assert.Len(t, plan.Groups[0].Tasks, 2)
+}
+
+func TestEqualityDeleteCleanupRejectsUnsupportedSurvivorPartition(t *testing.T) {
+	specs := compactionTestSpecs()
+	survey := compaction.NewSurvivorSurvey()
+	survey.AddSurvivorWithSpec(1, map[int]any{1000: struct{}{}}, 1)
+	candidates := []iceberg.ManifestEntry{
+		makeEqDeleteEntry(t, specs[1], map[int]any{1000: "us"}, 5, "/eq.parquet"),
+	}
+
+	removed, err := compaction.DecideDeadEqualityDeletesWithSpecs(survey, candidates, specs)
+	require.ErrorContains(t, err, "unsupported partition value type")
+	require.Empty(t, removed)
+	require.Empty(t, compaction.DecideDeadEqualityDeletes(survey, candidates))
 }

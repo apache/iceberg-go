@@ -357,7 +357,7 @@ func comparableEqualityDeletePartitionValue(value any) (any, error) {
 	case uuid.UUID:
 		return equalityDeleteBinaryPartitionValue(value[:]), nil
 	default:
-		encoded, err := appendCanonicalPartitionValue(nil, value)
+		encoded, err := tblutils.AppendCanonicalPartitionValue(nil, value)
 		if err != nil {
 			return nil, err
 		}

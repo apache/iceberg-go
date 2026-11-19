@@ -576,26 +576,9 @@ func ExecuteCompactionGroup(ctx context.Context, tbl *Table, group CompactionTas
 	}
 
 	seenFiles := make(map[string]struct{}, len(group.Tasks))
-	var firstFile iceberg.DataFile
-	var firstPartitionKey string
 	for _, task := range group.Tasks {
 		if task.File == nil {
 			return CompactionGroupResult{}, fmt.Errorf("%w: compaction task has no data file", ErrInvalidOperation)
-		}
-		partitionKey, err := canonicalPartitionKey(task.File.SpecID(), dataFilePartition(task.File))
-		if err != nil {
-			return CompactionGroupResult{}, fmt.Errorf("%w: invalid partition for compaction data file %s: %v",
-				ErrInvalidOperation, task.File.FilePath(), err)
-		}
-		if firstFile == nil {
-			firstFile = task.File
-			firstPartitionKey = partitionKey
-		} else if partitionKey != firstPartitionKey {
-			// The clustered writer below assumes a single partition. Reject
-			// malformed worker groups instead of writing rows under a
-			// different partition's metadata.
-			return CompactionGroupResult{}, fmt.Errorf("%w: compaction group contains files from different partitions: %s and %s",
-				ErrInvalidOperation, firstFile.FilePath(), task.File.FilePath())
 		}
 		path := task.File.FilePath()
 		if _, ok := seenFiles[path]; ok {
@@ -620,6 +603,11 @@ func ExecuteCompactionGroup(ctx context.Context, tbl *Table, group CompactionTas
 	strategy, err := cfg.rewriteStrategy(tbl)
 	if err != nil {
 		return CompactionGroupResult{}, fmt.Errorf("compaction group %q: %w", group.PartitionKey, err)
+	}
+	if _, binPack := strategy.(binPackStrategy); binPack {
+		if err := validateBinPackPartition(group.Tasks); err != nil {
+			return CompactionGroupResult{}, err
+		}
 	}
 
 	var scanOpts []ScanOption
@@ -667,8 +655,8 @@ func ExecuteCompactionGroup(ctx context.Context, tbl *Table, group CompactionTas
 		return CompactionGroupResult{}, fmt.Errorf("read tasks for compaction group %q: %w", group.PartitionKey, err)
 	}
 
-	// Each compaction group is single-partition by construction, so the
-	// read stream is trivially clustered and we can use the clustered writer.
+	// Bin-pack requires one input partition. Sort and Hilbert strategies
+	// cluster the records by the output partition before writing.
 	writeOpts := []WriteRecordOption{WithClusteredWrite()}
 	if cfg.targetFileSize > 0 {
 		writeOpts = append(writeOpts, WithTargetFileSize(cfg.targetFileSize))
@@ -728,6 +716,28 @@ func ExecuteCompactionGroup(ctx context.Context, tbl *Table, group CompactionTas
 		BytesBefore:         group.TotalSizeBytes,
 		BytesAfter:          bytesAfter,
 	}, nil
+}
+
+// Bin-pack streams rows in input order. Sort strategies can accept a mixed
+// group because they split records by the output partition before writing.
+func validateBinPackPartition(tasks []FileScanTask) error {
+	var firstKey string
+	for i, task := range tasks {
+		file := task.File
+		key, err := canonicalPartitionKey(file.SpecID(), dataFilePartition(file))
+		if err != nil {
+			return fmt.Errorf("%w: invalid partition for compaction data file %q: %v",
+				ErrInvalidOperation, file.FilePath(), err)
+		}
+		if i == 0 {
+			firstKey = key
+		} else if key != firstKey {
+			return fmt.Errorf("%w: compaction group contains files from different partitions: %q and %q",
+				ErrInvalidOperation, tasks[0].File.FilePath(), file.FilePath())
+		}
+	}
+
+	return nil
 }
 
 // allTasksHaveRowLineage returns true iff every task in the group has a
