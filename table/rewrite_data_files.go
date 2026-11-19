@@ -567,9 +567,8 @@ func (t *Transaction) RewriteDataFiles(ctx context.Context, groups []CompactionT
 // In-process callers should prefer [Transaction.RewriteDataFiles],
 // which drives this and the commit step in one call.
 //
-// Tunables are exposed via [CompactionGroupOption]. The clustered
-// write path is always used (a compaction group is single-partition
-// by construction so its read stream is trivially clustered).
+// Tunables are exposed via [CompactionGroupOption]. Bin-pack groups from
+// older specs use the fanout writer to split rows by the current spec.
 func ExecuteCompactionGroup(ctx context.Context, tbl *Table, group CompactionTaskGroup, opts ...CompactionGroupOption) (CompactionGroupResult, error) {
 	if len(group.Tasks) == 0 {
 		return CompactionGroupResult{PartitionKey: group.PartitionKey}, nil
@@ -604,7 +603,8 @@ func ExecuteCompactionGroup(ctx context.Context, tbl *Table, group CompactionTas
 	if err != nil {
 		return CompactionGroupResult{}, fmt.Errorf("compaction group %q: %w", group.PartitionKey, err)
 	}
-	if _, binPack := strategy.(binPackStrategy); binPack {
+	_, binPack := strategy.(binPackStrategy)
+	if binPack {
 		if err := validateBinPackPartition(group.Tasks); err != nil {
 			return CompactionGroupResult{}, err
 		}
@@ -655,9 +655,13 @@ func ExecuteCompactionGroup(ctx context.Context, tbl *Table, group CompactionTas
 		return CompactionGroupResult{}, fmt.Errorf("read tasks for compaction group %q: %w", group.PartitionKey, err)
 	}
 
-	// Bin-pack requires one input partition. Sort and Hilbert strategies
-	// cluster the records by the output partition before writing.
-	writeOpts := []WriteRecordOption{WithClusteredWrite()}
+	// A prior spec's partition can split into several current partitions.
+	// Sort and Hilbert cluster by the current spec before writing.
+	var writeOpts []WriteRecordOption
+	currentSpec := tbl.Spec()
+	if !binPack || int(group.Tasks[0].File.SpecID()) == currentSpec.ID() {
+		writeOpts = append(writeOpts, WithClusteredWrite())
+	}
 	if cfg.targetFileSize > 0 {
 		writeOpts = append(writeOpts, WithTargetFileSize(cfg.targetFileSize))
 	}

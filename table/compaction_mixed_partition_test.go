@@ -78,3 +78,41 @@ func TestExecuteCompactionGroupRejectsMixedPartitions(t *testing.T) {
 		})
 	}
 }
+
+func TestExecuteCompactionGroupRepartitionsOlderSpec(t *testing.T) {
+	ctx := t.Context()
+	tbl := newSortCompactionTestTable(t, iceberg.UnpartitionedSpec)
+	schema, err := table.SchemaToArrowSchema(tbl.Schema(), nil, false, false)
+	require.NoError(t, err)
+	path := tbl.Location() + "/data/old-spec.parquet"
+	writeParquetFile(t, path, schema, `[
+		{"id":1,"data":"a"},{"id":2,"data":"b"},{"id":3,"data":"a"},{"id":4,"data":"b"}
+	]`)
+	txn := tbl.NewTransaction()
+	require.NoError(t, txn.AddDataFilesByPath(ctx, []string{path}, nil, false))
+	tbl, err = txn.Commit(ctx)
+	require.NoError(t, err)
+
+	txn = tbl.NewTransaction()
+	require.NoError(t, txn.UpdateSpec(true).AddIdentity("data").Commit())
+	tbl, err = txn.Commit(ctx)
+	require.NoError(t, err)
+
+	group := sortTestGroup(t, tbl)
+	require.Len(t, group.Tasks, 1)
+	currentSpec := tbl.Spec()
+	require.NotEqualValues(t, currentSpec.ID(), group.Tasks[0].File.SpecID())
+
+	result, err := table.ExecuteCompactionGroup(ctx, tbl, group, table.WithCompactionArrowBatchSize(1))
+	require.NoError(t, err)
+	require.Len(t, result.NewDataFiles, 2)
+	for _, file := range result.NewDataFiles {
+		require.EqualValues(t, currentSpec.ID(), file.SpecID())
+		require.EqualValues(t, 2, file.Count())
+	}
+	txn = tbl.NewTransaction()
+	require.NoError(t, txn.NewRewrite(nil).ApplyResult(result).Commit(ctx))
+	tbl, err = txn.Commit(ctx)
+	require.NoError(t, err)
+	require.ElementsMatch(t, []int64{1, 2, 3, 4}, scanIDs(t, tbl))
+}
