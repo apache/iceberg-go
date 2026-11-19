@@ -870,7 +870,7 @@ func appendMissingLineageFields(s *iceberg.Schema, lineageFields []iceberg.Neste
 		existing[f.ID] = struct{}{}
 	}
 
-	return iceberg.NewSchemaWithIdentifiers(s.ID, s.IdentifierFieldIDs, fields...)
+	return iceberg.NewSchemaWithIdentifiers(s.ID, s.IdentifierFieldIDs(), fields...)
 }
 
 func buildPartitionProjection(specID int, meta Metadata, schema *iceberg.Schema, rowFilter iceberg.BooleanExpression, caseSensitive bool) (iceberg.BooleanExpression, error) {

@@ -27,12 +27,12 @@ import (
 
 func TestIndexByNameNestedListAliases(t *testing.T) {
 	schema := NewSchema(1,
-		NestedField{ID: 1, Name: "payload", Type: &StructType{FieldList: []NestedField{
+		NestedField{ID: 1, Name: "payload", Type: &StructType{fields: []NestedField{
 			{ID: 2, Name: "list", Type: &ListType{
-				ElementID: 3,
-				Element: &StructType{FieldList: []NestedField{
+				elementID: 3,
+				element: &StructType{fields: []NestedField{
 					{ID: 4, Name: "alpha", Type: PrimitiveTypes.Int64},
-					{ID: 5, Name: "hidden", Type: &StructType{FieldList: []NestedField{
+					{ID: 5, Name: "hidden", Type: &StructType{fields: []NestedField{
 						{ID: 6, Name: "beta", Type: PrimitiveTypes.String},
 					}}},
 				}},
@@ -40,8 +40,8 @@ func TestIndexByNameNestedListAliases(t *testing.T) {
 		}}},
 		NestedField{ID: 7, Name: "sibling", Type: PrimitiveTypes.String},
 		NestedField{ID: 8, Name: "lookup", Type: &MapType{
-			KeyID: 9, KeyType: PrimitiveTypes.String,
-			ValueID: 10, ValueType: &StructType{FieldList: []NestedField{
+			keyID: 9, keyType: PrimitiveTypes.String,
+			valueID: 10, valueType: &StructType{fields: []NestedField{
 				{ID: 11, Name: "東京", Type: PrimitiveTypes.Int32},
 			}},
 		}},
@@ -89,7 +89,7 @@ func TestIndexByNameDeepSiblingRestoration(t *testing.T) {
 	for depth := range 32 {
 		name := "nested_" + strconv.Itoa(depth)
 		fields = []NestedField{{
-			ID: depth + 2, Name: name, Type: &StructType{FieldList: fields},
+			ID: depth + 2, Name: name, Type: &StructType{fields: fields},
 		}}
 		parts = append([]string{name}, parts...)
 	}

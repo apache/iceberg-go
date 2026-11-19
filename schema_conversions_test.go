@@ -31,8 +31,8 @@ import (
 )
 
 func partitionTypeToAvroSchemaNonNullable(t *StructType) (*avro.Schema, error) {
-	fields := make([]avro.SchemaField, len(t.FieldList))
-	for i, f := range t.FieldList {
+	fields := make([]avro.SchemaField, len(t.fields))
+	for i, f := range t.fields {
 		var node avro.SchemaNode
 		switch typ := f.Type.(type) {
 		case Int32Type:
@@ -89,7 +89,7 @@ func partitionTypeToAvroSchemaNonNullable(t *StructType) (*avro.Schema, error) {
 
 func TestPartitionTypeToAvroSchemaNullableAndNonNullable(t *testing.T) {
 	partitionType := &StructType{
-		FieldList: []NestedField{
+		fields: []NestedField{
 			{ID: 1, Name: "int32_col", Type: Int32Type{}, Required: false},
 			{ID: 2, Name: "int64_col", Type: Int64Type{}, Required: false},
 			{ID: 3, Name: "float32_col", Type: Float32Type{}, Required: false},
@@ -165,7 +165,7 @@ func TestPartitionTypeToAvroSchemaNullableAndNonNullable(t *testing.T) {
 }
 
 func TestPartitionTypeToAvroSchemaUnknownType(t *testing.T) {
-	partitionType := &StructType{FieldList: []NestedField{
+	partitionType := &StructType{fields: []NestedField{
 		{ID: 1, Name: "dropped", Type: UnknownType{}, Required: false},
 	}}
 
@@ -192,21 +192,21 @@ func TestPartitionTypeToAvroSchemaDuplicateNamedTypes(t *testing.T) {
 	}{
 		{
 			"two uuid fields",
-			&StructType{FieldList: []NestedField{
+			&StructType{fields: []NestedField{
 				{ID: 1, Name: "a", Type: UUIDType{}, Required: false},
 				{ID: 2, Name: "b", Type: UUIDType{}, Required: false},
 			}},
 		},
 		{
 			"two fixed fields same size",
-			&StructType{FieldList: []NestedField{
+			&StructType{fields: []NestedField{
 				{ID: 1, Name: "a", Type: FixedType{len: 8}, Required: false},
 				{ID: 2, Name: "b", Type: FixedType{len: 8}, Required: false},
 			}},
 		},
 		{
 			"two decimal fields same precision/scale",
-			&StructType{FieldList: []NestedField{
+			&StructType{fields: []NestedField{
 				{ID: 1, Name: "a", Type: DecimalType{precision: 10, scale: 2}, Required: false},
 				{ID: 2, Name: "b", Type: DecimalType{precision: 10, scale: 2}, Required: false},
 			}},
@@ -237,7 +237,7 @@ func TestDayTransformPartitionAvroDateEncoding(t *testing.T) {
 
 	// PartitionType now returns DateType for day-transform fields.
 	partitionType := spec.PartitionType(schema)
-	require.Equal(t, PrimitiveTypes.Date, partitionType.FieldList[0].Type,
+	require.Equal(t, PrimitiveTypes.Date, partitionType.fields[0].Type,
 		"PartitionType must map DayTransform result to DateType")
 
 	avroSchema, err := partitionTypeToAvroSchema(partitionType)
@@ -304,7 +304,7 @@ func TestNanosecondPartitionAvroSchema(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			partitionType := &StructType{FieldList: []NestedField{
+			partitionType := &StructType{fields: []NestedField{
 				{ID: 1000, Name: "ts_ns", Type: tc.typ, Required: false},
 			}}
 
