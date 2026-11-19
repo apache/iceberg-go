@@ -1609,6 +1609,7 @@ func filterRecords(ctx context.Context, recordFilter expr.Expression) recProcess
 				if values := data.Buffers()[1]; values != nil &&
 					bitutil.BitmapAllSet(values.Bytes(), data.Offset(), data.Len()) {
 					rec.Retain()
+
 					return rec, nil
 				}
 			}
