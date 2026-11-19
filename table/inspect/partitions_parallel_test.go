@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-package table
+package inspect
 
 import (
 	"context"
@@ -28,6 +28,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
+	"github.com/apache/iceberg-go/table"
 	tblutils "github.com/apache/iceberg-go/table/internal"
 	"github.com/stretchr/testify/require"
 )
@@ -61,7 +62,7 @@ func (f *inspectPartitionManifestTrackingIO) Open(ctx context.Context, path stri
 	return f.IO.Open(ctx, path)
 }
 
-func inspectParallelPartitionManifestTable(t *testing.T, count int) *Table {
+func inspectParallelPartitionManifestTable(t *testing.T, count int) *table.Table {
 	t.Helper()
 
 	spec := partitionedSpec()
@@ -94,14 +95,14 @@ func inspectParallelPartitionManifestTable(t *testing.T, count int) *Table {
 	return inspectFilesTableWithManifests(t, spec, manifests...)
 }
 
-func inspectWithTrackingIO(t *testing.T, tbl *Table) (*Table, *inspectPartitionManifestTrackingIO) {
+func inspectWithTrackingIO(t *testing.T, tbl *table.Table) (*table.Table, *inspectPartitionManifestTrackingIO) {
 	t.Helper()
 
 	fs, err := tbl.FS(t.Context())
 	require.NoError(t, err)
 
 	tracked := &inspectPartitionManifestTrackingIO{IO: fs}
-	wrapped := New(Identifier{"db", "parallel-inspect"}, tbl.Metadata(), tbl.MetadataLocation(),
+	wrapped := table.New(table.Identifier{"db", "parallel-inspect"}, tbl.Metadata(), tbl.MetadataLocation(),
 		func(context.Context) (iceio.IO, error) { return tracked, nil }, nil)
 
 	return wrapped, tracked
@@ -112,7 +113,7 @@ func TestInspectPartitionsParallelManifestAggregation(t *testing.T) {
 		t.Run(fmt.Sprintf("manifests=%d", count), func(t *testing.T) {
 			tbl, tracked := inspectWithTrackingIO(t, inspectParallelPartitionManifestTable(t, count))
 
-			reader, err := tbl.Inspect().Partitions(t.Context())
+			reader, err := Partitions(t.Context(), tbl)
 			require.NoError(t, err)
 			defer reader.Release()
 
@@ -146,7 +147,7 @@ func TestInspectPartitionsParallelManifestReadFailure(t *testing.T) {
 	tbl, tracked := inspectWithTrackingIO(t, inspectParallelPartitionManifestTable(t, 8))
 	tracked.failPath = "inspect-3.avro"
 
-	reader, err := tbl.Inspect().Partitions(t.Context())
+	reader, err := Partitions(t.Context(), tbl)
 	require.ErrorContains(t, err, "injected manifest read error")
 	require.Nil(t, reader)
 	require.EqualValues(t, 0, tracked.active.Load())
@@ -157,7 +158,7 @@ func TestInspectPartitionsParallelCancelledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 
-	reader, err := tbl.Inspect().Partitions(ctx)
+	reader, err := Partitions(ctx, tbl)
 	require.ErrorIs(t, err, context.Canceled)
 	require.Nil(t, reader)
 	require.Zero(t, tracked.maxActive.Load())

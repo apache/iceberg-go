@@ -27,6 +27,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/table"
+	"github.com/apache/iceberg-go/table/inspect"
 	"github.com/stretchr/testify/require"
 )
 
@@ -101,7 +102,7 @@ func TestParquetReadPageLimitsScanOverrideAndDelete(t *testing.T) {
 	require.NoError(t, txn.SetProperties(iceberg.Properties{table.ParquetMaxCompressedPageSizeBytesKey: "1"}))
 	tbl, err = txn.Commit(t.Context())
 	require.NoError(t, err)
-	positions, err := tbl.Inspect().PositionDeletes(t.Context())
+	positions, err := inspect.PositionDeletes(t.Context(), tbl)
 	require.NoError(t, err)
 	for positions.Next() {
 	}
@@ -133,6 +134,6 @@ func TestParquetPageLimitValidationBeforeDeleteConversion(t *testing.T) {
 	require.NoError(t, err)
 	_, err = tbl.NewTransaction().ConvertEqualityDeletesToDeletionVectors(t.Context())
 	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
-	_, err = tbl.Inspect().PositionDeletes(t.Context())
+	_, err = inspect.PositionDeletes(t.Context(), tbl)
 	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
 }

@@ -1076,10 +1076,6 @@ func readPositionDeleteBitmapsForPaths(
 	return bitmaps, nil
 }
 
-func readDeletes(ctx context.Context, fs iceio.IO, dataFile iceberg.DataFile) (map[string]*arrow.Chunked, error) {
-	return readDeletesForPaths(ctx, fs, dataFile, nil)
-}
-
 func readDeletesForPaths(ctx context.Context, fs iceio.IO, dataFile iceberg.DataFile,
 	targets map[string]struct{},
 ) (_ map[string]*arrow.Chunked, err error) {

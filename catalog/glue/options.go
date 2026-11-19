@@ -18,6 +18,7 @@
 package glue
 
 import (
+	"github.com/apache/iceberg-go/io"
 	"github.com/aws/aws-sdk-go-v2/aws"
 )
 
@@ -45,8 +46,17 @@ func WithAWSProperties(props AWSProperties) Option {
 	}
 }
 
+// WithIORegistry selects the FileIO factories used by this Glue catalog.
+// A nil registry uses the global default. The registry is shared, not copied,
+// so subsequent Register and Unregister calls affect this catalog.
+func WithIORegistry(registry *io.Registry) Option {
+	return func(o *options) { o.ioRegistry = registry }
+}
+
 type options struct {
 	name          string
 	awsConfig     aws.Config
 	awsProperties AWSProperties
+
+	ioRegistry *io.Registry
 }

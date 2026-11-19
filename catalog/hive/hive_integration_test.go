@@ -43,7 +43,6 @@ import (
 //
 // 2. Set the required environment variables:
 //    export TEST_HIVE_URI=thrift://localhost:9083
-//    export TEST_HIVE_DATABASE=test_db
 //    export TEST_TABLE_LOCATION=/tmp/iceberg/warehouse
 //
 // 3. Run the tests:
@@ -55,14 +54,6 @@ func getTestHiveURI() string {
 		return "thrift://localhost:9083"
 	}
 	return uri
-}
-
-func getTestDatabase() string {
-	db := os.Getenv("TEST_HIVE_DATABASE")
-	if db == "" {
-		return "test_iceberg_db"
-	}
-	return db
 }
 
 func getTestTableLocation() string {

@@ -579,17 +579,6 @@ func withFileFormatMatching() dataFileMatcherOption {
 	}
 }
 
-func withPathMatching() dataFileMatcherOption {
-	return func(m *dataFileMatcher) {
-		m.matchers = append(m.matchers, func(expected iceberg.DataFile, actual iceberg.DataFile) bool {
-			return expected.FilePath() == actual.FilePath()
-		})
-		m.formatters = append(m.formatters, func(val iceberg.DataFile) string {
-			return "FilePath: " + val.FilePath()
-		})
-	}
-}
-
 func withSpecIDMatching() dataFileMatcherOption {
 	return func(m *dataFileMatcher) {
 		m.matchers = append(m.matchers, func(expected iceberg.DataFile, actual iceberg.DataFile) bool {
@@ -641,36 +630,6 @@ func withColumnSizesMatching() dataFileMatcherOption {
 		})
 		m.formatters = append(m.formatters, func(val iceberg.DataFile) string {
 			return fmt.Sprintf("ColumnSizes: %v", val.ColumnSizes())
-		})
-	}
-}
-
-func withContentOffsetMatching() dataFileMatcherOption {
-	return func(m *dataFileMatcher) {
-		m.matchers = append(m.matchers, func(expected iceberg.DataFile, actual iceberg.DataFile) bool {
-			return comparePointerAndValue(expected.ContentOffset(), actual.ContentOffset())
-		})
-		m.formatters = append(m.formatters, func(val iceberg.DataFile) string {
-			if val.ContentSizeInBytes() == nil {
-				return "ContentOffset: nil"
-			}
-
-			return fmt.Sprintf("ContentOffset: %d", *val.ContentOffset())
-		})
-	}
-}
-
-func withContentSizeInBytesMatching() dataFileMatcherOption {
-	return func(m *dataFileMatcher) {
-		m.matchers = append(m.matchers, func(expected iceberg.DataFile, actual iceberg.DataFile) bool {
-			return comparePointerAndValue(expected.ContentSizeInBytes(), actual.ContentSizeInBytes())
-		})
-		m.formatters = append(m.formatters, func(val iceberg.DataFile) string {
-			if val.ContentSizeInBytes() == nil {
-				return "ContentSizeInBytes: nil"
-			}
-
-			return fmt.Sprintf("ContentSizeInBytes: %d", *val.ContentSizeInBytes())
 		})
 	}
 }

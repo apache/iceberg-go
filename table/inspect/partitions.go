@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-package table
+package inspect
 
 import (
 	"context"
@@ -30,6 +30,7 @@ import (
 	"github.com/apache/iceberg-go"
 	iceinternal "github.com/apache/iceberg-go/internal"
 	iceio "github.com/apache/iceberg-go/io"
+	"github.com/apache/iceberg-go/table"
 	tblutils "github.com/apache/iceberg-go/table/internal"
 	"golang.org/x/sync/errgroup"
 )
@@ -37,13 +38,17 @@ import (
 // Partitions returns one row per live partition, aggregating data and delete
 // files from the current snapshot. Files from evolved specs are coerced into
 // the table-wide partition type before grouping.
-func (i InspectTable) Partitions(ctx context.Context) (array.RecordReader, error) {
+func Partitions(ctx context.Context, tbl *table.Table, opts ...Option) (array.RecordReader, error) {
+	return newInspector(tbl, opts...).partitions(ctx)
+}
+
+func (i inspector) partitions(ctx context.Context) (array.RecordReader, error) {
 	partitionType, err := tblutils.UnifiedPartitionType(i.tbl.Metadata().PartitionSpecs(), i.tbl.Schema())
 	if err != nil {
 		return nil, fmt.Errorf("inspect partitions: %w", err)
 	}
 	schema := PartitionsSchema(partitionType)
-	arrowSchema, err := SchemaToArrowSchema(schema, nil, true, false)
+	arrowSchema, err := table.SchemaToArrowSchema(schema, nil, true, false)
 	if err != nil {
 		return nil, fmt.Errorf("inspect partitions: build arrow schema: %w", err)
 	}
@@ -59,7 +64,7 @@ func (i InspectTable) Partitions(ctx context.Context) (array.RecordReader, error
 // partitionAggregateReader encodes at most RecordBatchSize partitions per
 // Arrow batch. Aggregate discovery is eager, but the Arrow buffers are bounded
 // and released as each record is consumed.
-func (i InspectTable) partitionAggregateReader(
+func (i inspector) partitionAggregateReader(
 	ctx context.Context,
 	arrowSchema *arrow.Schema,
 	partitionType *iceberg.StructType,
@@ -101,7 +106,7 @@ func (i InspectTable) partitionAggregateReader(
 // per-manifest partition aggregation state.
 const inspectPartitionManifestConcurrency = 8
 
-func (i InspectTable) partitionAggregates(ctx context.Context, partitionType *iceberg.StructType) ([]*tblutils.PartitionAggregate, error) {
+func (i inspector) partitionAggregates(ctx context.Context, partitionType *iceberg.StructType) ([]*tblutils.PartitionAggregate, error) {
 	snapshot := i.tbl.Metadata().CurrentSnapshot()
 	if snapshot == nil {
 		return nil, nil
@@ -202,7 +207,7 @@ func (i InspectTable) partitionAggregates(ctx context.Context, partitionType *ic
 
 // foldInspectPartitionManifest performs the original partition accounting using
 // a caller-owned tree. Each concurrent worker owns its own tree and result slice.
-func (i InspectTable) foldInspectPartitionManifest(
+func (i inspector) foldInspectPartitionManifest(
 	ctx context.Context,
 	fs iceio.IO,
 	manifest iceberg.ManifestFile,
@@ -282,7 +287,7 @@ func mergeInspectPartitionAggregate(dst, src *tblutils.PartitionAggregate) {
 	}
 }
 
-func (i InspectTable) updatePartitionTimestamp(
+func (i inspector) updatePartitionTimestamp(
 	aggregate *tblutils.PartitionAggregate,
 	snapshotTimes map[int64]int64,
 	snapshotID int64,
