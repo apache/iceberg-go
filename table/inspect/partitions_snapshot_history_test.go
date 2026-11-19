@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-package table
+package inspect
 
 import (
 	"bytes"
@@ -26,6 +26,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
+	"github.com/apache/iceberg-go/table"
 	"github.com/stretchr/testify/require"
 )
 
@@ -44,7 +45,7 @@ func TestInspectPartitionsUsesHistoricalSnapshotTimestamp(t *testing.T) {
 	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
 	t.Cleanup(func() { mem.AssertSize(t, 0) })
 
-	rr, err := tbl.Inspect(WithInspectAllocator(mem)).Partitions(t.Context())
+	rr, err := Partitions(t.Context(), tbl, WithAllocator(mem))
 	require.NoError(t, err)
 	defer rr.Release()
 
@@ -68,18 +69,18 @@ func TestInspectPartitionsUsesHistoricalSnapshotTimestamp(t *testing.T) {
 func inspectPartitionHistoricalSnapshotTable(
 	t testing.TB,
 	historicalSnapshotID, currentSnapshotID int64,
-) (*Table, int64) {
+) (*table.Table, int64) {
 	t.Helper()
 
 	spec := partitionedSpec()
 	schema := simpleSchema()
-	meta, err := NewMetadata(
-		schema, &spec, UnsortedSortOrder, "mem://snapshot-history/table", nil,
+	meta, err := table.NewMetadata(
+		schema, &spec, table.UnsortedSortOrder, "mem://snapshot-history/table", nil,
 	)
 	require.NoError(t, err)
 	historicalTimestamp := meta.LastUpdatedMillis() + 1
 	currentTimestamp := historicalTimestamp + 1
-	builder, err := MetadataBuilderFromBase(meta, "metadata.json")
+	builder, err := table.MetadataBuilderFromBase(meta, "metadata.json")
 	require.NoError(t, err)
 	fs := iceio.NewMemFS()
 
@@ -134,30 +135,30 @@ func inspectPartitionHistoricalSnapshotTable(
 	require.NoError(t, fs.WriteFile(context.Background(), manifestListPath, listBuffer.Bytes()))
 
 	schemaID := schema.ID
-	require.NoError(t, builder.AddSnapshot(&Snapshot{
+	require.NoError(t, builder.AddSnapshot(&table.Snapshot{
 		SnapshotID:     historicalSnapshotID,
 		SequenceNumber: historicalSequence,
 		TimestampMs:    historicalTimestamp,
 		ManifestList:   "mem://snapshot-history/table/metadata/snap-1.avro",
 		SchemaID:       &schemaID,
-		Summary:        &Summary{Operation: OpAppend},
+		Summary:        &table.Summary{Operation: table.OpAppend},
 	}))
-	require.NoError(t, builder.AddSnapshot(&Snapshot{
+	require.NoError(t, builder.AddSnapshot(&table.Snapshot{
 		SnapshotID:       currentSnapshotID,
 		ParentSnapshotID: &historicalSnapshotID,
 		SequenceNumber:   currentSequence,
 		TimestampMs:      currentTimestamp,
 		ManifestList:     manifestListPath,
 		SchemaID:         &schemaID,
-		Summary:          &Summary{Operation: OpAppend},
+		Summary:          &table.Summary{Operation: table.OpAppend},
 	}))
-	require.NoError(t, builder.SetSnapshotRef(MainBranch, currentSnapshotID, BranchRef))
+	require.NoError(t, builder.SetSnapshotRef(table.MainBranch, currentSnapshotID, table.BranchRef))
 
 	built, err := builder.Build()
 	require.NoError(t, err)
 
-	return New(
-		Identifier{"db", "tbl"},
+	return table.New(
+		table.Identifier{"db", "tbl"},
 		built,
 		"metadata.json",
 		func(context.Context) (iceio.IO, error) { return fs, nil },

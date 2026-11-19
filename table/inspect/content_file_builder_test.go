@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-package table
+package inspect
 
 import (
 	"testing"
@@ -23,6 +23,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/table"
 	"github.com/stretchr/testify/require"
 )
 
@@ -44,7 +45,7 @@ func TestInspectContentFileAppenderRebindsAcrossRecordBuilders(t *testing.T) {
 		{name: "reordered", schema: iceberg.NewSchema(0, reordered...)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			arrowSchema, err := SchemaToArrowSchema(tc.schema, nil, true, false)
+			arrowSchema, err := table.SchemaToArrowSchema(tc.schema, nil, true, false)
 			require.NoError(t, err)
 
 			builder := array.NewRecordBuilder(memory.DefaultAllocator, arrowSchema)

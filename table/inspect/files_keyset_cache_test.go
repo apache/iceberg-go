@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-package table
+package inspect
 
 import (
 	"fmt"
@@ -26,6 +26,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/table"
 )
 
 func TestCachedInspectFieldIDsRechecksKeys(t *testing.T) {
@@ -57,7 +58,7 @@ func TestCachedInspectFieldIDsRechecksKeys(t *testing.T) {
 }
 
 func TestInspectFileAppenderRechecksChangedStatsMapKeys(t *testing.T) {
-	schema, err := SchemaToArrowSchema(DataFilesSchema(iceberg.NewStructType()), nil, true, false)
+	schema, err := table.SchemaToArrowSchema(DataFilesSchema(iceberg.NewStructType()), nil, true, false)
 	if err != nil {
 		t.Fatal(err)
 	}
