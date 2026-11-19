@@ -23,6 +23,7 @@ import (
 	"maps"
 
 	"github.com/apache/iceberg-go"
+	iceberginternal "github.com/apache/iceberg-go/internal"
 )
 
 // RewriteFiles is the snapshot-operation builder for rewrite
@@ -274,8 +275,9 @@ func (r *RewriteFiles) AddFile(df iceberg.DataFile) *RewriteFiles {
 
 // ApplyResult queues a worker's [CompactionGroupResult] onto this builder,
 // routing OldDataFiles (DeleteFile), NewDataFiles (AddFile), SafePosDeletes
-// and SafeDeletionVectors as automatic delete-file removals. SafePosDeletes
-// are only candidates: Commit validates them across all surviving files.
+// and SafeDeletionVectors as automatic delete-file removal candidates. Commit
+// checks position deletes against surviving files and deletion vectors against
+// the data files being replaced.
 //
 // Typical distributed-coordinator pattern:
 //
@@ -302,19 +304,8 @@ func (r *RewriteFiles) ApplyResult(gr CompactionGroupResult) *RewriteFiles {
 	return r
 }
 
-// filterAutomaticPositionDeleteRemovals checks the full rewrite, not just a
-// worker's compaction group. A shared position delete must be retained while
-// any surviving data file can still need it. Explicit DeleteFile removals
-// are unaffected by this automatic cleanup.
-func (r *RewriteFiles) filterAutomaticPositionDeleteRemovals(ctx context.Context) error {
-	hasPositionDeletes := false
-	for _, df := range r.autoDeleteFilesToRemove {
-		if df.ContentType() == iceberg.EntryContentPosDeletes && !IsDeletionVector(df) {
-			hasPositionDeletes = true
-			break
-		}
-	}
-	if !hasPositionDeletes {
+func (r *RewriteFiles) filterAutomaticDeleteRemovals(ctx context.Context) error {
+	if len(r.autoDeleteFilesToRemove) == 0 {
 		return nil
 	}
 
@@ -323,44 +314,85 @@ func (r *RewriteFiles) filterAutomaticPositionDeleteRemovals(ctx context.Context
 		rewrittenPaths[df.FilePath()] = struct{}{}
 	}
 
-	staged, err := r.txn.StagedTable()
-	if err != nil {
-		return fmt.Errorf("load staged table for position-delete cleanup: %w", err)
-	}
-	fs, err := staged.Table.fsF(ctx)
-	if err != nil {
-		return fmt.Errorf("open table IO for position-delete cleanup: %w", err)
-	}
-	dead, err := CollectDeadPositionDeletes(ctx, fs,
-		latestSnapshotForBranch(staged.Table.Metadata(), r.txn.branch), rewrittenPaths)
-	if err != nil {
-		return fmt.Errorf("validate automatic position-delete removals: %w", err)
-	}
-
-	deadPaths := make(map[string]struct{}, len(dead))
-	for _, df := range dead {
-		deadPaths[df.FilePath()] = struct{}{}
-	}
-
-	// A shared delete can be reported by several workers. Remove it once.
-	seen := make(map[string]struct{})
-	retained := r.autoDeleteFilesToRemove[:0]
+	positionPaths := make(map[string]struct{})
 	for _, df := range r.autoDeleteFilesToRemove {
 		if df.ContentType() == iceberg.EntryContentPosDeletes && !IsDeletionVector(df) {
+			positionPaths[df.FilePath()] = struct{}{}
+		}
+	}
+	var deadPositionPaths map[string]struct{}
+	if len(rewrittenPaths) > 0 && len(positionPaths) > 0 {
+		var err error
+		deadPositionPaths, err = r.deadPositionDeletePaths(ctx, rewrittenPaths, positionPaths)
+		if err != nil {
+			return err
+		}
+	}
+
+	seenDVs := make(map[string]deletionVectorBlobKey)
+	retained := r.autoDeleteFilesToRemove[:0]
+	for _, df := range r.autoDeleteFilesToRemove {
+		switch {
+		case IsDeletionVector(df):
+			ref := iceberginternal.BorrowedDataFileReferencedDataFile(df)
+			if ref == nil || *ref == "" {
+				return fmt.Errorf("%w: automatic deletion vector %q has no referenced data file", ErrInvalidOperation, df.FilePath())
+			}
+			if _, rewritten := rewrittenPaths[*ref]; !rewritten {
+				continue
+			}
+			key, err := snapshotFileDiffKey(df)
+			if err != nil {
+				return fmt.Errorf("%w: %w", ErrInvalidOperation, err)
+			}
+			if prior, seen := seenDVs[*ref]; seen {
+				if prior != key {
+					return fmt.Errorf("%w: conflicting automatic deletion vectors for data file %q", ErrInvalidOperation, *ref)
+				}
+
+				continue
+			}
+			seenDVs[*ref] = key
+		case df.ContentType() == iceberg.EntryContentPosDeletes:
 			path := df.FilePath()
-			if _, ok := deadPaths[path]; !ok {
+			if _, dead := deadPositionPaths[path]; !dead {
 				continue
 			}
-			if _, duplicate := seen[path]; duplicate {
-				continue
-			}
-			seen[path] = struct{}{}
+			delete(deadPositionPaths, path)
 		}
 		retained = append(retained, df)
 	}
 	r.autoDeleteFilesToRemove = retained
 
 	return nil
+}
+
+func (r *RewriteFiles) deadPositionDeletePaths(
+	ctx context.Context, rewrittenPaths, expectedDeletePaths map[string]struct{},
+) (map[string]struct{}, error) {
+	meta, err := r.txn.txnMeta()
+	if err != nil {
+		return nil, err
+	}
+	snapshot := r.txn.planningSnapshot(meta)
+	if snapshot == nil {
+		return nil, nil
+	}
+	fs, err := r.txn.tbl.fsF(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("open table IO for position-delete cleanup: %w", err)
+	}
+	dead, err := collectDeadPositionDeletes(ctx, fs, snapshot, rewrittenPaths, expectedDeletePaths)
+	if err != nil {
+		return nil, fmt.Errorf("validate automatic position-delete removals: %w", err)
+	}
+
+	paths := make(map[string]struct{}, len(dead))
+	for _, df := range dead {
+		paths[df.FilePath()] = struct{}{}
+	}
+
+	return paths, nil
 }
 
 // Commit stages the rewrite snapshot on the underlying transaction.
@@ -382,6 +414,9 @@ func (r *RewriteFiles) Commit(ctx context.Context) error {
 	if r.err != nil {
 		return r.err
 	}
+	if err := r.filterAutomaticDeleteRemovals(ctx); err != nil {
+		return err
+	}
 	if len(r.dataFilesToDelete) == 0 && len(r.dataFilesToAdd) == 0 &&
 		len(r.deleteFilesToAdd) == 0 && len(r.deleteFilesToRemove) == 0 &&
 		len(r.autoDeleteFilesToRemove) == 0 {
@@ -395,10 +430,6 @@ func (r *RewriteFiles) Commit(ctx context.Context) error {
 	// deleteFilesToRemove non-empty) is still legitimate.
 	if len(r.dataFilesToDelete) == 0 && len(r.dataFilesToAdd) > 0 {
 		return fmt.Errorf("%w: rewrite must delete at least one data file when adding data files", ErrInvalidOperation)
-	}
-
-	if err := r.filterAutomaticPositionDeleteRemovals(ctx); err != nil {
-		return err
 	}
 
 	opts := []WriteOption{withRewriteSemantics()}

@@ -77,6 +77,7 @@ func setupSharedPositionDeleteRewrite(t *testing.T) (*table.Table, []table.Compa
 		}
 	}
 	require.Len(t, groups, 2)
+
 	return tbl, groups
 }
 
@@ -131,5 +132,59 @@ func TestRewriteCompactionKeepsSharedPositionDeleteForSurvivingFile(t *testing.T
 				}
 			})
 		}
+	}
+}
+
+func TestRewriteFilesValidatesWorkerDeletionVectors(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		rewriteTarget bool
+	}{
+		{name: "keep vector for surviving file"},
+		{name: "remove duplicate vector candidates once", rewriteTarget: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tbl, target := seedV3TableWithDV(t)
+			ctx := t.Context()
+			tasks, err := tbl.Scan().PlanFiles(ctx)
+			require.NoError(t, err)
+			require.Len(t, tasks, 2)
+
+			var targetDV iceberg.DataFile
+			var task table.FileScanTask
+			for _, candidate := range tasks {
+				isTarget := candidate.File.FilePath() == target
+				if isTarget {
+					require.Len(t, candidate.DeletionVectorFiles, 1)
+					targetDV = candidate.DeletionVectorFiles[0]
+				}
+				if isTarget == tc.rewriteTarget {
+					task = candidate
+				}
+			}
+			require.NotNil(t, targetDV)
+			require.NotNil(t, task.File)
+			if !tc.rewriteTarget {
+				wrongTask := task
+				wrongTask.DeletionVectorFiles = []iceberg.DataFile{targetDV}
+				require.Empty(t, table.CollectSafeDeletionVectors([]table.FileScanTask{wrongTask}))
+			}
+
+			result, err := table.ExecuteCompactionGroup(ctx, tbl,
+				table.CompactionTaskGroup{Tasks: []table.FileScanTask{task}})
+			require.NoError(t, err)
+			result.SafeDeletionVectors = []iceberg.DataFile{targetDV, targetDV}
+
+			tx := tbl.NewTransaction()
+			require.NoError(t, tx.NewRewrite(nil).ApplyResult(result).Commit(ctx))
+			committed, err := tx.Commit(ctx)
+			require.NoError(t, err)
+			require.ElementsMatch(t, []int64{2, 3, 4}, scanIDs(t, committed))
+			if tc.rewriteTarget {
+				require.Equal(t, "1", committed.CurrentSnapshot().Summary.Properties["removed-dvs"])
+			} else {
+				require.NotContains(t, committed.CurrentSnapshot().Summary.Properties, "removed-dvs")
+			}
+		})
 	}
 }
