@@ -148,7 +148,7 @@ func createAzureBucketWithOptions(
 	credentialFactories azureCredentialFactories,
 	clientOptions *container.ClientOptions,
 ) (*blob.Bucket, error) {
-	adlsSasTokens := propertiesWithPrefix(props, io.ADLSSasTokenPrefix)
+	adlsSasTokens := propertiesWithPrefix(props, io.ADLSSASTokenPrefix)
 	adlsConnectionStrings := propertiesWithPrefix(props, io.ADLSConnectionStringPrefix)
 
 	// Construct the client

@@ -37,7 +37,7 @@ import (
 // WriteTask writes all its Batches into one file. The rolling writer bypasses
 // it, naming files via dataFileName directly.
 type WriteTask struct {
-	Uuid        uuid.UUID
+	UUID        uuid.UUID
 	ID          int
 	PartitionID int // PartitionID is the partition identifier used in data file naming.
 	FileCount   int // FileCount is a sequential counter for files written by this task.
@@ -49,7 +49,7 @@ type WriteTask struct {
 }
 
 func (w WriteTask) GenerateDataFileName(extension string) string {
-	return dataFileName(w.Uuid, w.ID, w.PartitionID, w.FileCount, extension)
+	return dataFileName(w.UUID, w.ID, w.PartitionID, w.FileCount, extension)
 }
 
 // dataFileName builds a data file name, mirroring the Java API:

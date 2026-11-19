@@ -383,7 +383,7 @@ func (t *Transaction) RewritePositionDeleteFiles(
 			record := b.NewRecordBatch()
 			b.Release()
 			task := WriteTask{
-				Uuid: uuid.New(), PartitionID: spec.ID(),
+				UUID: uuid.New(), PartitionID: spec.ID(),
 				FileCount: 1, Schema: iceberg.PositionalDeleteSchema,
 				Batches: []arrow.RecordBatch{record},
 			}
