@@ -1513,16 +1513,6 @@ func checkSchemaCompat(requested, provided *iceberg.Schema) error {
 	return compat
 }
 
-func checkArrowSchemaCompat(requested *iceberg.Schema, provided *arrow.Schema, downcastNanoToMicro bool) error {
-	mapping := requested.NameMapping()
-	providedSchema, err := ArrowSchemaToIceberg(provided, downcastNanoToMicro, mapping)
-	if err != nil {
-		return err
-	}
-
-	return checkSchemaCompat(requested, providedSchema)
-}
-
 func checkArrowSchemaCompatWithProperties(requested *iceberg.Schema, provided *arrow.Schema, downcastNanoToMicro bool, props iceberg.Properties) error {
 	providedSchema, err := ArrowSchemaToIcebergWithOptions(provided, ArrowToIcebergOptions{
 		DowncastNsTimestamp: downcastNanoToMicro,
@@ -2736,15 +2726,6 @@ func (c convertToIceberg) geoArrowCRSToIcebergCRS(meta geoarrow.Metadata) (strin
 	}
 
 	return projJSONCRSFromTable(fieldID, meta.CRS, c.tableSchema, c.tableProperties)
-}
-
-func geoArrowMetadataToIcebergType(meta geoarrow.Metadata) (iceberg.Type, error) {
-	crs, err := geoArrowCRSToIcebergCRS(meta)
-	if err != nil {
-		return nil, err
-	}
-
-	return geoArrowMetadataToIcebergTypeWithCRS(meta, crs)
 }
 
 func geoArrowMetadataToIcebergTypeWithCRS(meta geoarrow.Metadata, crs string) (iceberg.Type, error) {
