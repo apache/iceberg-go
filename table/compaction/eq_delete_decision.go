@@ -253,7 +253,11 @@ func partitionBucketKeyFromTuple(specID int32, tuple []byte) string {
 	return string(append(key, tuple...))
 }
 
-// appendPartitionTuple emits the sorted "id=value;" tuple into dst.
+// appendPartitionTuple writes a collision-free partition identity into dst.
+// The type marker and byte length distinguish null from text and delimit each
+// value even when string or binary values contain '=' or ';'. Normalize
+// integer wrappers and floating point widths to keep independently decoded
+// representations of the same partition in one bucket.
 // Caller is responsible for any leading prefix (e.g. specID).
 func appendPartitionTuple(dst []byte, part map[int]any) []byte {
 	var inlineIDs [8]int
@@ -266,33 +270,85 @@ func appendPartitionTuple(dst []byte, part map[int]any) []byte {
 	}
 	slices.Sort(ids)
 
-	if cap(dst) == 0 && len(part) != 0 {
-		dst = make([]byte, 0, len(part)*16)
-	}
 	for _, id := range ids {
 		dst = strconv.AppendInt(dst, int64(id), 10)
 		dst = append(dst, '=')
-		// Match fmt's %v output exactly; these partition keys are externally visible.
-		switch value := part[id].(type) {
+
+		var scratch [64]byte
+		value := scratch[:0]
+		var kind byte
+		switch v := part[id].(type) {
 		case nil:
-			dst = append(dst, "<nil>"...)
+			kind = 'n'
 		case string:
-			dst = append(dst, value...)
-		case int32:
-			dst = strconv.AppendInt(dst, int64(value), 10)
-		case iceberg.Date:
-			dst = strconv.AppendInt(dst, int64(value), 10)
-		case int64:
-			dst = strconv.AppendInt(dst, value, 10)
+			kind = 's'
+			value = append(value, v...)
+		case []byte:
+			kind = 'x'
+			value = append(value, v...)
 		case bool:
-			dst = strconv.AppendBool(dst, value)
+			kind = 'b'
+			value = strconv.AppendBool(value, v)
+		case int:
+			kind = 'i'
+			value = strconv.AppendInt(value, int64(v), 10)
+		case int32:
+			kind = 'i'
+			value = strconv.AppendInt(value, int64(v), 10)
+		case int64:
+			kind = 'i'
+			value = strconv.AppendInt(value, v, 10)
+		case iceberg.Date:
+			kind = 'i'
+			value = strconv.AppendInt(value, int64(v), 10)
+		case iceberg.Time:
+			kind = 'i'
+			value = strconv.AppendInt(value, int64(v), 10)
+		case iceberg.Timestamp:
+			kind = 'i'
+			value = strconv.AppendInt(value, int64(v), 10)
+		case iceberg.TimestampNano:
+			kind = 'i'
+			value = strconv.AppendInt(value, int64(v), 10)
+		case float32:
+			kind = 'f'
+			value = appendPartitionFloat(value, float64(v))
+		case float64:
+			kind = 'f'
+			value = appendPartitionFloat(value, v)
+		case iceberg.Decimal:
+			kind = 'd'
+			value = append(value, v.String()...)
 		default:
-			dst = fmt.Append(dst, value)
+			// Unexpected types are included with their Go type to avoid
+			// collisions with ordinary partition values.
+			kind = 'v'
+			value = fmt.Appendf(value, "%T=%v", v, v)
+		}
+
+		dst = append(dst, kind)
+		if kind != 'n' {
+			dst = strconv.AppendInt(dst, int64(len(value)), 10)
+			dst = append(dst, ':')
+			dst = append(dst, value...)
 		}
 		dst = append(dst, ';')
 	}
 
 	return dst
+}
+
+// Normalize signed zero and NaN payloads; float32 promotion to float64 is
+// exact, so both Avro-decoded representations share the same identity.
+func appendPartitionFloat(dst []byte, v float64) []byte {
+	if math.IsNaN(v) {
+		return append(dst, "nan"...)
+	}
+	if v == 0 {
+		v = 0
+	}
+
+	return strconv.AppendUint(dst, math.Float64bits(v), 16)
 }
 
 func updatePartitionMinSeq(partitions map[string]int64, key string, seq int64) {

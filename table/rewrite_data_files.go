@@ -576,9 +576,20 @@ func ExecuteCompactionGroup(ctx context.Context, tbl *Table, group CompactionTas
 	}
 
 	seenFiles := make(map[string]struct{}, len(group.Tasks))
+	var firstFile iceberg.DataFile
 	for _, task := range group.Tasks {
 		if task.File == nil {
 			return CompactionGroupResult{}, fmt.Errorf("%w: compaction task has no data file", ErrInvalidOperation)
+		}
+		if firstFile == nil {
+			firstFile = task.File
+		} else if task.File.SpecID() != firstFile.SpecID() ||
+			!partitionsMatch(dataFilePartition(task.File), dataFilePartition(firstFile)) {
+			// The clustered writer below assumes a single partition. Reject
+			// malformed worker groups instead of writing rows under a
+			// different partition's metadata.
+			return CompactionGroupResult{}, fmt.Errorf("%w: compaction group contains files from different partitions: %s and %s",
+				ErrInvalidOperation, firstFile.FilePath(), task.File.FilePath())
 		}
 		path := task.File.FilePath()
 		if _, ok := seenFiles[path]; ok {
