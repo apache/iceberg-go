@@ -508,7 +508,9 @@ func (t *Transaction) RewriteDataFiles(ctx context.Context, groups []CompactionT
 		}
 
 		rewrite.ApplyResult(gr)
-		accumulateGroupMetrics(result, gr)
+		// A shared position delete is not safe until the coordinator checks
+		// every surviving file, so do not count worker hints as removals.
+		accumulateGroupMetricsWithDeletes(result, gr, 0, 0)
 		for _, df := range gr.SafePosDeletes {
 			stagedDeleteFiles[df.FilePath()] = struct{}{}
 		}
@@ -543,6 +545,18 @@ func (t *Transaction) RewriteDataFiles(ctx context.Context, groups []CompactionT
 
 	if err := rewrite.Commit(ctx); err != nil {
 		return result, fmt.Errorf("commit compaction: %w", err)
+	}
+
+	// Count only automatic delete-file removals that the coordinator kept.
+	for _, df := range rewrite.autoDeleteFilesToRemove {
+		switch {
+		case IsDeletionVector(df):
+			result.RemovedDeletionVectorFiles++
+		case df.ContentType() == iceberg.EntryContentEqDeletes:
+			result.RemovedEqualityDeleteFiles++
+		default:
+			result.RemovedPositionDeleteFiles++
+		}
 	}
 
 	return result, nil
