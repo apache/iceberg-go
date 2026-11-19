@@ -30,7 +30,7 @@ import (
 	"github.com/apache/iceberg-go"
 	iceinternal "github.com/apache/iceberg-go/internal"
 	tblutils "github.com/apache/iceberg-go/table/internal"
-	"github.com/apache/iceberg-go/table/substrait"
+	"github.com/apache/iceberg-go/table/internal/substrait"
 	"github.com/substrait-io/substrait-go/v8/expr"
 )
 
