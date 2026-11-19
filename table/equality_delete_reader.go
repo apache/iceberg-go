@@ -288,12 +288,6 @@ func resolveArrowField(refs arrowFieldRefsByID, fieldID int, fieldName, filePath
 	return arrowFieldRef{}, fmt.Errorf("equality field ID %d (%s) not found in %s", fieldID, fieldName, location)
 }
 
-func arrowArrayAtField(record arrow.RecordBatch, ref arrowFieldRef, fieldID int, fieldName, filePath string) (arrow.Array, error) {
-	result, _, err := arrowArraysAtField(record, ref, fieldID, fieldName, filePath)
-
-	return result, err
-}
-
 func arrowArraysAtField(record arrow.RecordBatch, ref arrowFieldRef, fieldID int, fieldName, filePath string) (arrow.Array, []arrow.Array, error) {
 	location := filePath
 	if location == "" {

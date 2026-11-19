@@ -71,8 +71,7 @@ func (d SnapshotFileDiff) HasChanges() bool {
 // column statistics to bound memory use. Returned files must not be passed
 // to a ManifestWriter because their statistics are incomplete. It never reads
 // Parquet, Avro, or ORC data files.
-func (i InspectTable) DiffSnapshotFiles(ctx context.Context, fromSnapshotID, toSnapshotID int64) (SnapshotFileDiff, error) {
-	t := i.tbl
+func (t Table) DiffSnapshotFiles(ctx context.Context, fromSnapshotID, toSnapshotID int64) (SnapshotFileDiff, error) {
 	diff := SnapshotFileDiff{
 		FromSnapshotID: fromSnapshotID,
 		ToSnapshotID:   toSnapshotID,

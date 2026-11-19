@@ -14,7 +14,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package table
+package inspect
 
 import (
 	"context"
@@ -25,6 +25,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/table"
 	tblutils "github.com/apache/iceberg-go/table/internal"
 )
 
@@ -33,17 +34,21 @@ import (
 // one row per reference, identified by reference_snapshot_id.
 // Results are streamed in bounded record batches while each snapshot's
 // manifest list is traversed.
-func (i InspectTable) AllManifests(ctx context.Context) (array.RecordReader, error) {
-	arrowSchema, err := SchemaToArrowSchema(AllManifestsSchema(), nil, true, false)
+func AllManifests(ctx context.Context, tbl *table.Table, opts ...Option) (array.RecordReader, error) {
+	return newInspector(tbl, opts...).allManifests(ctx)
+}
+
+func (i inspector) allManifests(ctx context.Context) (array.RecordReader, error) {
+	arrowSchema, err := table.SchemaToArrowSchema(AllManifestsSchema(), nil, true, false)
 	if err != nil {
 		return nil, fmt.Errorf("inspect all manifests: build arrow schema: %w", err)
 	}
 
 	snapshots := i.tbl.Metadata().Snapshots()
-	var readSnapshotManifests func(Snapshot) (iter.Seq[iceberg.ManifestFile], error)
+	var readSnapshotManifests func(table.Snapshot) (iter.Seq[iceberg.ManifestFile], error)
 	if len(snapshots) > 0 {
 		provider := i.tbl.ManifestProvider()
-		readSnapshotManifests = func(snapshot Snapshot) (iter.Seq[iceberg.ManifestFile], error) {
+		readSnapshotManifests = func(snapshot table.Snapshot) (iter.Seq[iceberg.ManifestFile], error) {
 			return provider.Manifests(ctx, snapshot)
 		}
 	}

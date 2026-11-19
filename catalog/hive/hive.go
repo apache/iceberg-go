@@ -29,7 +29,6 @@ import (
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
 	"github.com/apache/iceberg-go/catalog/internal"
-	"github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/metrics"
 	"github.com/apache/iceberg-go/table"
 	"github.com/apache/iceberg-go/table/maintenance"
@@ -197,7 +196,7 @@ func (c *Catalog) LoadTable(ctx context.Context, identifier table.Identifier) (*
 		ctx,
 		identifier,
 		metadataLocation,
-		io.LoadFSFunc(c.opts.props, metadataLocation),
+		internal.LoadFSFuncWithRegistry(c.opts.ioRegistry, c.opts.props, metadataLocation),
 		c,
 		table.WithMetricsReporter(reporter),
 		table.WithScanPlanningIOProperties(c.opts.props),
@@ -228,7 +227,7 @@ func (c *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 		return nil, fmt.Errorf("%w: %s.%s", catalog.ErrViewAlreadyExists, database, tableName)
 	}
 
-	staged, err := internal.CreateStagedTable(ctx, c.opts.props, c.LoadNamespaceProperties, identifier, schema, opts...)
+	staged, err := internal.CreateStagedTable(ctx, c.opts.props, c.LoadNamespaceProperties, identifier, schema, c.opts.ioRegistry, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -290,7 +289,7 @@ func (c *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier
 		ctx,
 		identifier,
 		metadataLocation,
-		io.LoadFSFunc(c.opts.props, metadataLocation),
+		internal.LoadFSFuncWithRegistry(c.opts.ioRegistry, c.opts.props, metadataLocation),
 		c,
 		table.WithMetricsReporter(reporter),
 		table.WithScanPlanningIOProperties(c.opts.props),
@@ -378,7 +377,7 @@ func (c *Catalog) CreateView(ctx context.Context, identifier table.Identifier, v
 		maps.Copy(ioProps, cfg.Properties)
 	}
 
-	createdView, err := view.CreateViewFromVersion(ctx, identifier, freshSchema, version, loc, ioProps, cfg.Properties)
+	createdView, err := view.CreateViewFromVersion(ctx, identifier, freshSchema, version, loc, ioProps, cfg.Properties, view.WithIORegistry(c.opts.ioRegistry))
 	if err != nil {
 		return nil, err
 	}
@@ -607,7 +606,7 @@ func (c *Catalog) CommitTable(ctx context.Context, identifier table.Identifier, 
 			return nil, "", err
 		}
 		current, err = table.NewFromLocation(
-			ctx, identifier, metadataLoc, io.LoadFSFunc(c.opts.props, metadataLoc), c,
+			ctx, identifier, metadataLoc, internal.LoadFSFuncWithRegistry(c.opts.ioRegistry, c.opts.props, metadataLoc), c,
 			table.WithScanPlanningIOProperties(c.opts.props),
 		)
 		if err != nil {
@@ -615,7 +614,7 @@ func (c *Catalog) CommitTable(ctx context.Context, identifier table.Identifier, 
 		}
 	}
 
-	staged, err := internal.UpdateAndStageTable(ctx, c.opts.props, current, identifier, requirements, updates, c)
+	staged, err := internal.UpdateAndStageTable(ctx, c.opts.props, current, identifier, requirements, updates, c, c.opts.ioRegistry)
 	if err != nil {
 		return nil, "", err
 	}
@@ -751,7 +750,7 @@ func (c *Catalog) LoadView(ctx context.Context, identifier table.Identifier) (*v
 		ctx,
 		identifier,
 		metadataLocation,
-		io.LoadFSFunc(c.opts.props, metadataLocation),
+		internal.LoadFSFuncWithRegistry(c.opts.ioRegistry, c.opts.props, metadataLocation),
 	)
 }
 
@@ -784,7 +783,7 @@ func (c *Catalog) DropView(ctx context.Context, identifier table.Identifier) err
 		return fmt.Errorf("failed to drop view %s.%s: %w", database, viewName, err)
 	}
 
-	fs, err := io.LoadFS(ctx, c.opts.props, metadataLocation)
+	fs, err := internal.LoadFSWithRegistry(ctx, c.opts.ioRegistry, c.opts.props, metadataLocation)
 	if err != nil {
 		return fmt.Errorf("failed to load filesystem for view metadata: %w", err)
 	}

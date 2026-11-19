@@ -14,7 +14,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package table
+package inspect
 
 import (
 	"context"
@@ -30,6 +30,7 @@ import (
 	"github.com/apache/iceberg-go"
 	iceinternal "github.com/apache/iceberg-go/internal"
 	iceio "github.com/apache/iceberg-go/io"
+	"github.com/apache/iceberg-go/table"
 	"github.com/apache/iceberg-go/table/dv"
 	tblutils "github.com/apache/iceberg-go/table/internal"
 )
@@ -49,10 +50,14 @@ const (
 // PositionDeletes returns the individual position-delete records referenced
 // by the current snapshot. Parquet position-delete files and V3 deletion
 // vectors are exposed through the same schema.
-func (i InspectTable) PositionDeletes(ctx context.Context) (array.RecordReader, error) {
+func PositionDeletes(ctx context.Context, tbl *table.Table, opts ...Option) (array.RecordReader, error) {
+	return newInspector(tbl, opts...).positionDeletes(ctx)
+}
+
+func (i inspector) positionDeletes(ctx context.Context) (array.RecordReader, error) {
 	props := i.tbl.Metadata().Properties()
 	nameMapping := i.tbl.Metadata().NameMapping()
-	if err := validateNameMappingProperty(props, nameMapping); err != nil {
+	if err := tblutils.ValidateNameMappingProperty(props, table.DefaultNameMappingKey, nameMapping, table.ErrInvalidMetadata); err != nil {
 		return nil, err
 	}
 	if err := tblutils.ValidateParquetReadProperties(props); err != nil {
@@ -65,7 +70,7 @@ func (i InspectTable) PositionDeletes(ctx context.Context) (array.RecordReader, 
 		return nil, fmt.Errorf("inspect position deletes: %w", err)
 	}
 	schema := PositionDeletesSchema(i.tbl.Metadata().CurrentSchema(), partitionType, i.tbl.Metadata().FormatVersion())
-	arrowSchema, err := SchemaToArrowSchema(schema, nil, true, false)
+	arrowSchema, err := table.SchemaToArrowSchema(schema, nil, true, false)
 	if err != nil {
 		return nil, fmt.Errorf("inspect position deletes: build arrow schema: %w", err)
 	}
@@ -80,7 +85,7 @@ func (i InspectTable) PositionDeletes(ctx context.Context) (array.RecordReader, 
 		ctx, arrowSchema, fs, manifests, partitionType, partitionIDs, i.tbl.Metadata().FormatVersion(), nameMapping), nil
 }
 
-func (i InspectTable) currentPositionDeleteManifests(
+func (i inspector) currentPositionDeleteManifests(
 	ctx context.Context,
 ) (iceio.IO, iter.Seq[iceberg.ManifestFile], error) {
 	snapshot := i.tbl.Metadata().CurrentSnapshot()
@@ -160,9 +165,9 @@ func newPositionDeleteRecordAppender(
 		if !ok {
 			return positionDeleteRecordAppender{}, fmt.Errorf("%w: destination row has type %s, want struct", iceberg.ErrInvalidSchema, bldr.Field(2).Type())
 		}
-		rowSchema, err := ArrowSchemaToIcebergWithOptions(
+		rowSchema, err := table.ArrowSchemaToIcebergWithOptions(
 			arrow.NewSchema(rowType.Fields(), nil),
-			ArrowToIcebergOptions{TableProperties: projection.tableProperties},
+			table.ArrowToIcebergOptions{TableProperties: projection.tableProperties},
 		)
 		if err != nil {
 			return positionDeleteRecordAppender{}, fmt.Errorf("%w: resolve destination row schema: %v", iceberg.ErrInvalidSchema, err)
@@ -462,7 +467,7 @@ func projectPositionDeleteRows(
 	}
 
 	sourceArrowSchema := arrow.NewSchema(rowType.Fields(), nil)
-	fileSchema, err := ArrowSchemaToIcebergWithOptions(sourceArrowSchema, ArrowToIcebergOptions{
+	fileSchema, err := table.ArrowSchemaToIcebergWithOptions(sourceArrowSchema, table.ArrowToIcebergOptions{
 		NameMapping:     projection.nameMapping,
 		TableSchema:     projection.tableSchema,
 		TableProperties: projection.tableProperties,
@@ -474,7 +479,7 @@ func projectPositionDeleteRows(
 	sourceBatch := array.RecordFromStructArray(rows, sourceArrowSchema)
 	defer sourceBatch.Release()
 
-	return ToRequestedSchema(ctx, projection.tableSchema, fileSchema, sourceBatch, SchemaOptions{
+	return table.ToRequestedSchema(ctx, projection.tableSchema, fileSchema, sourceBatch, table.SchemaOptions{
 		FormatVersion:        projection.formatVersion,
 		IncludeFieldIDs:      true,
 		AllowMissingRequired: true,
@@ -482,7 +487,7 @@ func projectPositionDeleteRows(
 	})
 }
 
-func (i InspectTable) positionDeleteRecordReader(
+func (i inspector) positionDeleteRecordReader(
 	ctx context.Context,
 	arrowSchema *arrow.Schema,
 	fs iceio.IO,
@@ -801,7 +806,7 @@ func validatePositionDeleteFilePathValues(values arrow.TypedArray[string], arr a
 }
 
 func positionDeletesPartitionType(
-	metadata Metadata,
+	metadata table.Metadata,
 ) (*iceberg.StructType, map[int]int, error) {
 	currentSchema := metadata.CurrentSchema()
 	base, err := tblutils.UnifiedPartitionType(metadata.PartitionSpecs(), currentSchema)

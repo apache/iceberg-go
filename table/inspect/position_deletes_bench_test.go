@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-package table
+package inspect
 
 import (
 	"fmt"
@@ -24,6 +24,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/table"
 	"github.com/stretchr/testify/require"
 )
 
@@ -85,7 +86,7 @@ func TestPositionDeleteAppenderReusesFileMetadata(t *testing.T) {
 	file := &countingPositionDeleteDataFile{DataFile: baseFile}
 
 	partitionType := spec.PartitionType(schema)
-	outputSchema, err := SchemaToArrowSchema(
+	outputSchema, err := table.SchemaToArrowSchema(
 		PositionDeletesSchema(schema, partitionType, 3), nil, true, false)
 	require.NoError(t, err)
 	bldr := array.NewRecordBuilder(memory.DefaultAllocator, outputSchema)
@@ -127,7 +128,7 @@ func TestPositionDeleteAppenderCopiesBinaryPartitionValueWhenPreparingMetadata(t
 	partitionType := iceberg.NewStructType(
 		iceberg.NestedField{ID: 1000, Name: "part", Type: iceberg.PrimitiveTypes.Binary, Required: false},
 	)
-	outputSchema, err := SchemaToArrowSchema(
+	outputSchema, err := table.SchemaToArrowSchema(
 		PositionDeletesSchema(simpleSchema(), partitionType, 2), nil, true, false)
 	require.NoError(t, err)
 	bldr := array.NewRecordBuilder(memory.DefaultAllocator, outputSchema)
@@ -153,7 +154,7 @@ func TestPositionDeleteAppenderDoesNotReadUnpartitionedPartition(t *testing.T) {
 		DataFile: newPosDeleteFile(t,
 			"mem://position-deletes/table/data/delete.parquet", 1, 128),
 	}
-	outputSchema, err := SchemaToArrowSchema(
+	outputSchema, err := table.SchemaToArrowSchema(
 		PositionDeletesSchema(simpleSchema(), iceberg.NewStructType(), 2), nil, true, false)
 	require.NoError(t, err)
 	bldr := array.NewRecordBuilder(memory.DefaultAllocator, outputSchema)
@@ -187,7 +188,7 @@ func BenchmarkPositionDeletesPartitionType(b *testing.B) {
 	}
 }
 
-func benchmarkPositionDeletesMetadata(b *testing.B, schemaCount, fieldsPerSchema int) Metadata {
+func benchmarkPositionDeletesMetadata(b *testing.B, schemaCount, fieldsPerSchema int) table.Metadata {
 	b.Helper()
 
 	schemas := make([]*iceberg.Schema, schemaCount)
@@ -210,7 +211,7 @@ func benchmarkPositionDeletesMetadata(b *testing.B, schemaCount, fieldsPerSchema
 	})
 	lastPartitionID := 1000
 
-	return &metadataV2{commonMetadata: commonMetadata{
+	return newTestMetadata(testMetadata{
 		FormatVersion:   2,
 		LastColumnId:    lastColumnID,
 		SchemaList:      schemas,
@@ -218,7 +219,7 @@ func benchmarkPositionDeletesMetadata(b *testing.B, schemaCount, fieldsPerSchema
 		Specs:           []iceberg.PartitionSpec{spec},
 		DefaultSpecID:   spec.ID(),
 		LastPartitionID: &lastPartitionID,
-	}}
+	})
 }
 
 func BenchmarkPositionDeleteAppender(b *testing.B) {
@@ -273,7 +274,7 @@ func benchmarkPositionDeleteAppender(b *testing.B, fieldCount, rowCount int, reu
 	}
 	file := fileBuilder.ContentOffset(16).ContentSizeInBytes(64).Build()
 
-	outputSchema, err := SchemaToArrowSchema(
+	outputSchema, err := table.SchemaToArrowSchema(
 		PositionDeletesSchema(tableSchema, partitionType, 3), nil, true, false)
 	if err != nil {
 		b.Fatal(err)
