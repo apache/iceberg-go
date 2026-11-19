@@ -61,10 +61,10 @@ func (p *arrowBufferPool) Allocate(size int) []byte {
 	bucket.buffers[bucket.count] = nil
 	bucket.mu.Unlock()
 
-	buf = buf[:size]
+	// A caller can reslice to capacity, so clear the entire size class.
 	clear(buf)
 
-	return buf
+	return buf[:size]
 }
 
 func (p *arrowBufferPool) Reallocate(size int, buf []byte) []byte {
@@ -100,7 +100,9 @@ func (p *arrowBufferPool) Free(buf []byte) {
 }
 
 func (p *arrowBufferPool) close() {
-	p.closed.Store(true)
+	if p.closed.Swap(true) {
+		return
+	}
 	for i := range p.buckets {
 		bucket := &p.buckets[i]
 		bucket.mu.Lock()

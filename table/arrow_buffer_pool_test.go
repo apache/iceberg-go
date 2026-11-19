@@ -25,6 +25,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/compute"
 	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/stretchr/testify/require"
 )
@@ -33,14 +34,15 @@ func TestArrowBufferPoolReusesZeroedBuffers(t *testing.T) {
 	pool := &arrowBufferPool{backing: memory.NewGoAllocator()}
 	buf := pool.Allocate(80)
 	require.Equal(t, 128, cap(buf))
-	for i := range buf {
-		buf[i] = 17
+	full := buf[:cap(buf)]
+	for i := range full {
+		full[i] = 17
 	}
 	pool.Free(buf)
 
 	reused := pool.Allocate(65)
 	require.Same(t, &buf[0], &reused[0])
-	require.Equal(t, make([]byte, 65), reused)
+	require.Equal(t, make([]byte, cap(reused)), reused[:cap(reused)])
 	reused[0] = 42
 	grown := pool.Reallocate(100, reused)
 	require.Same(t, &reused[0], &grown[0])
@@ -126,33 +128,47 @@ func BenchmarkReadTasksArrowBufferReuse(b *testing.B) {
 		return fs, nil
 	}, nil)
 	for _, tc := range []struct {
-		name     string
-		workers  int
-		withPool bool
+		name    string
+		workers int
 	}{
-		{name: "one_worker/default", workers: 1},
-		{name: "one_worker/reuse", workers: 1, withPool: true},
-		{name: "four_workers/default", workers: 4},
-		{name: "four_workers/reuse", workers: 4, withPool: true},
+		{name: "one_worker", workers: 1},
+		{name: "four_workers", workers: 4},
 	} {
-		b.Run(tc.name, func(b *testing.B) {
-			options := []ScanOption{WithMaxConcurrency(tc.workers), WithArrowBatchSize(8192)}
-			if tc.withPool {
-				options = append(options, WithArrowBufferReuse())
+		for _, workload := range []struct {
+			name string
+			rows int64
+		}{
+			{name: "full", rows: wantRows},
+			{name: "filtered", rows: wantRows / 4},
+		} {
+			for _, mode := range []string{"default", "reuse"} {
+				b.Run(workload.name+"/"+tc.name+"/"+mode, func(b *testing.B) {
+					options := []ScanOption{WithMaxConcurrency(tc.workers), WithArrowBatchSize(8192)}
+					if workload.rows != wantRows {
+						options = append(options, WithRowFilter(iceberg.GreaterThanEqual(iceberg.Reference("id"), wantRows-workload.rows)))
+					}
+					if mode == "reuse" {
+						options = append(options, WithArrowBufferReuse())
+					}
+					benchmarkReadTasksBufferReuse(b, table.Scan(options...), tasks, workload.rows)
+				})
 			}
-			scan := table.Scan(options...)
-			b.ReportAllocs()
-			for b.Loop() {
-				_, records, err := scan.ReadTasks(b.Context(), tasks)
-				require.NoError(b, err)
-				var rows int64
-				for record, err := range records {
-					require.NoError(b, err)
-					rows += record.NumRows()
-					record.Release()
-				}
-				require.Equal(b, wantRows, rows)
-			}
-		})
+		}
+	}
+}
+
+func benchmarkReadTasksBufferReuse(b *testing.B, scan *Scan, tasks []FileScanTask, wantRows int64) {
+	b.Helper()
+	b.ReportAllocs()
+	for b.Loop() {
+		_, records, err := scan.ReadTasks(b.Context(), tasks)
+		require.NoError(b, err)
+		var rows int64
+		for record, err := range records {
+			require.NoError(b, err)
+			rows += record.NumRows()
+			record.Release()
+		}
+		require.Equal(b, wantRows, rows)
 	}
 }
