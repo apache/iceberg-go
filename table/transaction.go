@@ -1644,12 +1644,12 @@ type dataFileCfg struct {
 	rewriteSemantics             bool
 	equalityDeleteToDVConversion bool
 	dataSequenceNumber           *int64
-	replacementPathValidator     conflictValidatorFunc
+	replacementPathValidator     *conflictValidatorFunc
 }
 
 func (cfg dataFileCfg) replacementRetryValidator(files []iceberg.DataFile) conflictValidatorFunc {
 	if cfg.replacementPathValidator != nil {
-		return cfg.replacementPathValidator
+		return *cfg.replacementPathValidator
 	}
 
 	return newDuplicateDataPathValidator(files)

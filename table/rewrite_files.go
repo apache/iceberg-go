@@ -341,8 +341,10 @@ func (r *RewriteFiles) Commit(ctx context.Context) error {
 		opts = append(opts, withDataSequenceNumber(*r.dataSequenceNumber))
 	}
 	if r.replacementPathValidator != nil {
+		// Keep the configuration exposed through WriteOption comparable.
+		validator := r.replacementPathValidator
 		opts = append(opts, func(cfg *dataFileCfg) {
-			cfg.replacementPathValidator = r.replacementPathValidator
+			cfg.replacementPathValidator = &validator
 		})
 	}
 	if err := r.txn.replaceFiles(ctx, r.dataFilesToDelete, r.dataFilesToAdd,
