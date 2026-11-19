@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"maps"
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -770,44 +771,17 @@ func (s *RollingDataWriterTestSuite) TestSortsRowsBeforeWriting() {
 		{Name: "name", Type: arrow.BinaryTypes.String, Nullable: true},
 	}, nil)
 
-	icebergSchema, err := ArrowSchemaToIcebergWithFreshIDs(arrSchema, false)
-	s.Require().NoError(err)
-	idFieldID := icebergSchema.Fields()[0].ID
-	nameFieldID := icebergSchema.Fields()[1].ID
-
 	// id ASC NULLS LAST, name DESC NULLS FIRST.
-	sortOrder, err := NewSortOrder(1, []SortField{
-		{SourceIDs: []int{idFieldID}, Transform: iceberg.IdentityTransform{}, Direction: SortASC, NullOrder: NullsLast},
-		{SourceIDs: []int{nameFieldID}, Transform: iceberg.IdentityTransform{}, Direction: SortDESC, NullOrder: NullsFirst},
+	factory, err := s.sortedWriterFactory(arrSchema, func(sc *iceberg.Schema) []SortField {
+		return []SortField{
+			{SourceIDs: []int{sc.Fields()[0].ID}, Transform: iceberg.IdentityTransform{}, Direction: SortASC, NullOrder: NullsLast},
+			{SourceIDs: []int{sc.Fields()[1].ID}, Transform: iceberg.IdentityTransform{}, Direction: SortDESC, NullOrder: NullsFirst},
+		}
 	})
 	s.Require().NoError(err)
-
-	loc := filepath.ToSlash(s.T().TempDir())
-	spec := iceberg.NewPartitionSpec()
-	meta, err := NewMetadata(icebergSchema, &spec, UnsortedSortOrder, loc, iceberg.Properties{})
-	s.Require().NoError(err)
-	metaBuilder, err := MetadataBuilderFromBase(meta, "")
-	s.Require().NoError(err)
-	s.Require().NoError(metaBuilder.AddSortOrder(&sortOrder))
-	s.Require().NoError(metaBuilder.SetDefaultSortOrderID(-1))
-
-	writeUUID := uuid.New()
-	args := recordWritingArgs{
-		sc:        arrSchema,
-		fs:        iceio.LocalFS{},
-		writeUUID: &writeUUID,
-		counter: func(yield func(int) bool) {
-			for i := 0; ; i++ {
-				if !yield(i) {
-					break
-				}
-			}
-		},
-	}
-
-	factory, err := newWriterFactory(loc, args, metaBuilder, icebergSchema, 1024*1024)
-	s.Require().NoError(err)
 	defer factory.closeAll()
+	s.Len(factory.sortKeys, 2, "top-level sort keys use Arrow's sort kernel")
+	s.Nil(factory.sortComparator)
 
 	bldr := array.NewRecordBuilder(s.mem, arrSchema)
 	defer bldr.Release()
@@ -903,6 +877,134 @@ func (s *RollingDataWriterTestSuite) TestSortsRowsBeforeWriting() {
 	s.Equal(want, got)
 }
 
+// sortedWriterFactory returns a writer factory for an unpartitioned table
+// of arrSchema whose default sort order has fields built by sortFields
+// from the table schema.
+func (s *RollingDataWriterTestSuite) sortedWriterFactory(
+	arrSchema *arrow.Schema, sortFields func(*iceberg.Schema) []SortField,
+) (*writerFactory, error) {
+	icebergSchema, err := ArrowSchemaToIcebergWithFreshIDs(arrSchema, false)
+	s.Require().NoError(err)
+	sortOrder, err := NewSortOrder(1, sortFields(icebergSchema))
+	s.Require().NoError(err)
+
+	loc := filepath.ToSlash(s.T().TempDir())
+	spec := iceberg.NewPartitionSpec()
+	meta, err := NewMetadata(icebergSchema, &spec, UnsortedSortOrder, loc, iceberg.Properties{})
+	s.Require().NoError(err)
+	metaBuilder, err := MetadataBuilderFromBase(meta, "")
+	s.Require().NoError(err)
+	s.Require().NoError(metaBuilder.AddSortOrder(&sortOrder))
+	s.Require().NoError(metaBuilder.SetDefaultSortOrderID(-1))
+
+	writeUUID := uuid.New()
+	args := recordWritingArgs{
+		sc:        arrSchema,
+		fs:        iceio.LocalFS{},
+		writeUUID: &writeUUID,
+		counter: func(yield func(int) bool) {
+			for i := 0; ; i++ {
+				if !yield(i) {
+					break
+				}
+			}
+		},
+	}
+
+	return newWriterFactory(loc, args, metaBuilder, icebergSchema, 1024*1024)
+}
+
+// TestSortsRowsByNestedKeyBeforeWriting sorts on write by a struct child.
+// A row whose struct is null sorts as a null key even though the child
+// array holds a value in its slot.
+func (s *RollingDataWriterTestSuite) TestSortsRowsByNestedKeyBeforeWriting() {
+	arrSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int32, Nullable: true},
+		{Name: "loc", Type: arrow.StructOf(
+			arrow.Field{Name: "lat", Type: arrow.PrimitiveTypes.Float64, Nullable: true},
+		), Nullable: true},
+	}, nil)
+	factory, err := s.sortedWriterFactory(arrSchema, func(sc *iceberg.Schema) []SortField {
+		lat, ok := sc.FindFieldByName("loc.lat")
+		s.Require().True(ok)
+
+		return []SortField{{SourceIDs: []int{lat.ID}, Transform: iceberg.IdentityTransform{}, Direction: SortASC, NullOrder: NullsLast}}
+	})
+	s.Require().NoError(err)
+	defer factory.closeAll()
+	s.Nil(factory.sortKeys, "a nested sort key falls back to the row comparator")
+	s.Require().Len(factory.sortComparator, 1)
+	s.Equal([]int{1, 0}, factory.sortComparator[0].path)
+
+	bldr := array.NewRecordBuilder(s.mem, arrSchema)
+	defer bldr.Release()
+	locBldr := bldr.Field(1).(*array.StructBuilder)
+	latBldr := locBldr.FieldBuilder(0).(*array.Float64Builder)
+	for _, r := range []struct {
+		id    int32
+		lat   float64
+		locOK bool
+	}{
+		{id: 3, lat: 30, locOK: true},
+		{id: 5, lat: 15, locOK: false},
+		{id: 2, lat: math.NaN(), locOK: true},
+		{id: 1, lat: 10, locOK: true},
+		{id: 4, lat: math.Copysign(0, -1), locOK: true},
+	} {
+		bldr.Field(0).(*array.Int32Builder).Append(r.id)
+		// AppendValues, unlike Append(false), appends nothing to the children.
+		locBldr.AppendValues([]bool{r.locOK})
+		latBldr.Append(r.lat)
+	}
+	record := bldr.NewRecordBatch()
+	defer record.Release()
+
+	outputCh := make(chan iceberg.DataFile, 10)
+	writer := factory.newRollingDataWriter(s.ctx, "", nil, outputCh, factory.currentSpec)
+	s.Require().NoError(writer.Add(record))
+	s.Require().NoError(writer.closeAndWait())
+	close(outputCh)
+
+	var dataFiles []iceberg.DataFile
+	for df := range outputCh {
+		dataFiles = append(dataFiles, df)
+	}
+	s.Require().Len(dataFiles, 1)
+	s.Nil(dataFiles[0].SortOrderID(), "per-batch sorting must not claim a sort order")
+
+	rdr, err := file.OpenParquetFile(dataFiles[0].FilePath(), false)
+	s.Require().NoError(err)
+	defer rdr.Close()
+	arrowRdr, err := pqarrow.NewFileReader(rdr, pqarrow.ArrowReadProperties{}, memory.DefaultAllocator)
+	s.Require().NoError(err)
+	tbl, err := arrowRdr.ReadTable(s.ctx)
+	s.Require().NoError(err)
+	defer tbl.Release()
+
+	var got []int32
+	for _, chunk := range tbl.Column(0).Data().Chunks() {
+		got = append(got, chunk.(*array.Int32).Int32Values()...)
+	}
+	// -0 < 10 < 30 < NaN, then the null struct last.
+	s.Equal([]int32{4, 1, 3, 2, 5}, got)
+}
+
+// TestRejectsSortKeyUnderList fails factory creation for a sort source
+// under a list.
+func (s *RollingDataWriterTestSuite) TestRejectsSortKeyUnderList() {
+	arrSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "ids", Type: arrow.ListOf(arrow.PrimitiveTypes.Int32), Nullable: true},
+	}, nil)
+	_, err := s.sortedWriterFactory(arrSchema, func(sc *iceberg.Schema) []SortField {
+		elem, ok := sc.FindFieldByName("ids.element")
+		s.Require().True(ok)
+
+		return []SortField{{SourceIDs: []int{elem.ID}, Transform: iceberg.IdentityTransform{}, Direction: SortASC, NullOrder: NullsLast}}
+	})
+	s.ErrorIs(err, iceberg.ErrInvalidArgument)
+	s.ErrorContains(err, "nested under a list or map")
+}
+
 // TestUnsortedOrderIsNoOp confirms that when the table has no sort order
 // (id 0), batches are written in arrival order — i.e. the sort path costs
 // nothing for unsorted tables.
@@ -916,6 +1018,7 @@ func (s *RollingDataWriterTestSuite) TestUnsortedOrderIsNoOp() {
 	factory, _ := s.createWriterFactory(loc, arrSchema, 1024*1024)
 	defer factory.closeAll()
 	s.Require().Nil(factory.sortKeys, "unsorted tables must skip sort key resolution")
+	s.Require().Nil(factory.sortComparator, "unsorted tables must skip sort key resolution")
 
 	bldr := array.NewRecordBuilder(s.mem, arrSchema)
 	defer bldr.Release()

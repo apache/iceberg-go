@@ -32,6 +32,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/extensions"
 	"github.com/apache/arrow-go/v18/parquet/variant"
 	"github.com/apache/iceberg-go"
+	iceberginternal "github.com/apache/iceberg-go/internal"
 	iceio "github.com/apache/iceberg-go/io"
 	tblutils "github.com/apache/iceberg-go/table/internal"
 	"github.com/google/uuid"
@@ -73,6 +74,10 @@ type writerFactory struct {
 	content          iceberg.ManifestEntryContent
 	equalityFieldIDs []int
 	sortKeys         []compute.SortKey
+	// sortComparator replaces sortKeys for default sort orders with a source
+	// nested in a struct, which Arrow's sort kernel cannot order by. At most
+	// one of the two is set.
+	sortComparator rowComparator
 
 	// presorted marks the input as already globally sorted, so batches are
 	// not re-sorted and every file records sortOrderID.
@@ -259,7 +264,11 @@ func newWriterFactory(rootLocation string, args recordWritingArgs, meta *Metadat
 
 			return nil, err
 		}
-		f.sortKeys, err = resolveSortKeys(*sortOrder, f.fileSchema)
+		if allTopLevelSortSources(*sortOrder, f.fileSchema.FieldsRef(iceberginternal.SchemaRef{})) {
+			f.sortKeys, err = resolveSortKeys(*sortOrder, f.fileSchema)
+		} else {
+			f.sortComparator, err = newRowComparator(*sortOrder, f.fileSchema, f.arrowSchema)
+		}
 		if err != nil {
 			stopCount()
 
@@ -561,6 +570,13 @@ func (r *RollingDataWriter) stream(outputDataFilesCh chan<- iceberg.DataFile) {
 		// batches. See resolveSortKeys for the full list of limitations.
 		if len(r.factory.sortKeys) > 0 {
 			sorted, err := compute.SortRecordBatch(r.ctx, converted, r.factory.sortKeys)
+			converted.Release()
+			if err != nil {
+				return err
+			}
+			converted = sorted
+		} else if len(r.factory.sortComparator) > 0 {
+			sorted, err := sortRecordBatch(r.ctx, converted, r.factory.sortComparator)
 			converted.Release()
 			if err != nil {
 				return err

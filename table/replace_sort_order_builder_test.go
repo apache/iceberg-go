@@ -293,8 +293,7 @@ func TestReplaceSortOrderBuilderAcceptsNestedSortSource(t *testing.T) {
 	txn := testNonPartitionedTable.NewTransaction()
 	builder := txn.NewReplaceSortOrder(true).Asc("address.city", table.NullsFirst)
 
-	// The builder accepts nested fields like Java; Go writers currently cannot
-	// append data while the default order uses a nested source.
+	// The builder accepts nested fields like Java.
 	order, err := builder.Apply()
 	require.NoError(t, err)
 	require.Equal(t, 6, order.Field(0).FirstSourceID())

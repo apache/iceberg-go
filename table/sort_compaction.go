@@ -36,6 +36,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/iceberg-go"
+	iceberginternal "github.com/apache/iceberg-go/internal"
 )
 
 // sortStrategy writes a compaction group's rows sorted by order. Groups
@@ -85,10 +86,41 @@ func (s sortStrategy) writeOptions() []WriteRecordOption {
 
 // sortKeyColumn is one field of a rowComparator.
 type sortKeyColumn struct {
-	col        int
+	// path is the struct-child index path from a top-level column down to
+	// the sort source; a path of length 1 is a top-level column.
+	path       []int
 	desc       bool
 	nullsFirst bool
 	values     valueComparator
+}
+
+// chain returns the arrays along k's path in rec, top-level column first
+// and sort source last.
+func (k sortKeyColumn) chain(rec arrow.RecordBatch) []arrow.Array {
+	chain := make([]arrow.Array, len(k.path))
+	col := rec.Column(k.path[0])
+	chain[0] = col
+	for d, idx := range k.path[1:] {
+		col = col.(*array.Struct).Field(idx)
+		chain[d+1] = col
+	}
+
+	return chain
+}
+
+// leaf returns the sort source of k in rec, and reports whether its value
+// at row is null. A null enclosing struct makes the value null, whatever
+// the child array holds at that row.
+func (k sortKeyColumn) leaf(rec arrow.RecordBatch, row int) (arrow.Array, bool) {
+	col := rec.Column(k.path[0])
+	for _, idx := range k.path[1:] {
+		if col.IsNull(row) {
+			return col, true
+		}
+		col = col.(*array.Struct).Field(idx)
+	}
+
+	return col, col.IsNull(row)
 }
 
 // rowComparator orders the rows of record batches that share one schema
@@ -96,32 +128,38 @@ type sortKeyColumn struct {
 // field's null order places nulls whatever its direction, floating-point
 // values order as -NaN < -Inf < -x < -0 < 0 < x < Inf < NaN, and strings
 // and binary compare as unsigned bytes. A descending field reverses the
-// order of its non-null values.
+// order of its non-null values. A source nested in structs is null where
+// any enclosing struct is null.
+//
+// Each field is ordered by its first source column, so order-preserving
+// transforms (identity, truncate, year/month/day/hour) order as their
+// source does and bucket orders by the unbucketed source.
+//
+// The write path orders each batch it writes with the same comparator;
+// see sortRecordBatch.
 type rowComparator []sortKeyColumn
 
-// newRowComparator resolves order against the scan output schema sc.
-// Sort fields are matched by name through schema because the scan emits
-// the table schema's top-level columns by name.
+// newRowComparator resolves order against the record schema sc. Sort
+// sources are found by id in schema and then matched by name in sc, level
+// by level.
 func newRowComparator(order SortOrder, schema *iceberg.Schema, sc *arrow.Schema) (rowComparator, error) {
-	fields := schema.Fields()
+	fields := schema.FieldsRef(iceberginternal.SchemaRef{})
 	keys := make(rowComparator, 0, order.Len())
 	for _, field := range order.fields {
-		idx, ok := topLevelFieldIndex(fields, field.FirstSourceID())
-		if !ok {
-			return nil, fmt.Errorf("sort order %d: source id %d is not a top-level column in schema",
-				order.OrderID(), field.FirstSourceID())
-		}
-		colIdx := sc.FieldIndices(fields[idx].Name)
-		if len(colIdx) != 1 {
-			return nil, fmt.Errorf("sort order %d: column %q not found in scan output",
-				order.OrderID(), fields[idx].Name)
-		}
-		values, err := newValueComparator(sc.Field(colIdx[0]).Type)
+		schemaPath, err := sortFieldPath(schema, fields, field.FirstSourceID(), order.OrderID())
 		if err != nil {
-			return nil, fmt.Errorf("sort order %d: column %q: %w", order.OrderID(), fields[idx].Name, err)
+			return nil, err
+		}
+		path, leaf, err := arrowColumnPath(fields, schemaPath, sc)
+		if err != nil {
+			return nil, fmt.Errorf("sort order %d: %w", order.OrderID(), err)
+		}
+		values, err := newValueComparator(leaf.Type)
+		if err != nil {
+			return nil, fmt.Errorf("sort order %d: column %q: %w", order.OrderID(), leaf.Name, err)
 		}
 		keys = append(keys, sortKeyColumn{
-			col:        colIdx[0],
+			path:       path,
 			desc:       field.Direction == SortDESC,
 			nullsFirst: field.NullOrder == NullsFirst,
 			values:     values,
@@ -148,8 +186,9 @@ func compareNulls(xNull, yNull, nullsFirst bool) (int, bool) {
 
 func (c rowComparator) compare(a arrow.RecordBatch, i int, b arrow.RecordBatch, j int) int {
 	for _, k := range c {
-		x, y := a.Column(k.col), b.Column(k.col)
-		r, isNull := compareNulls(x.IsNull(i), y.IsNull(j), k.nullsFirst)
+		x, xNull := k.leaf(a, i)
+		y, yNull := k.leaf(b, j)
+		r, isNull := compareNulls(xNull, yNull, k.nullsFirst)
 		if !isNull {
 			r = k.values.compare(x, i, y, j)
 			if k.desc {
@@ -168,32 +207,47 @@ func (c rowComparator) compare(a arrow.RecordBatch, i int, b arrow.RecordBatch, 
 // key column's typed values once instead of on every comparison.
 func (c rowComparator) bind(batches []arrow.RecordBatch) func(x, y rowRef) int {
 	type boundKey struct {
-		cols       []arrow.Array
+		// chains[b] is the key's path through batches[b]; see
+		// sortKeyColumn.chain.
+		chains     [][]arrow.Array
 		hasNulls   bool
 		desc       bool
 		nullsFirst bool
 		compare    func(xb, xi, yb, yi int) int
 	}
+	isNull := func(chain []arrow.Array, row int) bool {
+		for _, col := range chain {
+			if col.IsNull(row) {
+				return true
+			}
+		}
+
+		return false
+	}
 	keys := make([]boundKey, len(c))
 	for n, k := range c {
-		cols := make([]arrow.Array, len(batches))
+		chains := make([][]arrow.Array, len(batches))
+		leaves := make([]arrow.Array, len(batches))
 		hasNulls := false
 		for b, rec := range batches {
-			cols[b] = rec.Column(k.col)
-			hasNulls = hasNulls || cols[b].NullN() > 0
+			chain := k.chain(rec)
+			chains[b], leaves[b] = chain, chain[len(chain)-1]
+			for _, col := range chain {
+				hasNulls = hasNulls || col.NullN() > 0
+			}
 		}
-		keys[n] = boundKey{cols, hasNulls, k.desc, k.nullsFirst, k.values.bind(cols)}
+		keys[n] = boundKey{chains, hasNulls, k.desc, k.nullsFirst, k.values.bind(leaves)}
 	}
 
 	return func(x, y rowRef) int {
 		xb, xi, yb, yi := x.batch(), x.row(), y.batch(), y.row()
 		for _, k := range keys {
 			var r int
-			isNull := false
+			nullKey := false
 			if k.hasNulls {
-				r, isNull = compareNulls(k.cols[xb].IsNull(xi), k.cols[yb].IsNull(yi), k.nullsFirst)
+				r, nullKey = compareNulls(isNull(k.chains[xb], xi), isNull(k.chains[yb], yi), k.nullsFirst)
 			}
-			if !isNull {
+			if !nullKey {
 				r = k.compare(xb, xi, yb, yi)
 				if k.desc {
 					r = -r

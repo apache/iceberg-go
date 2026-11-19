@@ -25,6 +25,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/arrow-go/v18/parquet/file"
@@ -305,4 +306,64 @@ func TestExecuteCompactionGroup_MergesSortedFiles(t *testing.T) {
 		assert.Equal(t, tbl.SortOrder().OrderID(), *df.SortOrderID())
 	}
 	assert.Equal(t, []int64{1, 3, 5, 6, 7, 8, 9, 10, 12}, all)
+}
+
+// TestNestedSortKey_AppendAndCompact appends to a table whose default
+// order sorts by a struct child, then sort-compacts it. The append sorts
+// each batch it writes but claims no order; the compaction sorts the whole
+// group and records the order's id. The null struct sorts last.
+func TestNestedSortKey_AppendAndCompact(t *testing.T) {
+	location := filepath.ToSlash(t.TempDir())
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "loc", Type: iceberg.NewStructType(
+			iceberg.NestedField{ID: 3, Name: "lat", Type: iceberg.PrimitiveTypes.Float64},
+		)},
+	)
+	order, err := table.NewSortOrder(1, []table.SortField{{
+		SourceIDs: []int{3}, Transform: iceberg.IdentityTransform{},
+		Direction: table.SortASC, NullOrder: table.NullsLast,
+	}})
+	require.NoError(t, err)
+	meta, err := table.NewMetadata(schema, iceberg.UnpartitionedSpec, order, location,
+		iceberg.Properties{table.PropertyFormatVersion: "2"})
+	require.NoError(t, err)
+	tbl := table.New(table.Identifier{"db", "nested_sort_key"}, meta, location+"/metadata/v1.metadata.json",
+		func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil },
+		&rowDeltaCatalog{metadata: meta})
+
+	arrowSc, err := table.SchemaToArrowSchema(tbl.Schema(), nil, false, false)
+	require.NoError(t, err)
+	appendJSON := func(rows string) {
+		t.Helper()
+		rec, _, err := array.RecordFromJSON(memory.DefaultAllocator, arrowSc, strings.NewReader(rows))
+		require.NoError(t, err)
+		defer rec.Release()
+		rdr, err := array.NewRecordReader(arrowSc, []arrow.RecordBatch{rec})
+		require.NoError(t, err)
+		defer rdr.Release()
+
+		tx := tbl.NewTransaction()
+		require.NoError(t, tx.Append(t.Context(), rdr, nil))
+		tbl, err = tx.Commit(t.Context())
+		require.NoError(t, err)
+	}
+	appendJSON(`[{"id": 3, "loc": {"lat": 30}}, {"id": 6, "loc": null}, {"id": 1, "loc": {"lat": -10}}]`)
+	appendJSON(`[{"id": 5, "loc": {"lat": 50}}, {"id": 2, "loc": {"lat": 0}}, {"id": 4, "loc": {"lat": 40}}]`)
+
+	group := sortTestGroup(t, tbl)
+	require.Len(t, group.Tasks, 2)
+	var appended [][]int64
+	for _, task := range group.Tasks {
+		appended = append(appended, readInt64Column(t, task.File.FilePath(), "id"))
+		assert.Nil(t, task.File.SortOrderID(), "per-batch sorting must not claim the order")
+	}
+	assert.ElementsMatch(t, [][]int64{{1, 3, 6}, {2, 4, 5}}, appended)
+
+	res, err := table.ExecuteCompactionGroup(t.Context(), tbl, group, table.WithCompactionSortOrder(tbl.SortOrder()))
+	require.NoError(t, err)
+	require.Len(t, res.NewDataFiles, 1)
+	assert.Equal(t, []int64{1, 2, 3, 4, 5, 6}, readInt64Column(t, res.NewDataFiles[0].FilePath(), "id"))
+	require.NotNil(t, res.NewDataFiles[0].SortOrderID())
+	assert.Equal(t, order.OrderID(), *res.NewDataFiles[0].SortOrderID())
 }
