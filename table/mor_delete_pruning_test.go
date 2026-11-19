@@ -501,6 +501,34 @@ func TestV3MergeOnReadUpgradePreservesPositionDeletes(t *testing.T) {
 	}
 }
 
+func TestV3MergeOnReadUpgradeReplansLegacyDeleteReplacementAfterConflict(t *testing.T) {
+	ctx := t.Context()
+	tbl := appendRows(t, newMergeOnReadTestTable(t), `[{"id":1},{"id":2},{"id":3}]`)
+	tbl, err := tbl.Delete(ctx, iceberg.EqualTo(iceberg.Reference("id"), int64(1)), nil)
+	require.NoError(t, err)
+	require.Equal(t, 1, liveDeleteFileCount(t, tbl, iceberg.EntryContentPosDeletes))
+
+	upgrade := tbl.NewTransaction()
+	require.NoError(t, upgrade.UpgradeFormatVersion(3))
+	tbl, err = upgrade.Commit(ctx)
+	require.NoError(t, err)
+
+	filter := iceberg.EqualTo(iceberg.Reference("id"), int64(2))
+	staged := tbl.NewTransaction()
+	require.NoError(t, staged.Delete(ctx, filter, nil))
+	peer := appendRows(t, tbl, `[{"id":4}]`)
+	_, err = staged.Commit(ctx)
+	require.ErrorIs(t, err, table.ErrCommitFailed)
+	require.Equal(t, 1, liveDeleteFileCount(t, peer, iceberg.EntryContentPosDeletes))
+	require.Zero(t, liveDVCount(t, peer))
+
+	tbl, err = peer.Delete(ctx, filter, nil)
+	require.NoError(t, err)
+	require.Equal(t, []int64{3, 4}, idsInTable(t, tbl))
+	require.Equal(t, 1, liveDVCount(t, tbl))
+	require.Zero(t, liveDeleteFileCount(t, tbl, iceberg.EntryContentPosDeletes))
+}
+
 func TestV3MergeOnReadUpgradeUsesBranchPositionDeletes(t *testing.T) {
 	ctx := t.Context()
 	tbl := newBranchPlanningTable(t, iceberg.Properties{table.WriteDeleteModeKey: table.WriteModeMergeOnRead})
