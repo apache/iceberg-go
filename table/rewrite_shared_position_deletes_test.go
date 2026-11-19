@@ -1,0 +1,135 @@
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
+//
+//   http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
+package table_test
+
+import (
+	"fmt"
+	"testing"
+
+	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/table"
+	"github.com/stretchr/testify/require"
+)
+
+// A position delete can cover several files. Worker-level SafePosDeletes
+// does not mean that the coordinator may remove it after rewriting one file.
+func setupSharedPositionDeleteRewrite(t *testing.T) (*table.Table, []table.CompactionTaskGroup) {
+	t.Helper()
+
+	tbl := newRewriteTestTable(t)
+	arrowSchema, err := table.SchemaToArrowSchema(tbl.Schema(), nil, false, false)
+	require.NoError(t, err)
+
+	paths := make([]string, 2)
+	for i := range paths {
+		paths[i] = fmt.Sprintf("%s/data/shared-%d.parquet", tbl.Location(), i)
+		writeParquetFile(t, paths[i], arrowSchema, fmt.Sprintf(
+			`[{"id":%d,"data":"deleted"},{"id":%d,"data":"visible"}]`, i*2+1, i*2+2))
+		tx := tbl.NewTransaction()
+		require.NoError(t, tx.AddDataFilesByPath(t.Context(), []string{paths[i]}, nil, false))
+		tbl, err = tx.Commit(t.Context())
+		require.NoError(t, err)
+	}
+
+	deletePath := tbl.Location() + "/data/shared-position-delete.parquet"
+	writeParquetFile(t, deletePath, table.PositionalDeleteArrowSchema, fmt.Sprintf(
+		`[{"file_path":%q,"pos":0},{"file_path":%q,"pos":0}]`, paths[0], paths[1]))
+	builder, err := iceberg.NewDataFileBuilder(*iceberg.UnpartitionedSpec,
+		iceberg.EntryContentPosDeletes, deletePath, iceberg.ParquetFile,
+		nil, nil, nil, 2, 128)
+	require.NoError(t, err)
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.NewRowDelta(nil).AddDeletes(builder.Build()).Commit(t.Context()))
+	tbl, err = tx.Commit(t.Context())
+	require.NoError(t, err)
+	require.ElementsMatch(t, []int64{2, 4}, scanIDs(t, tbl))
+
+	tasks, err := tbl.Scan().PlanFiles(t.Context())
+	require.NoError(t, err)
+	require.Len(t, tasks, 2)
+	groups := make([]table.CompactionTaskGroup, 0, 2)
+	for _, path := range paths {
+		for _, task := range tasks {
+			if task.File.FilePath() != path {
+				continue
+			}
+			require.Len(t, task.DeleteFiles, 1)
+			groups = append(groups, table.CompactionTaskGroup{
+				PartitionKey:   "unpartitioned",
+				Tasks:          []table.FileScanTask{task},
+				TotalSizeBytes: task.File.FileSizeBytes(),
+			})
+		}
+	}
+	require.Len(t, groups, 2)
+	return tbl, groups
+}
+
+func TestRewriteCompactionKeepsSharedPositionDeleteForSurvivingFile(t *testing.T) {
+	for _, mode := range []string{"atomic", "distributed"} {
+		for _, groupCount := range []int{1, 2} {
+			t.Run(fmt.Sprintf("%s/%d-groups", mode, groupCount), func(t *testing.T) {
+				tbl, groups := setupSharedPositionDeleteRewrite(t)
+				tx := tbl.NewTransaction()
+
+				if mode == "atomic" {
+					result, err := tx.RewriteDataFiles(t.Context(), groups[:groupCount],
+						table.RewriteDataFilesOptions{})
+					require.NoError(t, err)
+					require.Equal(t, groupCount, result.RewrittenGroups)
+					// Only the complete rewrite may remove the shared delete.
+					wantRemoved := 0
+					if groupCount == 2 {
+						wantRemoved = 1
+					}
+					require.Equal(t, wantRemoved, result.RemovedPositionDeleteFiles)
+				} else {
+					rewrite := tx.NewRewrite(nil)
+					for _, group := range groups[:groupCount] {
+						output, err := table.ExecuteCompactionGroup(t.Context(), tbl, group)
+						require.NoError(t, err)
+						require.Len(t, output.SafePosDeletes, 1)
+						rewrite.ApplyResult(output)
+					}
+					require.NoError(t, rewrite.Commit(t.Context()))
+				}
+
+				committed, err := tx.Commit(t.Context())
+				require.NoError(t, err)
+				require.ElementsMatch(t, []int64{2, 4}, scanIDs(t, committed),
+					"compaction must not resurrect rows deleted from an unrewritten file")
+
+				tasks, err := committed.Scan().PlanFiles(t.Context())
+				require.NoError(t, err)
+				filesWithDeletes := 0
+				for _, task := range tasks {
+					if len(task.DeleteFiles) > 0 {
+						filesWithDeletes++
+					}
+				}
+				if groupCount == 1 {
+					require.Equal(t, 1, filesWithDeletes, "surviving file still requires the delete")
+				} else {
+					require.Zero(t, filesWithDeletes, "delete is dead after all source files are rewritten")
+					require.Equal(t, "1", committed.CurrentSnapshot().Summary.Properties["removed-position-delete-files"],
+						"the shared position delete must be removed exactly once")
+				}
+			})
+		}
+	}
+}
