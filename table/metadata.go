@@ -2250,29 +2250,6 @@ func preflightMetadataBytes(b []byte) (map[string]json.RawMessage, int, error) {
 	return metadata, formatVersion, nil
 }
 
-func requirePartitionSpecIDs(b []byte) error {
-	var metadata map[string]json.RawMessage
-	if err := json.Unmarshal(b, &metadata); err != nil {
-		return fmt.Errorf("%w: %w", ErrInvalidMetadata, err)
-	}
-
-	return requirePartitionSpecIDsFromMetadata(metadata)
-}
-
-func requirePartitionSpecIDsFromMetadata(metadata map[string]json.RawMessage) error {
-	rawSpecs, ok := metadata["partition-specs"]
-	if !ok {
-		return nil
-	}
-
-	var specs []rawPartitionSpec
-	if err := json.Unmarshal(rawSpecs, &specs); err != nil {
-		return fmt.Errorf("%w: invalid partition-specs: %w", ErrInvalidMetadata, err)
-	}
-
-	return validatePartitionSpecIDs(specs)
-}
-
 type rawPartitionSpec struct {
 	ID     *int                         `json:"spec-id"`
 	Fields []map[string]json.RawMessage `json:"fields"`
