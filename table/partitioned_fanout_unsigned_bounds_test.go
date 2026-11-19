@@ -17,14 +17,19 @@
 package table
 
 import (
+	"context"
 	"errors"
 	"math"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/iceberg-go"
+	iceio "github.com/apache/iceberg-go/io"
+	"github.com/stretchr/testify/require"
 )
 
 // Arrow's unsigned physical types can represent values that Iceberg's signed
@@ -162,6 +167,82 @@ func TestUnsignedArrowPartitionBounds(t *testing.T) {
 						t.Fatalf("identity partition value %T(%v), want %T(%v)", value, value, tt.want, tt.want)
 					}
 				}
+			}
+		})
+	}
+}
+
+func TestWriteRecordsUnsignedPartitionBounds(t *testing.T) {
+	for _, mode := range []struct {
+		name string
+		opts []WriteRecordOption
+	}{
+		{name: "fanout"},
+		{name: "clustered", opts: []WriteRecordOption{WithClusteredWrite()}},
+	} {
+		t.Run(mode.name, func(t *testing.T) {
+			for _, tc := range []struct {
+				name       string
+				sourceType iceberg.Type
+				inputType  arrow.DataType
+				rows       string
+				overflow   bool
+			}{
+				{
+					"uint32 promoted to long", iceberg.PrimitiveTypes.Int64, arrow.PrimitiveTypes.Uint32,
+					`[{"id":4294967295}]`, false,
+				},
+				{
+					"uint32 over int range", iceberg.PrimitiveTypes.Int32, arrow.PrimitiveTypes.Uint32,
+					`[{"id":2147483648}]`, true,
+				},
+				{
+					"uint64 over long range", iceberg.PrimitiveTypes.Int64, arrow.PrimitiveTypes.Uint64,
+					`[{"id":9223372036854775808}]`, true,
+				},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					ctx := t.Context()
+					location := t.TempDir()
+					schema := iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "id", Type: tc.sourceType, Required: true})
+					spec := partitionedSpec()
+					meta, err := NewMetadata(schema, &spec, UnsortedSortOrder, location, nil)
+					require.NoError(t, err)
+					tbl := New(Identifier{"test", "unsigned_partition"}, meta, filepath.Join(location, "metadata", "v1.metadata.json"),
+						func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil }, &sequentialCatalog{metadata: meta})
+					arrowSchema := arrow.NewSchema([]arrow.Field{{
+						Name: "id", Type: tc.inputType, Metadata: writerFieldIDMeta("1"),
+					}}, nil)
+					records := func(yield func(arrow.RecordBatch, error) bool) {
+						record, _, err := array.RecordFromJSON(memory.DefaultAllocator, arrowSchema, strings.NewReader(tc.rows))
+						yield(record, err)
+					}
+
+					var files []iceberg.DataFile
+					for file, err := range WriteRecords(ctx, tbl, arrowSchema, records, mode.opts...) {
+						if tc.overflow {
+							require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+							require.Empty(t, files)
+
+							return
+						}
+						require.NoError(t, err)
+						files = append(files, file)
+					}
+					require.False(t, tc.overflow, "overflow must return an error")
+					require.Len(t, files, 1)
+					require.Equal(t, map[int]any{1000: int64(math.MaxUint32)}, files[0].Partition())
+
+					txn := tbl.NewTransaction()
+					require.NoError(t, txn.AddDataFiles(ctx, files, nil))
+					tbl, err = txn.Commit(ctx)
+					require.NoError(t, err)
+					scanned, err := tbl.Scan(WithRowFilter(iceberg.EqualTo(iceberg.Reference("id"), int64(math.MaxUint32)))).ToArrowTable(ctx)
+					require.NoError(t, err)
+					defer scanned.Release()
+					require.EqualValues(t, 1, scanned.NumRows())
+					require.EqualValues(t, math.MaxUint32, scanned.Column(0).Data().Chunk(0).(*array.Int64).Value(0))
+				})
 			}
 		})
 	}
