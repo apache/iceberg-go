@@ -383,6 +383,8 @@ iceberg expire-snapshots --older-than 7d --dry-run my_db.events
 # Commit, retaining at least 5 snapshots
 iceberg expire-snapshots --older-than 7d --retain-last 5 my_db.events
 </code></pre>
+<p>For REST catalogs, expiration and <code>--dry-run</code> load full snapshot history.
+The catalog's snapshot loading mode still applies to other commands.</p>
 <h3 id="clean-orphan-files"><a class="header" href="#clean-orphan-files"><code>clean-orphan-files</code></a></h3>
 <p>Remove data files in the table location that are not referenced by any snapshot's manifests (e.g. left behind by failed writes).</p>
 <div class="table-wrapper"><table><thead><tr><th>Flag</th><th>Description</th></tr></thead><tbody>
@@ -449,9 +451,9 @@ Use <code>--yes</code> to skip confirmation.</p>
 This can discard the branch's current history from the branch head. The prompt
 shows both the previous and next snapshot IDs. Retention settings are preserved.
 Use <code>--yes</code> to skip confirmation.</p>
-<p>For both commands, REST catalogs using <code>snapshot-loading-mode=refs</code> may omit
-historical snapshots needed for ancestry checks or replacement. Use
-<code>snapshot-loading-mode=all</code> for these operations.</p>
+<p>For both commands, the REST server's <code>snapshot-loading-mode=refs</code> setting may omit
+historical snapshots needed for ancestry checks or replacement. The CLI cannot
+override this setting; configure the REST server with <code>snapshot-loading-mode=all</code>.</p>
 <h3 id="tag-create"><a class="header" href="#tag-create"><code>tag create</code></a></h3>
 <pre><code class="language-shell">iceberg tag create my_db.events pre-migration-v4
 </code></pre>

@@ -868,6 +868,17 @@ if err != nil { /* ... */ }
 
 newTbl, err := txn.Commit(ctx)
 </code></pre>
+<p>Snapshot expiration needs complete ancestry to honor branch retention and snapshot
+references. When a REST table was loaded with <code>snapshot-loading-mode=refs</code>,
+expiration requests <code>snapshots=all</code> for the transaction's metadata revision
+and keeps any updates already staged in the transaction. Use
+<code>Transaction.ExpireSnapshotsWithContext(ctx, ...)</code> to control that request.</p>
+<p>If the catalog cannot supply complete history or the metadata revision has
+changed, staging returns an error matching <code>table.ErrInvalidOperation</code>.
+Reload the table and start a new transaction if the revision changed.
+Commit retries and resumed commits also request full history before replanning
+expiration. If the catalog still returns refs-only history, the commit stops
+before resubmitting and returns an error matching <code>table.ErrTransactionUnusable</code>.</p>
 <p>Pass <code>table.WithPostCommit(true)</code> to delete the unreferenced data and metadata files after the commit lands. The <code>iceberg expire-snapshots</code> CLI command wraps the same operation - see <a href="./cli.html">CLI</a>.</p>
 <h2 id="views"><a class="header" href="#views">Views</a></h2>
 <p>Views are created and loaded through catalogs that support them (REST, Hive, SQL):</p>

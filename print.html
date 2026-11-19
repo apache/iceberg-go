@@ -1258,6 +1258,8 @@ iceberg expire-snapshots --older-than 7d --dry-run my_db.events
 # Commit, retaining at least 5 snapshots
 iceberg expire-snapshots --older-than 7d --retain-last 5 my_db.events
 </code></pre>
+<p>For REST catalogs, expiration and <code>--dry-run</code> load full snapshot history.
+The catalog's snapshot loading mode still applies to other commands.</p>
 <h3 id="clean-orphan-files"><a class="header" href="#clean-orphan-files"><code>clean-orphan-files</code></a></h3>
 <p>Remove data files in the table location that are not referenced by any snapshot's manifests (e.g. left behind by failed writes).</p>
 <div class="table-wrapper"><table><thead><tr><th>Flag</th><th>Description</th></tr></thead><tbody>
@@ -1324,9 +1326,9 @@ Use <code>--yes</code> to skip confirmation.</p>
 This can discard the branch's current history from the branch head. The prompt
 shows both the previous and next snapshot IDs. Retention settings are preserved.
 Use <code>--yes</code> to skip confirmation.</p>
-<p>For both commands, REST catalogs using <code>snapshot-loading-mode=refs</code> may omit
-historical snapshots needed for ancestry checks or replacement. Use
-<code>snapshot-loading-mode=all</code> for these operations.</p>
+<p>For both commands, the REST server's <code>snapshot-loading-mode=refs</code> setting may omit
+historical snapshots needed for ancestry checks or replacement. The CLI cannot
+override this setting; configure the REST server with <code>snapshot-loading-mode=all</code>.</p>
 <h3 id="tag-create"><a class="header" href="#tag-create"><code>tag create</code></a></h3>
 <pre><code class="language-shell">iceberg tag create my_db.events pre-migration-v4
 </code></pre>
@@ -2028,6 +2030,17 @@ if err != nil { /* ... */ }
 
 newTbl, err := txn.Commit(ctx)
 </code></pre>
+<p>Snapshot expiration needs complete ancestry to honor branch retention and snapshot
+references. When a REST table was loaded with <code>snapshot-loading-mode=refs</code>,
+expiration requests <code>snapshots=all</code> for the transaction's metadata revision
+and keeps any updates already staged in the transaction. Use
+<code>Transaction.ExpireSnapshotsWithContext(ctx, ...)</code> to control that request.</p>
+<p>If the catalog cannot supply complete history or the metadata revision has
+changed, staging returns an error matching <code>table.ErrInvalidOperation</code>.
+Reload the table and start a new transaction if the revision changed.
+Commit retries and resumed commits also request full history before replanning
+expiration. If the catalog still returns refs-only history, the commit stops
+before resubmitting and returns an error matching <code>table.ErrTransactionUnusable</code>.</p>
 <p>Pass <code>table.WithPostCommit(true)</code> to delete the unreferenced data and metadata files after the commit lands. The <code>iceberg expire-snapshots</code> CLI command wraps the same operation - see <a href="./cli.html">CLI</a>.</p>
 <h2 id="views"><a class="header" href="#views">Views</a></h2>
 <p>Views are created and loaded through catalogs that support them (REST, Hive, SQL):</p>
@@ -3326,6 +3339,9 @@ make integration-external-rest
 </li>
 <li>
 <p><strong>Snapshot expiration now tolerates concurrent ref changes.</strong> If a concurrent commit moves a ref that the expiry read, a retry or later <code>Commit</code> replans instead of failing with <code>table.ErrCommitFailed</code>. The committed expiry can differ from <code>Transaction.StagedTable</code>. See <a href="./concurrent-writes.html#snapshot-expiration">Snapshot expiration</a> for cases that now fail with <code>table.ErrTransactionUnusable</code>.</p>
+</li>
+<li>
+<p><strong>Snapshot expiration loads full REST history on demand.</strong> Expiration requests <code>snapshots=all</code> when a REST table was loaded in refs mode, including on commit retries. Use <code>Transaction.ExpireSnapshotsWithContext</code> to control the staging request. Catalogs that only supply refs-only history cannot safely expire snapshots.</p>
 </li>
 <li>
 <p><strong>RowDelta reports a concurrent deletion vector as a commit conflict.</strong> If a concurrent commit adds a deletion vector for a data file that a <code>RowDelta</code> also adds one for, <code>Transaction.Commit</code> now fails with an error matching <code>table.ErrConflictingDeleteFiles</code>, <code>table.ErrCommitFailed</code> and <code>table.ErrTransactionUnusable</code>, and the transaction cannot be committed again. Previously, the error matched none of them and the transaction stayed usable. To resolve the conflict, reload the table and commit a <code>RowDelta</code> that adds one deletion vector merging the positions of both vectors and removes the concurrent one with <code>RemoveDeletes</code>.</p>
