@@ -18,6 +18,7 @@
 package compaction_test
 
 import (
+	"math"
 	"testing"
 
 	"github.com/apache/iceberg-go"
@@ -37,6 +38,8 @@ func TestPlanCompactionSeparatesAmbiguousPartitionKeys(t *testing.T) {
 			b: map[int]any{1: "a", 2: "b;2=c"}},
 		{name: "null and literal text",
 			a: map[int]any{1: nil}, b: map[int]any{1: "<nil>"}},
+		{name: "signed zero",
+			a: map[int]any{1: math.Copysign(0, -1)}, b: map[int]any{1: float64(0)}},
 		{name: "binary and string",
 			a: map[int]any{1: []byte{0, 1}},
 			b: map[int]any{1: string([]byte{0, 1})}},

@@ -18,6 +18,7 @@
 package table_test
 
 import (
+	"math"
 	"testing"
 
 	"github.com/apache/iceberg-go"
@@ -54,6 +55,8 @@ func TestExecuteCompactionGroupRejectsMixedPartitions(t *testing.T) {
 			a: map[int]any{1000: "a;1000=b"}, b: map[int]any{1000: "a"}},
 		{name: "different specs even with same values", otherSpec: specB,
 			a: map[int]any{1000: "a"}, b: map[int]any{1000: "a"}},
+		{name: "positive and negative zero", otherSpec: specA,
+			a: map[int]any{1000: math.Copysign(0, -1)}, b: map[int]any{1000: float64(0)}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			a := build("/a.parquet", specA, tt.a)

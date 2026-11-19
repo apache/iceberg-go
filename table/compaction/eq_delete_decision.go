@@ -25,6 +25,7 @@ import (
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/internal"
+	"github.com/google/uuid"
 )
 
 // SurvivorSurvey describes the surviving data files in a snapshot after a
@@ -286,6 +287,9 @@ func appendPartitionTuple(dst []byte, part map[int]any) []byte {
 		case []byte:
 			kind = 'x'
 			value = append(value, v...)
+		case uuid.UUID:
+			kind = 'x'
+			value = append(value, v[:]...)
 		case bool:
 			kind = 'b'
 			value = strconv.AppendBool(value, v)
@@ -318,7 +322,10 @@ func appendPartitionTuple(dst []byte, part map[int]any) []byte {
 			value = appendPartitionFloat(value, v)
 		case iceberg.Decimal:
 			kind = 'd'
-			value = append(value, v.String()...)
+			value = appendPartitionDecimal(value, v)
+		case iceberg.DecimalLiteral:
+			kind = 'd'
+			value = appendPartitionDecimal(value, iceberg.Decimal(v))
 		default:
 			// Unexpected types are included with their Go type to avoid
 			// collisions with ordinary partition values.
@@ -338,17 +345,21 @@ func appendPartitionTuple(dst []byte, part map[int]any) []byte {
 	return dst
 }
 
-// Normalize signed zero and NaN payloads; float32 promotion to float64 is
-// exact, so both Avro-decoded representations share the same identity.
+// Canonicalize NaN payloads but preserve signed zero, matching Iceberg's
+// partition-value equality. Float32 promotion to float64 is exact.
 func appendPartitionFloat(dst []byte, v float64) []byte {
 	if math.IsNaN(v) {
 		return append(dst, "nan"...)
 	}
-	if v == 0 {
-		v = 0
-	}
 
 	return strconv.AppendUint(dst, math.Float64bits(v), 16)
+}
+
+func appendPartitionDecimal(dst []byte, v iceberg.Decimal) []byte {
+	dst = strconv.AppendInt(dst, int64(v.Scale), 10)
+	dst = append(dst, ':')
+
+	return append(dst, v.Val.BigInt().String()...)
 }
 
 func updatePartitionMinSeq(partitions map[string]int64, key string, seq int64) {

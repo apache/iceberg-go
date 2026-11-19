@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/apache/iceberg-go"
+	"github.com/google/uuid"
 )
 
 type partitionTupleStringer string
@@ -83,6 +84,8 @@ func TestAppendPartitionTupleCollisionResistance(t *testing.T) {
 			a: map[int]any{1: nil}, b: map[int]any{1: "<nil>"}},
 		{name: "boolean vs text",
 			a: map[int]any{1: true}, b: map[int]any{1: "true"}},
+		{name: "positive and negative zero",
+			a: map[int]any{1: math.Copysign(0, -1)}, b: map[int]any{1: float64(0)}},
 		{name: "binary vs text",
 			a: map[int]any{1: []byte{0, ';', '='}},
 			b: map[int]any{1: string([]byte{0, ';', '='})}},
@@ -109,7 +112,7 @@ func TestAppendPartitionTupleNormalizesDecodedValues(t *testing.T) {
 		{name: "int32 and int64", a: int32(7), b: int64(7)},
 		{name: "date and integer", a: iceberg.Date(-20), b: int32(-20)},
 		{name: "float32 and float64", a: float32(1.5), b: float64(1.5)},
-		{name: "signed zero", a: math.Copysign(0, -1), b: float64(0)},
+		{name: "uuid and binary", a: uuid.UUID{1, 2, 3}, b: []byte{1, 2, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
 		{name: "different NaN payloads", a: math.Float64frombits(0x7ff8000000000001), b: math.Float64frombits(0x7ff8000000000002)},
 	}
 	for _, tt := range tests {
