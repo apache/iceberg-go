@@ -1644,6 +1644,15 @@ type dataFileCfg struct {
 	rewriteSemantics             bool
 	equalityDeleteToDVConversion bool
 	dataSequenceNumber           *int64
+	replacementPathValidator     conflictValidatorFunc
+}
+
+func (cfg dataFileCfg) replacementRetryValidator(files []iceberg.DataFile) conflictValidatorFunc {
+	if cfg.replacementPathValidator != nil {
+		return cfg.replacementPathValidator
+	}
+
+	return newDuplicateDataPathValidator(files)
 }
 
 // withRewriteSemantics marks an overwrite/replace operation as a
@@ -1967,15 +1976,15 @@ func (t *Transaction) ReplaceDataFiles(ctx context.Context, filesToDelete, files
 	if err := t.applyLocked(updates, reqs); err != nil {
 		return err
 	}
-	if validator := newDuplicateDataPathValidator(filesToAdd); validator != nil {
-		t.validators = append(t.validators, validator)
-	}
 	if len(filesToAdd) > 0 || cfg.rewriteSemantics {
 		// Replacing data files must preserve deletes committed after the
 		// replacement was planned. This is independent of overwrite isolation:
 		// a newer replacement file would otherwise stop an older equality
 		// delete from applying.
 		t.validators = append(t.validators, rewriteValidator(markedForDeletion))
+	}
+	if validator := cfg.replacementRetryValidator(filesToAdd); validator != nil {
+		t.validators = append(t.validators, validator)
 	}
 
 	return nil
@@ -2407,7 +2416,7 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 	if validator != nil {
 		t.validators = append(t.validators, validator)
 	}
-	if duplicateValidator := newDuplicateDataPathValidator(dataFilesToAdd); duplicateValidator != nil {
+	if duplicateValidator := cfg.replacementRetryValidator(dataFilesToAdd); duplicateValidator != nil {
 		t.validators = append(t.validators, duplicateValidator)
 	}
 

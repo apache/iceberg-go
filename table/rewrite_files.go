@@ -57,16 +57,17 @@ import (
 // Commit has been called, a second call returns an error regardless
 // of whether the first call succeeded.
 type RewriteFiles struct {
-	txn                     *Transaction
-	dataFilesToDelete       []iceberg.DataFile
-	dataFilesToAdd          []iceberg.DataFile
-	deleteFilesToAdd        []rewriteDeleteFileAddition
-	deleteFilesToRemove     []iceberg.DataFile
-	autoDeleteFilesToRemove []iceberg.DataFile
-	dataSequenceNumber      *int64
-	snapshotProps           iceberg.Properties
-	err                     error
-	committed               bool
+	txn                      *Transaction
+	dataFilesToDelete        []iceberg.DataFile
+	dataFilesToAdd           []iceberg.DataFile
+	deleteFilesToAdd         []rewriteDeleteFileAddition
+	deleteFilesToRemove      []iceberg.DataFile
+	autoDeleteFilesToRemove  []iceberg.DataFile
+	dataSequenceNumber       *int64
+	replacementPathValidator conflictValidatorFunc
+	snapshotProps            iceberg.Properties
+	err                      error
+	committed                bool
 }
 
 type rewriteDeleteFileAddition struct {
@@ -338,6 +339,11 @@ func (r *RewriteFiles) Commit(ctx context.Context) error {
 	opts := []WriteOption{withRewriteSemantics()}
 	if r.dataSequenceNumber != nil {
 		opts = append(opts, withDataSequenceNumber(*r.dataSequenceNumber))
+	}
+	if r.replacementPathValidator != nil {
+		opts = append(opts, func(cfg *dataFileCfg) {
+			cfg.replacementPathValidator = r.replacementPathValidator
+		})
 	}
 	if err := r.txn.replaceFiles(ctx, r.dataFilesToDelete, r.dataFilesToAdd,
 		r.deleteFilesToRemove, r.autoDeleteFilesToRemove, r.deleteFilesToAdd,
