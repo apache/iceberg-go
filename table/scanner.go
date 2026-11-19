@@ -37,6 +37,7 @@ import (
 	"github.com/apache/iceberg-go/internal/scanmetrics"
 	"github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/metrics"
+	tblutils "github.com/apache/iceberg-go/table/internal"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -123,11 +124,9 @@ func newKeyDefaultMapWrapErr[K comparable, V any](factory func(K) (V, error)) *k
 	}
 }
 
-type partitionRecord []any
-
-func (p partitionRecord) Size() int            { return len(p) }
-func (p partitionRecord) Get(pos int) any      { return p[pos] }
-func (p partitionRecord) Set(pos int, val any) { p[pos] = val }
+// partitionRecord is the positional partition record shared with the
+// metadata-table helpers in table/internal.
+type partitionRecord = tblutils.PartitionRecord
 
 // borrowedPartitionRecord exposes a DataFile's immutable partition map in
 // partition-field order without materializing a positional record or cloning
@@ -355,24 +354,10 @@ func flattenClassifiedManifestEntries(results []classifiedManifestEntries) *mani
 	return flattened
 }
 
-func newPartitionRecord(partitionData map[int]any, partitionType *iceberg.StructType) partitionRecord {
-	out := make(partitionRecord, partitionType.NumFields())
-	for i := range partitionType.NumFields() {
-		value := partitionData[partitionType.Field(i).ID]
-		if bytes, ok := value.([]byte); ok {
-			out[i] = slices.Clone(bytes)
-		} else {
-			out[i] = value
-		}
-	}
-
-	return out
-}
-
 // GetPartitionRecord converts a DataFile's partition map into a positional
 // record ordered by the fields of the given partition struct type.
 func GetPartitionRecord(dataFile iceberg.DataFile, partitionType *iceberg.StructType) iceberg.StructLike {
-	return newPartitionRecord(dataFilePartition(dataFile), partitionType)
+	return tblutils.NewPartitionRecord(dataFilePartition(dataFile), partitionType)
 }
 
 func openManifest(ctx context.Context, io io.IO, manifest iceberg.ManifestFile,
@@ -1017,7 +1002,25 @@ func matchEqualityDeletesToData(dataEntry iceberg.ManifestEntry, eqDeleteEntries
 }
 
 func partitionsMatch(a, b map[int]any) bool {
-	return maps.EqualFunc(a, b, partitionValuesEqual)
+	return maps.EqualFunc(a, b, promotedPartitionValuesEqual)
+}
+
+// promotedPartitionValuesEqual compares partition values across an identity
+// source promotion (int to long, float to double): manifests written before
+// the promotion decode the old width. Both widenings are exact.
+func promotedPartitionValuesEqual(left, right any) bool {
+	return partitionValuesEqual(widenPromotedPartitionValue(left), widenPromotedPartitionValue(right))
+}
+
+func widenPromotedPartitionValue(value any) any {
+	switch value := value.(type) {
+	case int32:
+		return int64(value)
+	case float32:
+		return float64(value)
+	}
+
+	return value
 }
 
 // buildDVIndex indexes deletion vectors by the data file path they reference.

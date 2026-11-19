@@ -25,6 +25,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/iceberg-go"
+	tblutils "github.com/apache/iceberg-go/table/internal"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -141,7 +142,7 @@ func (p *positionDeletePartitionedFanoutWriter) partitionPath(partitionContext p
 	// fields still present in CurrentSchema. Dropped partition source columns are assumed to
 	// be void-transformed per the Iceberg spec.
 	schema := p.metadata.CurrentSchema()
-	data := newPartitionRecord(partitionContext.partitionData, spec.PartitionType(schema))
+	data := tblutils.NewPartitionRecord(partitionContext.partitionData, spec.PartitionType(schema))
 
 	return spec.PartitionToPath(data, schema), nil
 }

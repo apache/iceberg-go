@@ -65,31 +65,38 @@ func (v *boundSetExtremaVisitVisitor) VisitInWithExtrema(_ BoundTerm, _ Set[Lite
 	return true
 }
 
-func TestVisitBoundPredicateRefPassesInExtrema(t *testing.T) {
+type trustedBoundSetExtremaVisitVisitor struct {
+	boundSetExtremaVisitVisitor
+}
+
+func (*trustedBoundSetExtremaVisitVisitor) BorrowBoundSets(internal.BoundPredicateRef) {}
+
+func TestVisitBoundPredicateTrustedPassesInExtrema(t *testing.T) {
 	predicate, err := IsIn(Reference("value"), "world", "hello", "ice").(UnboundPredicate).Bind(
 		NewSchema(1, NestedField{ID: 1, Name: "value", Type: PrimitiveTypes.String}), true,
 	)
 	require.NoError(t, err)
 
-	visitor := &boundSetExtremaVisitVisitor{boundSetVisitVisitor: boundSetVisitVisitor{needle: NewLiteral("hello")}}
+	untrusted := boundSetExtremaVisitVisitor{boundSetVisitVisitor: boundSetVisitVisitor{needle: NewLiteral("hello")}}
+	visitor := &trustedBoundSetExtremaVisitVisitor{untrusted}
 	bound := predicate.(BoundPredicate)
 	var found bool
 
 	assert.Zero(t, testing.AllocsPerRun(100, func() {
-		found = VisitBoundPredicateRef(bound, visitor, internal.BoundPredicateRef{})
+		found = VisitBoundPredicate(bound, visitor)
 	}))
 	assert.True(t, found)
 	assert.Equal(t, StringLiteral("hello"), visitor.minLit)
 	assert.Equal(t, StringLiteral("world"), visitor.maxLit)
 
-	visitor.minLit, visitor.maxLit = nil, nil
-	found = VisitBoundPredicate(bound, visitor)
+	// Without the marker, VisitIn is called instead.
+	found = VisitBoundPredicate(bound, &untrusted)
 	assert.True(t, found)
-	assert.Nil(t, visitor.minLit)
-	assert.Nil(t, visitor.maxLit)
+	assert.Nil(t, untrusted.minLit)
+	assert.Nil(t, untrusted.maxLit)
 }
 
-func TestVisitBoundPredicateRefGeoSkipsExtrema(t *testing.T) {
+func TestVisitBoundPredicateTrustedGeoSkipsExtrema(t *testing.T) {
 	geometry := GeometryType{}
 	first, err := LiteralFromBytes(geometry, []byte("1234567890abcdef"))
 	require.NoError(t, err)
@@ -102,8 +109,10 @@ func TestVisitBoundPredicateRefGeoSkipsExtrema(t *testing.T) {
 	pred, ok := bound.(BoundPredicate)
 	require.True(t, ok)
 
-	visitor := &boundSetExtremaVisitVisitor{boundSetVisitVisitor: boundSetVisitVisitor{needle: first}}
-	assert.True(t, VisitBoundPredicateRef(pred, visitor, internal.BoundPredicateRef{}))
+	visitor := &trustedBoundSetExtremaVisitVisitor{
+		boundSetExtremaVisitVisitor{boundSetVisitVisitor: boundSetVisitVisitor{needle: first}},
+	}
+	assert.True(t, VisitBoundPredicate(pred, visitor))
 	assert.Nil(t, visitor.minLit)
 	assert.Nil(t, visitor.maxLit)
 }

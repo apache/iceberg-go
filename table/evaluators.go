@@ -750,8 +750,11 @@ func (m *manifestEvalVisitor) VisitBound(pred iceberg.BoundPredicate) bool {
 		return rowsMightMatch
 	}
 
-	return iceberg.VisitBoundPredicateRef(pred, m, iceberginternal.BoundPredicateRef{})
+	return iceberg.VisitBoundPredicate(pred, m)
 }
+
+// BorrowBoundSets lets VisitBoundPredicate pass the predicate's own sets.
+func (*manifestEvalVisitor) BorrowBoundSets(iceberginternal.BoundPredicateRef) {}
 
 func (m *manifestEvalVisitor) VisitNot(child bool) bool       { return !child }
 func (m *manifestEvalVisitor) VisitAnd(left, right bool) bool { return left && right }
@@ -803,6 +806,13 @@ func (p *inclusiveProjection) VisitBound(pred iceberg.BoundPredicate) iceberg.Bo
 
 	var result iceberg.BooleanExpression = iceberg.AlwaysTrue{}
 	for _, part := range parts {
+		if part.HasMultipleSourcesForBuiltInTransform() {
+			// Historical malformed fields remain readable, but their unary
+			// transform semantics are unknown. Do not let them prune manifests or
+			// files based on a projection that assumes only the first source.
+			continue
+		}
+
 		// consider (d = 2019-01-01) with bucket(7, d) and bucket(5, d)
 		// projections: b1 = bucket(7, '2019-01-01') = 5, b2 = bucket(5, '2019-01-01') = 0
 		// any value where b1 != 5 or any value where b2 != 0 cannot be the '2019-01-01'
@@ -1093,8 +1103,11 @@ func (m *inclusiveMetricsEval) VisitBound(pred iceberg.BoundPredicate) bool {
 		return rowsMightMatch
 	}
 
-	return iceberg.VisitBoundPredicateRef(pred, m, iceberginternal.BoundPredicateRef{})
+	return iceberg.VisitBoundPredicate(pred, m)
 }
+
+// BorrowBoundSets lets VisitBoundPredicate pass the predicate's own sets.
+func (*inclusiveMetricsEval) BorrowBoundSets(iceberginternal.BoundPredicateRef) {}
 
 func (m *inclusiveMetricsEval) VisitIsNull(t iceberg.BoundTerm) bool {
 	if _, ok := t.(iceberg.BoundExtract); ok {
@@ -1605,8 +1618,11 @@ func (m *strictMetricsEval) VisitBound(pred iceberg.BoundPredicate) bool {
 		return rowsMightNotMatch
 	}
 
-	return iceberg.VisitBoundPredicateRef(pred, m, iceberginternal.BoundPredicateRef{})
+	return iceberg.VisitBoundPredicate(pred, m)
 }
+
+// BorrowBoundSets lets VisitBoundPredicate pass the predicate's own sets.
+func (*strictMetricsEval) BorrowBoundSets(iceberginternal.BoundPredicateRef) {}
 
 func (m *strictMetricsEval) VisitIsNull(t iceberg.BoundTerm) bool {
 	fieldID := t.Ref().Field().ID
@@ -2089,8 +2105,11 @@ func (c *bloomPredicateCollector) VisitBound(pred iceberg.BoundPredicate) []inte
 		return nil
 	}
 
-	return iceberg.VisitBoundPredicateRef(pred, c, iceberginternal.BoundPredicateRef{})
+	return iceberg.VisitBoundPredicate(pred, c)
 }
+
+// BorrowBoundSets lets VisitBoundPredicate pass the predicate's own sets.
+func (*bloomPredicateCollector) BorrowBoundSets(iceberginternal.BoundPredicateRef) {}
 
 func (c *bloomPredicateCollector) VisitEqual(t iceberg.BoundTerm, lit iceberg.Literal) []internal.RowGroupBloomPred {
 	field := t.Ref().Field()

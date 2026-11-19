@@ -55,7 +55,7 @@ import (
 
 db, err := sql.Open(sqliteshim.ShimName, "file:catalog.db")
 // handle err
-cat, err := sqlcat.NewCatalog("default", db, sqlcat.SQLite, iceberg.Properties{
+cat, err := sqlcat.NewCatalog(context.Background(), "default", db, sqlcat.SQLite, iceberg.Properties{
     "warehouse": "file:///tmp/warehouse",
 })
 ```
@@ -81,7 +81,7 @@ import (
     "github.com/apache/iceberg-go/catalog/hive"
 )
 
-cat, err := hive.NewCatalog(iceberg.Properties{},
+cat, err := hive.NewCatalog(context.Background(), iceberg.Properties{},
     hive.WithURI("thrift://localhost:9083"),
     hive.WithWarehouse("s3://my-bucket/warehouse"))
 ```
@@ -598,11 +598,11 @@ for _, s := range tbl.Metadata().Snapshots() {
 
 ### Comparing physical files between snapshots (v1-v3)
 
-Use `tbl.Inspect().DiffSnapshotFiles` to compare the live content files
+Use `tbl.DiffSnapshotFiles` to compare the live content files
 referenced by two snapshot IDs, including snapshots on different branches:
 
 ```go
-diff, err := tbl.Inspect().DiffSnapshotFiles(ctx, fromSnapshotID, toSnapshotID)
+diff, err := tbl.DiffSnapshotFiles(ctx, fromSnapshotID, toSnapshotID)
 if err != nil {
     return err
 }
@@ -704,7 +704,7 @@ changing table data. This is especially useful for checking imported v1 tables
 before allowing them into production.
 
 ```go
-report, err := tbl.Inspect().ValidateSnapshot(ctx, snapshotID)
+report, err := tbl.ValidateSnapshot(ctx, snapshotID)
 if err != nil {
     return err // I/O failed or the scan was canceled; report may be incomplete.
 }

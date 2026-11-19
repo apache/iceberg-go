@@ -335,6 +335,136 @@ func TestAddColumn(t *testing.T) {
 	})
 }
 
+func TestAddColumnNameAlreadyExists(t *testing.T) {
+	str := iceberg.PrimitiveTypes.String
+
+	rejected := []struct {
+		name          string
+		caseSensitive bool
+		build         func(*UpdateSchema) *UpdateSchema
+		wantErr       string
+	}{
+		{
+			name:          "top-level column",
+			caseSensitive: true,
+			build: func(u *UpdateSchema) *UpdateSchema {
+				return u.AddColumn([]string{"name"}, str, "", false, nil)
+			},
+			wantErr: "cannot add column, name already exists: name",
+		},
+		{
+			name:          "nested column",
+			caseSensitive: true,
+			build: func(u *UpdateSchema) *UpdateSchema {
+				return u.AddColumn([]string{"address", "city"}, str, "", false, nil)
+			},
+			wantErr: "cannot add column, name already exists: address.city",
+		},
+		{
+			name:          "column with different case in case-insensitive mode",
+			caseSensitive: false,
+			build: func(u *UpdateSchema) *UpdateSchema {
+				return u.AddColumn([]string{"NAME"}, str, "", false, nil)
+			},
+			wantErr: "cannot add column, name already exists: NAME",
+		},
+		{
+			name:          "column with only a doc update",
+			caseSensitive: true,
+			build: func(u *UpdateSchema) *UpdateSchema {
+				return u.UpdateColumn([]string{"name"}, ColumnUpdate{Doc: iceberg.Optional[string]{Valid: true, Val: "doc"}}).
+					AddColumn([]string{"name"}, str, "", false, nil)
+			},
+			wantErr: "cannot add column, name already exists: name",
+		},
+		{
+			name:          "name another column is renamed to",
+			caseSensitive: true,
+			build: func(u *UpdateSchema) *UpdateSchema {
+				return u.RenameColumn([]string{"age"}, "years").
+					AddColumn([]string{"years"}, str, "", false, nil)
+			},
+			wantErr: "field already exists: years",
+		},
+		{
+			name:          "name another column is renamed to, by union",
+			caseSensitive: true,
+			build: func(u *UpdateSchema) *UpdateSchema {
+				return u.RenameColumn([]string{"age"}, "years").
+					UnionByNameWith(iceberg.NewSchema(0,
+						iceberg.NestedField{ID: 1, Name: "years", Type: str},
+					))
+			},
+			wantErr: "field already exists: years",
+		},
+		{
+			name:          "column added with different case in case-insensitive mode",
+			caseSensitive: false,
+			build: func(u *UpdateSchema) *UpdateSchema {
+				return u.AddColumn([]string{"x"}, str, "", false, nil).
+					AddColumn([]string{"X"}, str, "", false, nil)
+			},
+			wantErr: "field already exists in adds: X",
+		},
+	}
+
+	for _, tt := range rejected {
+		t.Run(tt.name, func(t *testing.T) {
+			txn := New([]string{"id"}, testMetadata, "", nil, nil).NewTransaction()
+
+			_, err := tt.build(NewUpdateSchema(txn, tt.caseSensitive, false)).Apply()
+			require.ErrorContains(t, err, tt.wantErr)
+
+			err = tt.build(NewUpdateSchema(txn, tt.caseSensitive, false)).Commit()
+			require.ErrorContains(t, err, tt.wantErr)
+		})
+	}
+
+	allowed := []struct {
+		name    string
+		build   func(*UpdateSchema) *UpdateSchema
+		checkID func(t *testing.T, s *iceberg.Schema)
+	}{
+		{
+			name: "name of a deleted column",
+			build: func(u *UpdateSchema) *UpdateSchema {
+				return u.DeleteColumn([]string{"name"}).
+					AddColumn([]string{"name"}, str, "", false, nil)
+			},
+			checkID: func(t *testing.T, s *iceberg.Schema) {
+				f, ok := s.FindFieldByName("name")
+				require.True(t, ok)
+				assert.Equal(t, 12, f.ID)
+			},
+		},
+		{
+			name: "name of a column renamed away",
+			build: func(u *UpdateSchema) *UpdateSchema {
+				return u.RenameColumn([]string{"name"}, "full_name").
+					AddColumn([]string{"name"}, str, "", false, nil)
+			},
+			checkID: func(t *testing.T, s *iceberg.Schema) {
+				f, ok := s.FindFieldByName("name")
+				require.True(t, ok)
+				assert.Equal(t, 12, f.ID)
+				f, ok = s.FindFieldByName("full_name")
+				require.True(t, ok)
+				assert.Equal(t, 2, f.ID)
+			},
+		},
+	}
+
+	for _, tt := range allowed {
+		t.Run(tt.name, func(t *testing.T) {
+			txn := New([]string{"id"}, testMetadata, "", nil, nil).NewTransaction()
+
+			s, err := tt.build(NewUpdateSchema(txn, true, false)).Apply()
+			require.NoError(t, err)
+			tt.checkID(t, s)
+		})
+	}
+}
+
 func TestApplyChanges(t *testing.T) {
 	t.Run("test apply changes on schema", func(t *testing.T) {
 		deletes := map[int]struct{}{
@@ -1314,6 +1444,96 @@ func TestBuildUpdates(t *testing.T) {
 		assert.IsType(t, &setCurrentSchemaUpdate{}, updates[0])
 		assert.Equal(t, 0, updates[0].(*setCurrentSchemaUpdate).SchemaID)
 	})
+
+	t.Run("test BuildUpdates asserts last-assigned-field-id when adding a schema", func(t *testing.T) {
+		table := New([]string{"table"}, testMetadata, "", nil, nil)
+		txn := table.NewTransaction()
+		updateSchema := txn.UpdateSchema(true, false).
+			AddColumn([]string{"new_col"}, iceberg.PrimitiveTypes.String, "", false, nil)
+
+		updates, requirements, err := updateSchema.BuildUpdates()
+		require.NoError(t, err)
+		require.Len(t, requirements, 2)
+		assert.IsType(t, &assertCurrentSchemaId{}, requirements[0])
+		require.IsType(t, &assertLastAssignedFieldId{}, requirements[1])
+		assert.Equal(t, testMetadata.LastColumnID(),
+			requirements[1].(*assertLastAssignedFieldId).LastAssignedFieldID)
+		require.Len(t, updates, 2)
+		assert.IsType(t, &addSchemaUpdate{}, updates[0])
+		assert.IsType(t, &setCurrentSchemaUpdate{}, updates[1])
+	})
+
+	t.Run("test chained schema updates assert last-assigned-field-id once", func(t *testing.T) {
+		table := New([]string{"table"}, testMetadata, "", nil, nil)
+		txn := table.NewTransaction()
+		for _, name := range []string{"first", "second"} {
+			require.NoError(t, txn.UpdateSchema(true, false).
+				AddColumn([]string{name}, iceberg.PrimitiveTypes.String, "", false, nil).
+				Commit())
+		}
+
+		var fieldIDReqs []*assertLastAssignedFieldId
+		for _, r := range txn.reqs {
+			if req, ok := r.(*assertLastAssignedFieldId); ok {
+				fieldIDReqs = append(fieldIDReqs, req)
+			}
+		}
+		require.Len(t, fieldIDReqs, 1)
+		assert.Equal(t, testMetadata.LastColumnID(), fieldIDReqs[0].LastAssignedFieldID)
+	})
+}
+
+func TestBuildUpdatesSelectsAddedSchemaAfterConcurrentRegistration(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		otherFields []string
+	}{
+		{name: "different schema", otherFields: []string{"a", "b"}},
+		// Passes only on catalogs that keep the reused schema as last added, like MetadataBuilder.
+		// Java catalogs reject SetCurrentSchema(-1) here.
+		{name: "equivalent schema", otherFields: []string{"a", "c"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := iceberg.NestedField{ID: 1, Name: "a", Type: iceberg.PrimitiveTypes.Int32}
+			b := iceberg.NestedField{ID: 2, Name: "b", Type: iceberg.PrimitiveTypes.Int32}
+			c := iceberg.NestedField{ID: 3, Name: "c", Type: iceberg.PrimitiveTypes.Int32}
+			base, err := NewMetadata(iceberg.NewSchema(0, a, b, c), iceberg.UnpartitionedSpec, UnsortedSortOrder, "", nil)
+			require.NoError(t, err)
+
+			tbl := New([]string{"table"}, base, "", nil, nil)
+			updates, requirements, err := tbl.NewTransaction().UpdateSchema(true, false).
+				DeleteColumn([]string{"b"}).BuildUpdates()
+			require.NoError(t, err)
+			require.Len(t, updates, 2)
+			require.Equal(t, -1, updates[1].(*setCurrentSchemaUpdate).SchemaID)
+
+			otherFields := make([]iceberg.NestedField, 0, len(tc.otherFields))
+			for _, name := range tc.otherFields {
+				field, ok := base.CurrentSchema().FindFieldByName(name)
+				require.True(t, ok)
+				otherFields = append(otherFields, field)
+			}
+			builder, err := MetadataBuilderFromBase(base, "")
+			require.NoError(t, err)
+			require.NoError(t, builder.AddSchema(iceberg.NewSchema(1, otherFields...)))
+			concurrent, err := builder.Build()
+			require.NoError(t, err)
+			require.Equal(t, base.CurrentSchema().ID, concurrent.CurrentSchema().ID)
+			require.NoError(t, AssertLastAssignedFieldID(base.LastColumnID()).Validate(concurrent))
+			for _, requirement := range requirements {
+				require.NoError(t, requirement.Validate(concurrent))
+			}
+
+			builder, err = MetadataBuilderFromBase(concurrent, "")
+			require.NoError(t, err)
+			for _, update := range updates {
+				require.NoError(t, update.Apply(builder))
+			}
+			committed, err := builder.Build()
+			require.NoError(t, err)
+			require.Equal(t, []iceberg.NestedField{a, c}, committed.CurrentSchema().Fields())
+		})
+	}
 }
 
 // TestAddColumnMonotonicFieldIDs exercises the case where the table's

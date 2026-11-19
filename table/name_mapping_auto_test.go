@@ -18,7 +18,6 @@
 package table
 
 import (
-	"context"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -134,27 +133,6 @@ func TestScanWithoutTasksSkipsNameMapping(t *testing.T) {
 		require.NoError(t, err)
 		record.Release()
 		t.Fatal("empty scan returned a record")
-	}
-}
-
-func TestInspectPositionDeletesRejectsUnparseableNameMapping(t *testing.T) {
-	for _, mapping := range []string{"{not valid json", "null", ""} {
-		t.Run(mapping, func(t *testing.T) {
-			dir := filepath.ToSlash(t.TempDir())
-			fs := iceio.LocalFS{}
-			tbl, _ := newReorderScanFixture(t, dir, 1, 4, fs)
-			txn := tbl.NewTransaction()
-			require.NoError(t, txn.SetProperties(iceberg.Properties{DefaultNameMappingKey: mapping}))
-			builder, err := txn.txnMeta()
-			require.NoError(t, err)
-			meta, err := builder.Build()
-			require.NoError(t, err)
-			tbl = New(tbl.Identifier(), meta, tbl.MetadataLocation(),
-				func(context.Context) (iceio.IO, error) { return fs, nil }, nil)
-			_, err = tbl.Inspect().PositionDeletes(t.Context())
-			require.ErrorIs(t, err, ErrInvalidMetadata)
-			require.ErrorContains(t, err, DefaultNameMappingKey)
-		})
 	}
 }
 
