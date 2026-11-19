@@ -236,59 +236,48 @@ func TestPhysicalSchemaKeyDistinguishesNestedLayouts(t *testing.T) {
 	decimal := iceberg.MustDecimalTypeOf(10, 2)
 	for _, tc := range []struct {
 		name   string
-		change func([]iceberg.NestedField) []iceberg.NestedField
+		change func(*[]iceberg.NestedField)
 	}{
-		{"field_id", func(f []iceberg.NestedField) []iceberg.NestedField { f[0].ID = 20; return f }},
-		{"field_name", func(f []iceberg.NestedField) []iceberg.NestedField { f[0].Name = "items:;{}"; return f }},
-		{"field_required", func(f []iceberg.NestedField) []iceberg.NestedField { f[0].Required = true; return f }},
-		{"field_order", func(f []iceberg.NestedField) []iceberg.NestedField { f[0], f[1] = f[1], f[0]; return f }},
-		{"list_id", func(f []iceberg.NestedField) []iceberg.NestedField {
-			f[0].Type = iceberg.NewListType(30, iceberg.PrimitiveTypes.Int64, false)
-			return f
+		{"field_id", func(f *[]iceberg.NestedField) { (*f)[0].ID = 20 }},
+		{"field_name", func(f *[]iceberg.NestedField) { (*f)[0].Name = "items:;{}" }},
+		{"field_required", func(f *[]iceberg.NestedField) { (*f)[0].Required = true }},
+		{"field_order", func(f *[]iceberg.NestedField) { (*f)[0], (*f)[1] = (*f)[1], (*f)[0] }},
+		{"list_id", func(f *[]iceberg.NestedField) {
+			(*f)[0].Type = iceberg.NewListType(30, iceberg.PrimitiveTypes.Int64, false)
 		}},
-		{"list_required", func(f []iceberg.NestedField) []iceberg.NestedField {
-			f[0].Type = iceberg.NewListType(3, iceberg.PrimitiveTypes.Int64, true)
-			return f
+		{"list_required", func(f *[]iceberg.NestedField) {
+			(*f)[0].Type = iceberg.NewListType(3, iceberg.PrimitiveTypes.Int64, true)
 		}},
-		{"list_type", func(f []iceberg.NestedField) []iceberg.NestedField {
-			f[0].Type = iceberg.NewListType(3, iceberg.PrimitiveTypes.Int32, false)
-			return f
+		{"list_type", func(f *[]iceberg.NestedField) {
+			(*f)[0].Type = iceberg.NewListType(3, iceberg.PrimitiveTypes.Int32, false)
 		}},
-		{"map_key_id", func(f []iceberg.NestedField) []iceberg.NestedField {
-			f[1].Type = iceberg.NewMapType(50, iceberg.PrimitiveTypes.String, 6, decimal, false)
-			return f
+		{"map_key_id", func(f *[]iceberg.NestedField) {
+			(*f)[1].Type = iceberg.NewMapType(50, iceberg.PrimitiveTypes.String, 6, decimal, false)
 		}},
-		{"map_key_type", func(f []iceberg.NestedField) []iceberg.NestedField {
-			f[1].Type = iceberg.NewMapType(5, iceberg.PrimitiveTypes.Int32, 6, decimal, false)
-			return f
+		{"map_key_type", func(f *[]iceberg.NestedField) {
+			(*f)[1].Type = iceberg.NewMapType(5, iceberg.PrimitiveTypes.Int32, 6, decimal, false)
 		}},
-		{"map_value_id", func(f []iceberg.NestedField) []iceberg.NestedField {
-			f[1].Type = iceberg.NewMapType(5, iceberg.PrimitiveTypes.String, 60, decimal, false)
-			return f
+		{"map_value_id", func(f *[]iceberg.NestedField) {
+			(*f)[1].Type = iceberg.NewMapType(5, iceberg.PrimitiveTypes.String, 60, decimal, false)
 		}},
-		{"map_value_required", func(f []iceberg.NestedField) []iceberg.NestedField {
-			f[1].Type = iceberg.NewMapType(5, iceberg.PrimitiveTypes.String, 6, decimal, true)
-			return f
+		{"map_value_required", func(f *[]iceberg.NestedField) {
+			(*f)[1].Type = iceberg.NewMapType(5, iceberg.PrimitiveTypes.String, 6, decimal, true)
 		}},
-		{"decimal_precision", func(f []iceberg.NestedField) []iceberg.NestedField {
-			f[1].Type = iceberg.NewMapType(5, iceberg.PrimitiveTypes.String, 6, iceberg.MustDecimalTypeOf(11, 2), false)
-			return f
+		{"decimal_precision", func(f *[]iceberg.NestedField) {
+			(*f)[1].Type = iceberg.NewMapType(5, iceberg.PrimitiveTypes.String, 6, iceberg.MustDecimalTypeOf(11, 2), false)
 		}},
-		{"decimal_scale", func(f []iceberg.NestedField) []iceberg.NestedField {
-			f[1].Type = iceberg.NewMapType(5, iceberg.PrimitiveTypes.String, 6, iceberg.MustDecimalTypeOf(10, 3), false)
-			return f
+		{"decimal_scale", func(f *[]iceberg.NestedField) {
+			(*f)[1].Type = iceberg.NewMapType(5, iceberg.PrimitiveTypes.String, 6, iceberg.MustDecimalTypeOf(10, 3), false)
 		}},
-		{"fixed_size", func(f []iceberg.NestedField) []iceberg.NestedField { f[2].Type = iceberg.MustFixedTypeOf(16); return f }},
-		{"variant_type", func(f []iceberg.NestedField) []iceberg.NestedField {
-			f[3].Type = iceberg.PrimitiveTypes.Binary
-			return f
-		}},
-		{"empty_struct", func([]iceberg.NestedField) []iceberg.NestedField { return nil }},
+		{"fixed_size", func(f *[]iceberg.NestedField) { (*f)[2].Type = iceberg.MustFixedTypeOf(16) }},
+		{"variant_type", func(f *[]iceberg.NestedField) { (*f)[3].Type = iceberg.PrimitiveTypes.Binary }},
+		{"empty_struct", func(f *[]iceberg.NestedField) { *f = nil }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fields := schema.Fields()
-			root := fields[0].Type.(*iceberg.StructType)
-			fields[0].Type = iceberg.NewStructType(tc.change(root.Fields())...)
+			children := fields[0].Type.(*iceberg.StructType).Fields()
+			tc.change(&children)
+			fields[0].Type = iceberg.NewStructType(children...)
 			key, err := physicalSchemaKey(iceberg.NewSchema(1, fields...))
 			require.NoError(t, err)
 			assert.NotEqual(t, original, key)
