@@ -2581,6 +2581,7 @@ func newOverwriteHistoryTable(t *testing.T) (*table.Table, iceio.LocalFS, string
 func TestPlanOrphanFilesRejectsRefsOnlyWithLiveHistoricalData(t *testing.T) {
 	ctx := t.Context()
 	tbl, fs, historicalFile, _, historicalSnapshotID := newOverwriteHistoryTable(t)
+	historicalFile = filepath.Clean(historicalFile)
 	location := tbl.Metadata().Location()
 	cleanupLocation := location + "/data"
 
