@@ -23,7 +23,19 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"github.com/twmb/avro/ocf"
 )
+
+type countingManifestDeflateCodec struct {
+	*manifestDeflateCodec
+	decompressions int
+}
+
+func (c *countingManifestDeflateCodec) DecompressBounded(src []byte, maxBytes int64) ([]byte, error) {
+	c.decompressions++
+
+	return c.manifestDeflateCodec.DecompressBounded(src, maxBytes)
+}
 
 func TestManifestReaderKeepsDeflateEntriesFromEarlierBlocks(t *testing.T) {
 	schema := NewSchema(1, NestedField{ID: 1, Name: "id", Type: PrimitiveTypes.Int64, Required: true})
@@ -43,6 +55,19 @@ func TestManifestReaderKeepsDeflateEntriesFromEarlierBlocks(t *testing.T) {
 	var encoded bytes.Buffer
 	manifest, err := WriteManifest("manifest.avro", &encoded, 2, *UnpartitionedSpec, schema, snapshotID, entries)
 	require.NoError(t, err)
+
+	// Prove that the test exercises buffer reuse across two compressed blocks.
+	countingCodec := &countingManifestDeflateCodec{manifestDeflateCodec: newManifestDeflateCodec()}
+	blockReader, err := ocf.NewReader(bytes.NewReader(encoded.Bytes()), ocf.WithCodec(countingCodec))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, blockReader.Close()) })
+	for range entries {
+		var decoded any
+		require.NoError(t, blockReader.Decode(&decoded))
+	}
+	var extra any
+	require.ErrorIs(t, blockReader.Decode(&extra), io.EOF)
+	require.Equal(t, len(entries), countingCodec.decompressions)
 
 	for _, test := range []struct {
 		name       string
