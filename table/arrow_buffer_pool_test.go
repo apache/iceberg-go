@@ -25,6 +25,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/compute"
 	"github.com/apache/arrow-go/v18/arrow/memory"
+	iceio "github.com/apache/iceberg-go/io"
 	"github.com/stretchr/testify/require"
 )
 
@@ -112,6 +113,43 @@ func TestReadTasksArrowBufferReuse(t *testing.T) {
 			retained.Release()
 			if checked, ok := tc.allocator.(*memory.CheckedAllocator); ok {
 				checked.AssertSize(t, 0)
+			}
+		})
+	}
+}
+
+func BenchmarkReadTasksArrowBufferReuse(b *testing.B) {
+	meta, fs, _, tasks, wantRows := benchmarkSplitParquetScanWithRowGroups(b, 16, 8192)
+	table := New(Identifier{"benchmark"}, meta, "", func(context.Context) (iceio.IO, error) {
+		return fs, nil
+	}, nil)
+	for _, tc := range []struct {
+		name     string
+		workers  int
+		withPool bool
+	}{
+		{name: "one_worker/default", workers: 1},
+		{name: "one_worker/reuse", workers: 1, withPool: true},
+		{name: "four_workers/default", workers: 4},
+		{name: "four_workers/reuse", workers: 4, withPool: true},
+	} {
+		b.Run(tc.name, func(b *testing.B) {
+			options := []ScanOption{WithMaxConcurrency(tc.workers), WithArrowBatchSize(8192)}
+			if tc.withPool {
+				options = append(options, WithArrowBufferReuse())
+			}
+			scan := table.Scan(options...)
+			b.ReportAllocs()
+			for b.Loop() {
+				_, records, err := scan.ReadTasks(b.Context(), tasks)
+				require.NoError(b, err)
+				var rows int64
+				for record, err := range records {
+					require.NoError(b, err)
+					rows += record.NumRows()
+					record.Release()
+				}
+				require.Equal(b, wantRows, rows)
 			}
 		})
 	}
