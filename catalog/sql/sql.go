@@ -561,6 +561,8 @@ type Catalog struct {
 	// path) and must therefore close it in Close. It stays false for handles
 	// supplied to NewCatalog, which remain owned by the caller.
 	ownsDB bool
+
+	ioRegistry *io.Registry
 }
 
 // isV0 reports whether the catalog is operating against a legacy V0 schema that
@@ -593,13 +595,20 @@ func (c *Catalog) isV0() bool { return c.schemaVersion == schemaV0 }
 // The driver's default applies when the DSN sets none: mattn waits 5000ms, while modernc does not wait, so
 // CreateTable, CreateView and the other operations that retry on a lock conflict give up after about 310ms and the
 // rest fail at once. NewCatalog does not mutate connection settings on the caller-owned db.
-func NewCatalog(ctx context.Context, name string, db *sql.DB, dialect SupportedDialect, props iceberg.Properties) (*Catalog, error) {
+//
+// WithIORegistry selects a catalog-scoped FileIO registry. The default is the
+// global registry.
+func NewCatalog(ctx context.Context, name string, db *sql.DB, dialect SupportedDialect, props iceberg.Properties, opts ...Option) (*Catalog, error) {
 	d, err := getDialect(dialect)
 	if err != nil {
 		return nil, err
 	}
 
-	cat := &Catalog{db: bun.NewDB(db, d), name: name, props: props}
+	var config catalogOptions
+	for _, opt := range opts {
+		opt(&config)
+	}
+	cat := &Catalog{db: bun.NewDB(db, d), name: name, props: props, ioRegistry: config.ioRegistry}
 
 	cat.db = cat.db.WithQueryHook(bundebug.NewQueryHook(
 		bundebug.WithEnabled(false),
@@ -996,7 +1005,7 @@ func (c *Catalog) CreateTable(ctx context.Context, ident table.Identifier, sc *i
 	}
 
 	staged, err := internal.CreateStagedTableWithNamespaceKey(
-		ctx, c.props, c.LoadNamespaceProperties, ident, ns, sc, opts...)
+		ctx, c.props, c.LoadNamespaceProperties, ident, ns, sc, c.ioRegistry, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1068,7 +1077,7 @@ func (c *Catalog) CommitTable(ctx context.Context, ident table.Identifier, reqs 
 		return nil, "", err
 	}
 
-	staged, err := internal.UpdateAndStageTable(ctx, c.props, current, ident, reqs, updates, c)
+	staged, err := internal.UpdateAndStageTable(ctx, c.props, current, ident, reqs, updates, c, c.ioRegistry)
 	if err != nil {
 		return nil, "", err
 	}
@@ -1208,7 +1217,7 @@ func (c *Catalog) LoadTable(ctx context.Context, identifier table.Identifier) (*
 		ctx,
 		identifier,
 		result.MetadataLocation.String,
-		io.LoadFSFunc(c.props, result.MetadataLocation.String),
+		internal.LoadFSFuncWithRegistry(c.ioRegistry, c.props, result.MetadataLocation.String),
 		c,
 		table.WithMetricsReporter(reporter),
 		table.WithScanPlanningIOProperties(c.props),
@@ -1867,7 +1876,7 @@ func (c *Catalog) CreateView(ctx context.Context, identifier table.Identifier, v
 		version.DefaultCatalog = c.name
 	}
 
-	createdView, err := view.CreateViewFromVersion(ctx, identifier, schema, version, loc, ioProps, cfg.Properties)
+	createdView, err := view.CreateViewFromVersion(ctx, identifier, schema, version, loc, ioProps, cfg.Properties, view.WithIORegistry(c.ioRegistry))
 	if err != nil {
 		return nil, err
 	}
@@ -1906,7 +1915,7 @@ func (c *Catalog) CreateView(ctx context.Context, identifier table.Identifier, v
 				err = collisionErr
 			}
 		}
-		loadFS := io.LoadFSFunc(ioProps, metadataLocation)
+		loadFS := internal.LoadFSFuncWithRegistry(c.ioRegistry, ioProps, metadataLocation)
 		if cleanupErr := removeUncommittedMetadata(ctx, metadataLocation, loadFS); cleanupErr != nil {
 			err = errors.Join(err, cleanupErr)
 		}
@@ -1983,7 +1992,7 @@ func (c *Catalog) DropView(ctx context.Context, identifier table.Identifier) err
 	}
 
 	if metadataLocation != "" {
-		fs, err := io.LoadFS(ctx, c.props, metadataLocation)
+		fs, err := internal.LoadFSWithRegistry(ctx, c.ioRegistry, c.props, metadataLocation)
 		if err != nil {
 			return err
 		}
@@ -2065,7 +2074,7 @@ func (c *Catalog) LoadView(ctx context.Context, identifier table.Identifier) (*v
 		return nil, fmt.Errorf("%w: %s, metadata location is missing", catalog.ErrNoSuchView, identifier)
 	}
 
-	loadedView, err := view.NewFromLocation(ctx, identifier, v.MetadataLocation.String, io.LoadFSFunc(c.props, v.MetadataLocation.String))
+	loadedView, err := view.NewFromLocation(ctx, identifier, v.MetadataLocation.String, internal.LoadFSFuncWithRegistry(c.ioRegistry, c.props, v.MetadataLocation.String))
 	if err != nil {
 		return nil, err
 	}

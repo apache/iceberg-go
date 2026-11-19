@@ -40,6 +40,11 @@ state. A failed validation surfaces as one of:
   not live, so retrying the same delete cannot succeed. Rebuild the delete
   against the current table. When `Transaction.Commit` returns it, the error
   also matches `ErrTransactionUnusable`.
+- `table.ErrDuplicateDataFiles` — terminal for the requested paths. A
+  `RowDelta` rejects repeated paths during staging and checks whether a
+  concurrent commit added any of its paths that are still live on retry.
+  A retry collision also matches `ErrTransactionUnusable`. Use distinct
+  paths in a new operation.
 - `table.ErrTransactionUnusable` — this transaction can't be committed again.
   If the error also matches `ErrCommitFailed`, retry in a new transaction from a
   reloaded table.
@@ -54,6 +59,8 @@ import (
 
 _, err := txn.Commit(context.Background())
 switch {
+case errors.Is(err, table.ErrDuplicateDataFiles):
+    // choose different data file paths before building a new RowDelta
 case errors.Is(err, table.ErrTransactionUnusable) && errors.Is(err, table.ErrCommitFailed):
     // a concurrent change: retry in a new transaction from a reloaded table
 case errors.Is(err, table.ErrCommitDiverged), errors.Is(err, table.ErrTransactionUnusable):

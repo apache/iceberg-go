@@ -476,7 +476,7 @@ func TestRollingDataWriterReusesExactBatch(t *testing.T) {
 	factory.format = format
 
 	output := make(chan iceberg.DataFile, 1)
-	writer := factory.newRollingDataWriter(t.Context(), "", nil, output)
+	writer := factory.newRollingDataWriter(t.Context(), "", nil, output, factory.currentSpec)
 	record := projectionTestRecord(t, mem, arrowSchema, []byte(`{"id": 1}`))
 	defer record.Release()
 

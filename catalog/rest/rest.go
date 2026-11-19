@@ -1755,8 +1755,24 @@ func (r *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 	if cfg.SortOrder.Fields() == nil && cfg.SortOrder.OrderID() == 0 {
 		cfg.SortOrder = table.UnsortedSortOrder
 	}
+	if cfg.PartitionSpec != nil {
+		// REST create-table sends the caller's spec directly. Validate it against
+		// the schema in this request before encoding the payload, since ordinary
+		// PartitionSpec JSON must remain lenient for historical metadata.
+		if _, err := cfg.PartitionSpec.BindToSchema(schema, nil, nil); err != nil {
+			return nil, err
+		}
+	}
 
 	stagedCreate := len(cfg.StagedUpdates) > 0
+	if stagedCreate {
+		// Phase two runs after the server has created the staged table. Check
+		// that its updates can be encoded now, before the first POST can leave an
+		// orphaned staged table on a local serialization error.
+		if _, err := json.Marshal(cfg.StagedUpdates); err != nil {
+			return nil, fmt.Errorf("failed to encode staged create updates: %w", err)
+		}
+	}
 
 	payload := createTableRequest{
 		Name:          identPath.rawName,

@@ -25,7 +25,7 @@ import (
 	"maps"
 
 	"github.com/apache/iceberg-go/catalog"
-	icebergio "github.com/apache/iceberg-go/io"
+	"github.com/apache/iceberg-go/catalog/internal"
 	"github.com/apache/iceberg-go/table"
 	"github.com/apache/iceberg-go/view"
 )
@@ -90,7 +90,8 @@ func (c *Catalog) UpdateView(ctx context.Context, ident table.Identifier, requir
 	if err != nil {
 		return nil, err
 	}
-	current, err := view.NewFromLocation(ctx, ident, oldLocation, icebergio.LoadFSFunc(c.opts.props, oldLocation))
+	current, err := view.NewFromLocation(ctx, ident, oldLocation,
+		internal.LoadFSFuncWithRegistry(c.opts.ioRegistry, c.opts.props, oldLocation))
 	if err != nil {
 		return nil, err
 	}
@@ -124,7 +125,7 @@ func (c *Catalog) UpdateView(ctx context.Context, ident table.Identifier, requir
 		ioProps = make(map[string]string)
 	}
 	maps.Copy(ioProps, metadata.Properties())
-	metadataLocation, fs, err := view.WriteMetadata(ctx, metadata.Metadata, ioProps)
+	metadataLocation, fs, err := view.WriteMetadata(ctx, metadata.Metadata, ioProps, view.WithIORegistry(c.opts.ioRegistry))
 	if err != nil {
 		return nil, err
 	}

@@ -19,6 +19,7 @@ package table
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -146,4 +147,42 @@ func TestParseMetadataBytesRejectsCaseFoldedFormatVersionCollision(t *testing.T)
 
 	_, err := ParseMetadataBytes([]byte(data))
 	require.ErrorIs(t, err, ErrInvalidMetadataFormatVersion)
+}
+
+func TestParseMetadataBytesPreservesTypeErrorOffset(t *testing.T) {
+	for _, version := range []struct {
+		number int
+		target json.Unmarshaler
+	}{
+		{number: 1, target: &metadataV1{}},
+		{number: 2, target: &metadataV2{}},
+		{number: 3, target: &metadataV3{}},
+	} {
+		t.Run(fmt.Sprintf("v%d", version.number), func(t *testing.T) {
+			for _, spec := range []struct {
+				name   string
+				fields string
+			}{
+				{name: "whitespace"},
+				{name: "normalized", fields: `,"partition-specs":[{"spec-id":0,"fields":[{"source-id":1,"name":"id","transform":"identity"}]}]`},
+			} {
+				t.Run(spec.name, func(t *testing.T) {
+					input := fmt.Appendf(nil, " \t\r\n"+`{"format-version":%d,"last-updated-ms":1,"last-column-id":"not-an-int"%s}`+"\n",
+						version.number, spec.fields)
+					normalized, err := assignMissingPartitionFieldIDs(input)
+					require.NoError(t, err)
+					if spec.fields != "" {
+						require.Contains(t, string(normalized), `"field-id":1000`)
+					}
+
+					var expected, actual *json.UnmarshalTypeError
+					require.ErrorAs(t, json.Unmarshal(normalized, version.target), &expected)
+					_, err = ParseMetadataBytes(input)
+					require.ErrorIs(t, err, ErrInvalidMetadata)
+					require.ErrorAs(t, err, &actual)
+					require.Equal(t, expected, actual)
+				})
+			}
+		})
+	}
 }
