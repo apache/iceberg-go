@@ -625,7 +625,7 @@ func (s *RollingDataWriterTestSuite) TestStreamErrorRemovesWriterFromFactory() {
 	s.Require().NoError(writer.Add(badRecord))
 	writer.wg.Wait()
 
-	_, ok := factory.writers.Load("")
+	_, ok := factory.writers.Load(writer.key)
 	s.False(ok, "failed writer should be removed from partition writer cache")
 
 	err, ok = <-writer.errorCh

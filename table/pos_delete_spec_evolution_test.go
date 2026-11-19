@@ -19,6 +19,7 @@ package table_test
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"testing"
 
@@ -32,12 +33,14 @@ import (
 
 func TestPositionDeleteAfterSpecEvolution(t *testing.T) {
 	for _, tc := range []struct {
-		name                 string
-		mixed, unpartitioned bool
+		name                             string
+		mixed, unpartitioned, sharedPath bool
 	}{
 		{name: "old-spec"},
 		{name: "mixed-specs", mixed: true},
 		{name: "evolve-to-unpartitioned", mixed: true, unpartitioned: true},
+		// truncate[2](cat) -> truncate[4](cat), both named cat: "ab" gives the same partition path under both specs.
+		{name: "shared-partition-path", mixed: true, sharedPath: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
@@ -46,7 +49,11 @@ func TestPositionDeleteAfterSpecEvolution(t *testing.T) {
 				iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
 				iceberg.NestedField{ID: 2, Name: "cat", Type: iceberg.PrimitiveTypes.String},
 				iceberg.NestedField{ID: 3, Name: "region", Type: iceberg.PrimitiveTypes.String})
-			spec := iceberg.NewPartitionSpec(iceberg.PartitionField{SourceIDs: []int{2}, FieldID: 1000, Transform: iceberg.IdentityTransform{}, Name: "cat"})
+			var transform iceberg.Transform = iceberg.IdentityTransform{}
+			if tc.sharedPath {
+				transform = iceberg.TruncateTransform{Width: 2}
+			}
+			spec := iceberg.NewPartitionSpec(iceberg.PartitionField{SourceIDs: []int{2}, FieldID: 1000, Transform: transform, Name: "cat"})
 			meta, err := table.NewMetadata(schema, &spec, table.UnsortedSortOrder, location, iceberg.Properties{table.PropertyFormatVersion: "2", table.WriteDeleteModeKey: table.WriteModeMergeOnRead})
 			require.NoError(t, err)
 			fs := func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil }
@@ -62,9 +69,17 @@ func TestPositionDeleteAfterSpecEvolution(t *testing.T) {
 				tbl, e = tbl.Append(ctx, array.NewTableReader(data, -1), nil)
 				require.NoError(t, e)
 			}
-			appendJSON(`[{"id":1,"cat":"a","region":"x"},{"id":2,"cat":"a","region":"x"}]`)
+			catVal := "a"
+			if tc.sharedPath {
+				catVal = "ab"
+			}
+			rows := fmt.Sprintf(`[{"id":1,"cat":%[1]q,"region":"x"},{"id":2,"cat":%[1]q,"region":"x"}]`, catVal)
+			moreRows := fmt.Sprintf(`[{"id":1,"cat":%[1]q,"region":"x"},{"id":3,"cat":%[1]q,"region":"x"}]`, catVal)
+			appendJSON(rows)
 			evolve := tbl.NewTransaction()
-			if tc.unpartitioned {
+			if tc.sharedPath {
+				require.NoError(t, evolve.UpdateSpec(true).RemoveField("cat").AddField("cat", iceberg.TruncateTransform{Width: 4}, "cat").Commit())
+			} else if tc.unpartitioned {
 				require.NoError(t, evolve.UpdateSpec(true).RemoveField("cat").Commit())
 			} else {
 				require.NoError(t, evolve.UpdateSpec(true).AddIdentity("region").Commit())
@@ -72,7 +87,7 @@ func TestPositionDeleteAfterSpecEvolution(t *testing.T) {
 			tbl, err = evolve.Commit(ctx)
 			require.NoError(t, err)
 			if tc.mixed {
-				appendJSON(`[{"id":1,"cat":"a","region":"x"},{"id":3,"cat":"a","region":"x"}]`)
+				appendJSON(moreRows)
 			}
 			tbl, err = tbl.Delete(ctx, iceberg.EqualTo(iceberg.Reference("id"), int64(1)), nil)
 			require.NoError(t, err)

@@ -2445,6 +2445,8 @@ func positionDeleteRecordsToDataFiles(ctx context.Context, rootLocation string, 
 		WriteDeleteTargetFileSizeBytesDefault))
 
 	currentSpec := latestMetadata.PartitionSpec()
+	// The unpartitioned writer stamps the current spec on every file, so it is
+	// safe only when every target file was written under that spec.
 	useUnpartitionedWriter := currentSpec.IsUnpartitioned()
 	for _, partition := range partitionContextByFilePath {
 		if int(partition.specID) != currentSpec.ID() {
