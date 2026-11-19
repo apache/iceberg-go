@@ -249,40 +249,6 @@ func (p parquetFormat) createStatsAgg(typ iceberg.PrimitiveType, physicalTypeStr
 	}
 }
 
-func (parquetFormat) PrimitiveTypeToPhysicalType(typ iceberg.PrimitiveType) string {
-	switch typ.(type) {
-	case iceberg.BooleanType:
-		return "BOOLEAN"
-	case iceberg.Int32Type:
-		return "INT32"
-	case iceberg.Int64Type:
-		return "INT64"
-	case iceberg.Float32Type:
-		return "FLOAT"
-	case iceberg.Float64Type:
-		return "DOUBLE"
-	case iceberg.DateType:
-		return "INT32"
-	case iceberg.TimeType:
-		return "INT64"
-	case iceberg.TimestampType, iceberg.TimestampTzType,
-		iceberg.TimestampNsType, iceberg.TimestampTzNsType:
-		return "INT64"
-	case iceberg.StringType:
-		return "BYTE_ARRAY"
-	case iceberg.UUIDType:
-		return "FIXED_LEN_BYTE_ARRAY"
-	case iceberg.FixedType:
-		return "FIXED_LEN_BYTE_ARRAY"
-	case iceberg.BinaryType:
-		return "BYTE_ARRAY"
-	case iceberg.DecimalType:
-		return "FIXED_LEN_BYTE_ARRAY"
-	default:
-		panic(fmt.Errorf("expected primitive type, got: %s", typ))
-	}
-}
-
 // ResolveParquetStatsColumnPaths maps Iceberg field names to the physical
 // Parquet paths in a data file. The schema used for writing may have sanitized
 // names or be a projection of the table schema. Java ignores these settings for

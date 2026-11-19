@@ -437,15 +437,6 @@ func streamManifest(ctx context.Context, manifestIO io.IO, manifest iceberg.Mani
 		true, false, visit)
 }
 
-func streamManifestWithOptions(ctx context.Context, manifestIO io.IO, manifest iceberg.ManifestFile,
-	partitionFilter, metricsEval func(iceberg.DataFile) (bool, error), discardDeleted, discardExisting bool,
-	visit func(iceberg.ManifestEntry) error,
-) error {
-	return streamManifestWithReadOptions(ctx,
-		manifestIO, manifest, partitionFilter, metricsEval, nil, false,
-		discardDeleted, discardExisting, visit)
-}
-
 func streamManifestWithReadOptions(ctx context.Context, manifestIO io.IO, manifest iceberg.ManifestFile,
 	partitionFilter, metricsEval func(iceberg.DataFile) (bool, error),
 	projection *iceberg.ManifestEntryProjection,

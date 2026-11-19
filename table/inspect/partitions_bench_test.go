@@ -15,13 +15,14 @@
 // specific language governing permissions and limitations
 // under the License.
 
-package table
+package inspect
 
 import (
 	"fmt"
 	"testing"
 
 	"github.com/apache/iceberg-go"
+	iceinternal "github.com/apache/iceberg-go/internal"
 	tblutils "github.com/apache/iceberg-go/table/internal"
 )
 
@@ -81,7 +82,7 @@ func benchmarkInspectPartitionAggregation(
 					aggregateCount++
 				}
 			} else {
-				partitionValues := dataFilePartition(file)
+				partitionValues := iceinternal.BorrowedDataFilePartition(file)
 				aggregate = tree.LookupPartition(partitionValues, partitionType)
 				if aggregate == nil {
 					partition := tblutils.CoercePartition(partitionValues, partitionType)
@@ -170,7 +171,7 @@ func BenchmarkInspectPartitionBinaryLookup(b *testing.B) {
 	tree := tblutils.NewPartitionAggregateTree()
 	partitions := make([]map[int]any, partitionCount)
 	for i := range partitions {
-		record := make(partitionRecord, fieldCount)
+		record := make(tblutils.PartitionRecord, fieldCount)
 		partition := make(map[int]any, fieldCount)
 		for j, field := range fields {
 			value := []byte(fmt.Sprintf("partition-%d-field-%d", i, j))

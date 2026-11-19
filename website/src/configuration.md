@@ -231,6 +231,7 @@ Source: [`catalog/hive/options.go`](https://github.com/apache/iceberg-go/blob/ma
 - `WithURI(uri string)` - Thrift URI for the Hive Metastore (e.g. `thrift://127.0.0.1:9083`).
 - `WithWarehouse(warehouse string)`
 - `WithProperties(props iceberg.Properties)`
+- `WithIORegistry(registry *io.Registry)` - use a catalog-scoped FileIO registry.
 
 Lock-check catalog properties (passed via `WithProperties` / `catalog.Load` props):
 
@@ -250,16 +251,18 @@ Source: [`catalog/glue/options.go`](https://github.com/apache/iceberg-go/blob/ma
 
 - `WithAWSConfig(cfg aws.Config)` - AWS SDK v2 config; respects the AWS default credential chain.
 - `WithAWSProperties(props AWSProperties)` - catalog properties, such as `glue.id` and the `s3.*` FileIO keys. `NewCatalog` ignores the `glue.region`, endpoint, credential, and retry keys; only `catalog.Load` reads them.
+- `WithIORegistry(registry *io.Registry)` - use a catalog-scoped FileIO registry.
 
 ### SQL (`catalog/sql`)
 
-The SQL catalog has no functional-option surface. Construct it with `NewCatalog`:
+Pass `sqlcat.WithIORegistry(registry)` to `NewCatalog` to select isolated FileIO:
 
 ```go
 db, _ := sql.Open(sqliteshim.ShimName, "file:catalog.db")
+registry := io.NewRegistry() // copy currently registered global schemes
 cat, err := sqlcat.NewCatalog(ctx, "default", db, sqlcat.SQLite, iceberg.Properties{
     "warehouse": "file:///tmp/warehouse",
-})
+}, sqlcat.WithIORegistry(registry)) // omit option for global FileIO
 ```
 
 Supported dialects: `sqlcat.Postgres`, `sqlcat.MySQL`, `sqlcat.SQLite`, `sqlcat.MSSQL`, `sqlcat.Oracle` (`catalog/sql/sql.go:50`).
@@ -446,7 +449,7 @@ Cloud schemes (`s3`, `gs`, `abfs`, etc.) are registered only when the matching b
 
 `io.GetRegisteredSchemes()` returns the current scheme list; `io.Unregister(scheme)` removes one.
 
-To register schemes at runtime without changing other users of the same process, create an independent registry (catalogs and `view.CreateView` still resolve through the default registry):
+To register schemes at runtime without changing other users of the same process, create an independent registry:
 
 ```go
 registry := io.NewRegistry()
@@ -457,6 +460,27 @@ fs, err := registry.LoadFS(ctx, props, "myfs://bucket/key")
 ```
 
 `io.NewRegistry()` copies schemes already registered globally (including blank-imported cloud backends) but keeps later registrations independent. `registry.Clone()` makes an isolated copy of another registry. `registry.Names()` lists the schemes registered in that instance. `registry.LoadFSFunc()` is the lazy factory equivalent. Global `io.LoadFS()` and `io.LoadFSFunc()` continue using the default registry.
+
+Pass the catalog's `WithIORegistry(registry)` option to `NewCatalog` in
+Glue, Hadoop, Hive, REST, or SQL. For direct view metadata creation or
+writes, pass `view.WithIORegistry(registry)` to the view helper.
+Omitting the option or passing nil uses the global registry. An empty
+non-nil registry has no registered schemes. A catalog-scoped registry does
+not affect `catalog.Load`, which uses the global registry with the built-in
+catalog registrars.
+
+The catalog holds the supplied registry, so registering or unregistering a
+scheme affects future FileIO resolutions. Hadoop opens its warehouse
+filesystem during construction and reuses it for warehouse operations.
+Use `registry.Clone()` to give another catalog its own set of schemes.
+
+View metadata creation accepts the same scoped registry option, but reading
+view metadata via `view.NewFromLocation` uses the filesystem factory explicitly
+passed by the caller. A catalog's own load and update methods supply their
+scoped factory. Passing credentials in `ioProps` configures the filesystem;
+only `metadataProps` are persisted in the view metadata.
+
+These FileIO options do not select a KMS implementation. `encryption.KMSRegistry` is separate; no catalog encryption path currently loads a KMS client.
 
 ### Catalog type registry
 
