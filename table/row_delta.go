@@ -792,62 +792,15 @@ func (rd *RowDelta) validate(cc *conflictContext, referenced []string) error {
 	return nil
 }
 
-// validateNoConcurrentDuplicateDataPaths rejects data paths this RowDelta adds
-// when a concurrent snapshot added the same path and it remains live on the
-// refreshed branch head. Snapshots and their changed manifest entries are
-// examined newest first, so a later concurrent deletion resolves the path
-// without reporting a conflict. This avoids scanning data files inherited from
-// the transaction's base snapshot.
+// validateNoConcurrentDuplicateDataPaths applies the shared retry check to
+// data paths staged by this RowDelta.
 func (rd *RowDelta) validateNoConcurrentDuplicateDataPaths(cc *conflictContext) error {
-	if len(rd.dataFiles) == 0 || len(cc.concurrent) == 0 {
-		return nil
+	paths := make(map[string]struct{}, len(rd.dataFiles))
+	for _, file := range rd.dataFiles {
+		paths[file.FilePath()] = struct{}{}
 	}
 
-	unresolved := make(map[string]struct{}, len(rd.dataFiles))
-	for _, f := range rd.dataFiles {
-		unresolved[f.FilePath()] = struct{}{}
-	}
-
-	for _, snap := range cc.concurrent {
-		if len(unresolved) == 0 {
-			break
-		}
-
-		// Resolve each candidate path against the newest snapshot that changed
-		// it. Prefer ADDED if a malformed snapshot contains both statuses for
-		// the same path, failing closed on an ambiguous live-file state.
-		changes := make(map[string]iceberg.ManifestEntryStatus)
-		if err := cc.forEachChangedEntryInSnapshot(snap, iceberg.ManifestContentData,
-			func(_ Snapshot, entry iceberg.ManifestEntry) error {
-				path := entry.DataFile().FilePath()
-				if _, ok := unresolved[path]; !ok {
-					return nil
-				}
-
-				switch entry.Status() {
-				case iceberg.EntryStatusADDED:
-					changes[path] = iceberg.EntryStatusADDED
-				case iceberg.EntryStatusDELETED:
-					if _, added := changes[path]; !added {
-						changes[path] = iceberg.EntryStatusDELETED
-					}
-				}
-
-				return nil
-			}); err != nil {
-			return err
-		}
-
-		for path, status := range changes {
-			delete(unresolved, path)
-			if status == iceberg.EntryStatusADDED {
-				return fmt.Errorf("%w: snapshot %d added data file %q already added by RowDelta",
-					ErrDuplicateDataFiles, snap.SnapshotID, path)
-			}
-		}
-	}
-
-	return nil
+	return validateNoConcurrentDuplicateDataPaths(cc, paths)
 }
 
 // validateNoConcurrentReplacedDVs enforces the v3 single-live-DV invariant on

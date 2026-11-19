@@ -177,6 +177,27 @@ func (t *Transaction) apply(updates []Update, reqs []Requirement) error {
 	return t.applyLocked(updates, reqs)
 }
 
+// applyWithDuplicateDataPathCheck stages the update and its retry validator
+// under one lock, so Commit cannot run between them.
+func (t *Transaction) applyWithDuplicateDataPathCheck(
+	updates []Update, reqs []Requirement, files []iceberg.DataFile,
+) error {
+	if err := t.checkNotNil(); err != nil {
+		return err
+	}
+	t.mx.Lock()
+	defer t.mx.Unlock()
+
+	if err := t.applyLocked(updates, reqs); err != nil {
+		return err
+	}
+	if validator := newDuplicateDataPathValidator(files); validator != nil {
+		t.validators = append(t.validators, validator)
+	}
+
+	return nil
+}
+
 // The caller must hold t.mx.
 func (t *Transaction) applyLocked(updates []Update, reqs []Requirement) error {
 	meta, err := t.txnMeta()
@@ -1181,6 +1202,9 @@ func (t *Transaction) ReplaceDataFilesByPath(ctx context.Context, filesToDelete,
 	if err := t.applyLocked(updates, reqs); err != nil {
 		return err
 	}
+	if validator := newDuplicateDataPathValidator(dataFiles); validator != nil {
+		t.validators = append(t.validators, validator)
+	}
 	if len(filesToAdd) > 0 {
 		// A replacement gets a newer data sequence number, so it would stop a
 		// concurrent equality delete from applying to the old file's rows.
@@ -1790,7 +1814,11 @@ func (t *Transaction) AddDataFiles(ctx context.Context, dataFiles []iceberg.Data
 		return err
 	}
 
-	return t.apply(updates, reqs)
+	if cfg.skipDuplicateCheck {
+		return t.apply(updates, reqs)
+	}
+
+	return t.applyWithDuplicateDataPathCheck(updates, reqs, dataFiles)
 }
 
 // ReplaceDataFiles replaces files using pre-built DataFile objects.
@@ -1938,6 +1966,9 @@ func (t *Transaction) ReplaceDataFiles(ctx context.Context, filesToDelete, files
 	defer t.mx.Unlock()
 	if err := t.applyLocked(updates, reqs); err != nil {
 		return err
+	}
+	if validator := newDuplicateDataPathValidator(filesToAdd); validator != nil {
+		t.validators = append(t.validators, validator)
 	}
 	if len(filesToAdd) > 0 || cfg.rewriteSemantics {
 		// Replacing data files must preserve deletes committed after the
@@ -2376,6 +2407,9 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 	if validator != nil {
 		t.validators = append(t.validators, validator)
 	}
+	if duplicateValidator := newDuplicateDataPathValidator(dataFilesToAdd); duplicateValidator != nil {
+		t.validators = append(t.validators, duplicateValidator)
+	}
 
 	return nil
 }
@@ -2510,7 +2544,11 @@ func (t *Transaction) AddDataFilesByPath(ctx context.Context, filePaths []string
 		return err
 	}
 
-	return t.apply(updates, reqs)
+	if ignoreDuplicates {
+		return t.apply(updates, reqs)
+	}
+
+	return t.applyWithDuplicateDataPathCheck(updates, reqs, dataFiles)
 }
 
 // OverwriteTable overwrites the table data using an Arrow Table.

@@ -147,10 +147,10 @@ var ErrCommitDiverged = errors.New("commit diverged: base snapshot is no longer 
 // a new transaction built from a reloaded table may succeed.
 var ErrConflictingDataFiles = fmt.Errorf("%w: concurrent data files added", ErrCommitFailed)
 
-// ErrDuplicateDataFiles is returned when a RowDelta adds the same data file
-// path twice or when a retry finds a concurrent addition of that path still
-// live. It does not wrap ErrCommitFailed: refreshing the table alone cannot
-// resolve a collision. The caller must use a different data file path.
+// ErrDuplicateDataFiles is returned when a writer stages duplicate data paths
+// or a retry finds a concurrent addition of a staged path still live.
+// It does not wrap ErrCommitFailed: a refresh cannot resolve the collision.
+// The caller must use a different data file path.
 var ErrDuplicateDataFiles = errors.New("duplicate data file path")
 
 // ErrConflictingDeleteFiles is returned when a concurrent commit added
@@ -620,6 +620,79 @@ func validateDataFilesExist(cc *conflictContext, referencedPaths []string) error
 	}
 
 	return dataFilesMissingError(missing, "missing")
+}
+
+// validateNoConcurrentDuplicateDataPaths checks whether any path this
+// transaction adds was also added by a concurrent snapshot and remains live.
+// Inspect the newest snapshot that changed each path, so a later deletion
+// releases it. An ambiguous add and delete in the same snapshot fails closed.
+func validateNoConcurrentDuplicateDataPaths(cc *conflictContext, addedPaths map[string]struct{}) error {
+	if cc == nil || len(addedPaths) == 0 || len(cc.concurrent) == 0 {
+		return nil
+	}
+
+	unresolved := make(map[string]struct{}, len(addedPaths))
+	for path := range addedPaths {
+		unresolved[path] = struct{}{}
+	}
+
+	for _, snap := range cc.concurrent {
+		if len(unresolved) == 0 {
+			break
+		}
+
+		// Resolve each candidate path against the newest snapshot that changed
+		// it. Prefer ADDED if a malformed snapshot contains both statuses for
+		// the same path, failing closed on an ambiguous live-file state.
+		changes := make(map[string]iceberg.ManifestEntryStatus)
+		if err := cc.forEachChangedEntryInSnapshot(snap, iceberg.ManifestContentData,
+			func(_ Snapshot, entry iceberg.ManifestEntry) error {
+				path := entry.DataFile().FilePath()
+				if _, ok := unresolved[path]; !ok {
+					return nil
+				}
+
+				switch entry.Status() {
+				case iceberg.EntryStatusADDED:
+					changes[path] = iceberg.EntryStatusADDED
+				case iceberg.EntryStatusDELETED:
+					if _, added := changes[path]; !added {
+						changes[path] = iceberg.EntryStatusDELETED
+					}
+				}
+
+				return nil
+			}); err != nil {
+			return err
+		}
+
+		for path, status := range changes {
+			delete(unresolved, path)
+			if status == iceberg.EntryStatusADDED {
+				return fmt.Errorf("%w: snapshot %d added data file %q already added by this transaction",
+					ErrDuplicateDataFiles, snap.SnapshotID, path)
+			}
+		}
+	}
+
+	return nil
+}
+
+// newDuplicateDataPathValidator snapshots staged paths rather than retaining
+// the caller's DataFile slice, which might be reused or changed after staging.
+func newDuplicateDataPathValidator(dataFiles []iceberg.DataFile) conflictValidatorFunc {
+	if len(dataFiles) == 0 {
+		return nil
+	}
+
+	paths := make(map[string]struct{}, len(dataFiles))
+	for _, file := range dataFiles {
+		paths[file.FilePath()] = struct{}{}
+	}
+
+	return func(cc *conflictContext) error {
+		return validateNoConcurrentDuplicateDataPaths(cc, paths)
+	}
 }
 
 // validateNoConcurrentDVs returns an error wrapping ErrConflictingDeleteFiles
