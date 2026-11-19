@@ -2253,8 +2253,10 @@ func (scan *Scan) ReadTasks(ctx context.Context, tasks []FileScanTask) (*arrow.S
 	schema, records, err := scan.readFileTasks(compute.WithAllocator(ctx, pool), tasks, nil)
 	if err != nil {
 		pool.close()
+
 		return nil, nil, err
 	}
+
 	return schema, func(yield func(arrow.RecordBatch, error) bool) {
 		defer pool.close()
 		records(yield)

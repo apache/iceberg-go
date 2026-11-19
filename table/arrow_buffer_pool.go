@@ -53,6 +53,7 @@ func (p *arrowBufferPool) Allocate(size int) []byte {
 	bucket.mu.Lock()
 	if bucket.count == 0 {
 		bucket.mu.Unlock()
+
 		return p.backing.Allocate(1 << class)[:size]
 	}
 	bucket.count--
@@ -62,6 +63,7 @@ func (p *arrowBufferPool) Allocate(size int) []byte {
 
 	buf = buf[:size]
 	clear(buf)
+
 	return buf
 }
 
@@ -76,6 +78,7 @@ func (p *arrowBufferPool) Reallocate(size int, buf []byte) []byte {
 	next := p.Allocate(size)
 	copy(next, buf)
 	p.Free(buf)
+
 	return next
 }
 
