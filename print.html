@@ -1807,9 +1807,9 @@ for _, s := range tbl.Metadata().Snapshots() {
 }
 </code></pre>
 <h3 id="comparing-physical-files-between-snapshots-v1-v3"><a class="header" href="#comparing-physical-files-between-snapshots-v1-v3">Comparing physical files between snapshots (v1-v3)</a></h3>
-<p>Use <code>tbl.Inspect().DiffSnapshotFiles</code> to compare the live content files
+<p>Use <code>tbl.DiffSnapshotFiles</code> to compare the live content files
 referenced by two snapshot IDs, including snapshots on different branches:</p>
-<pre><code class="language-go">diff, err := tbl.Inspect().DiffSnapshotFiles(ctx, fromSnapshotID, toSnapshotID)
+<pre><code class="language-go">diff, err := tbl.DiffSnapshotFiles(ctx, fromSnapshotID, toSnapshotID)
 if err != nil {
     return err
 }
@@ -1889,7 +1889,7 @@ err = txn.RollbackToSnapshot(targetSnapshotID)
 <p>Use <code>ValidateSnapshot</code> to inspect a snapshot's manifest list and entries without
 changing table data. This is especially useful for checking imported v1 tables
 before allowing them into production.</p>
-<pre><code class="language-go">report, err := tbl.Inspect().ValidateSnapshot(ctx, snapshotID)
+<pre><code class="language-go">report, err := tbl.ValidateSnapshot(ctx, snapshotID)
 if err != nil {
     return err // I/O failed or the scan was canceled; report may be incomplete.
 }
@@ -3375,6 +3375,15 @@ make integration-external-rest
 <li>Option constructors: <code>WithCleanupLocation</code>, <code>WithCleanupFilesOlderThan</code>, <code>WithCleanupDryRun</code>, <code>WithCleanupDeleteFunc</code>, <code>WithCleanupMaxConcurrency</code>, <code>WithPrefixMismatchMode</code>, <code>WithEqualSchemes</code>, <code>WithEqualAuthorities</code>. The four generic names (<code>WithLocation</code>, <code>WithFilesOlderThan</code>, <code>WithDryRun</code>, <code>WithDeleteFunc</code>) gained the <code>WithCleanup</code> prefix for consistency.</li>
 </ul>
 <p>Relatedly, the previously unexported <code>isGCEnabled</code> is now <code>table.IsGCEnabled</code>, so the new package can gate destructive operations on the <code>gc.enabled</code> table property.</p>
+</li>
+<li>
+<p><strong>Metadata tables moved to <code>table/inspect</code>.</strong> <code>Table.Inspect</code> and <code>InspectTable</code> are removed. Each metadata table is now a free function in the <code>table/inspect</code> package that takes the table as its second argument, matching <code>table/maintenance</code>. For example, <code>tbl.Inspect().Snapshots(ctx)</code> becomes <code>inspect.Snapshots(ctx, tbl)</code>. As with <code>table/maintenance</code>, <code>table/inspect</code> imports <code>table</code>, so <code>table.Table</code> cannot keep a deprecation shim. The following moved from <code>table</code> to <code>table/inspect</code>:</p>
+<ul>
+<li>Functions (now free functions taking the context, <code>*table.Table</code> and options): <code>History</code>, <code>Snapshots</code>, <code>Manifests</code>, <code>Refs</code>, <code>MetadataLogEntries</code>, <code>Entries</code>, <code>AllEntries</code>, <code>Files</code>, <code>DataFiles</code>, <code>DeleteFiles</code>, <code>AllFiles</code>, <code>AllDataFiles</code>, <code>AllDeleteFiles</code>, <code>AllManifests</code>, <code>Partitions</code>, <code>PositionDeletes</code>.</li>
+<li>Schema constructors: <code>HistorySchema</code>, <code>SnapshotsSchema</code>, <code>ManifestsSchema</code>, <code>RefsSchema</code>, <code>MetadataLogEntriesSchema</code>, <code>EntriesSchema</code>, <code>AllEntriesSchema</code>, <code>FilesSchema</code>, <code>DataFilesSchema</code>, <code>DeleteFilesSchema</code>, <code>AllFilesSchema</code>, <code>AllDataFilesSchema</code>, <code>AllDeleteFilesSchema</code>, <code>AllManifestsSchema</code>, <code>PartitionsSchema</code>, <code>PositionDeletesSchema</code>.</li>
+<li>Options: <code>InspectOption</code> is now <code>inspect.Option</code>, and <code>WithInspectAllocator</code> is now <code>inspect.WithAllocator</code>.</li>
+</ul>
+<p><code>DiffSnapshotFiles</code> and <code>ValidateSnapshot</code> stay in <code>table</code> as <code>Table</code> methods: <code>tbl.Inspect().DiffSnapshotFiles(ctx, from, to)</code> becomes <code>tbl.DiffSnapshotFiles(ctx, from, to)</code>, and <code>tbl.Inspect().ValidateSnapshot(ctx, id)</code> becomes <code>tbl.ValidateSnapshot(ctx, id)</code>. <code>ManifestProvider.UniqueManifests</code> is newly exported for the <code>all_*</code> tables.</p>
 </li>
 <li>
 <p><strong>Data-file replacement methods renamed.</strong> Use <code>ReplaceDataFilesByPath</code> for string paths. Use <code>ReplaceDataFiles</code> for prebuilt <code>DataFile</code> values instead of <code>ReplaceDataFilesWithDataFiles</code>.</p>
