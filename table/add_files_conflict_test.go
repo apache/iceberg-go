@@ -116,7 +116,7 @@ func TestAddDataFilesByPath_ConcurrentDuplicateRejected(t *testing.T) {
 			require.NoError(t, err)
 
 			_, err = txB.Commit(ctx)
-			require.ErrorIs(t, err, table.ErrConflictingDataFiles)
+			require.ErrorIs(t, err, table.ErrDuplicateDataFiles)
 			require.ErrorIs(t, err, table.ErrTransactionUnusable)
 			require.Equal(t, []int64{0, 1, 2}, idsInTable(t, loadCurrent(t, cat)))
 		})
@@ -140,7 +140,7 @@ func TestAddDataFiles_ConcurrentDuplicateRejected(t *testing.T) {
 
 	_, err = txB.Commit(ctx)
 	require.ErrorIs(t, err, table.ErrTransactionUnusable)
-	require.ErrorIs(t, err, table.ErrConflictingDataFiles)
+	require.ErrorIs(t, err, table.ErrDuplicateDataFiles)
 	require.Equal(t, []int64{0, 1, 2}, idsInTable(t, loadCurrent(t, cat)))
 }
 
@@ -225,10 +225,10 @@ func TestAddDataFilesByPath_RecommitAfterFailedCommitRejected(t *testing.T) {
 
 	_, err = txB.Commit(ctx)
 	require.ErrorIs(t, err, table.ErrCommitFailed)
-	require.NotErrorIs(t, err, table.ErrConflictingDataFiles)
+	require.NotErrorIs(t, err, table.ErrDuplicateDataFiles)
 
 	_, err = txB.Commit(ctx)
-	require.ErrorIs(t, err, table.ErrConflictingDataFiles)
+	require.ErrorIs(t, err, table.ErrDuplicateDataFiles)
 	require.Equal(t, []int64{0, 1, 2}, idsInTable(t, loadCurrent(t, cat)))
 }
 

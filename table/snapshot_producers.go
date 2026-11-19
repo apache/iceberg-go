@@ -1513,7 +1513,7 @@ func (sp *snapshotProducer) checkDuplicatePaths(ctx context.Context, parent *Sna
 			}
 			if _, ok := sp.duplicateCheckPaths[entry.DataFile().FilePath()]; ok {
 				return fmt.Errorf("%w: %w: data file %s is already present in snapshot %d",
-					ErrTransactionUnusable, ErrConflictingDataFiles, entry.DataFile().FilePath(), parent.SnapshotID)
+					ErrTransactionUnusable, ErrDuplicateDataFiles, entry.DataFile().FilePath(), parent.SnapshotID)
 			}
 		}
 	}

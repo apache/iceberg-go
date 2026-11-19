@@ -1701,7 +1701,7 @@ func (t *Transaction) ensureNameMapping() error {
 // the name mapping property.
 //
 // Unless [WithoutDuplicateCheck] is passed, it fails if a file path is already
-// in the table, and the commit fails with ErrConflictingDataFiles if a
+// in the table, and the commit fails with ErrDuplicateDataFiles if a
 // concurrent commit added one of the same paths first.
 //
 // Callers are responsible for ensuring each DataFile is valid and consistent with the table.
@@ -2414,7 +2414,7 @@ func WithAddDataFilesByPathPartitionValues(values map[string]map[int]any) AddDat
 // values cannot be inferred from column statistics (for example, bucket[N]).
 //
 // Unless ignoreDuplicates is set, it fails if a path is already in the table,
-// and the commit fails with ErrConflictingDataFiles if a concurrent commit
+// and the commit fails with ErrDuplicateDataFiles if a concurrent commit
 // added one of the same paths first.
 func (t *Transaction) AddDataFilesByPath(ctx context.Context, filePaths []string, snapshotProps iceberg.Properties, ignoreDuplicates bool, opts ...AddDataFilesByPathOption) error {
 	meta, err := t.txnMeta()
