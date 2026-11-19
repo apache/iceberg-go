@@ -2335,7 +2335,7 @@ func unpartitionedWrite(ctx context.Context, factory *writerFactory, records ite
 		defer close(outputCh)
 		defer factory.stopCount()
 
-		writer := factory.newRollingDataWriter(writerCtx, "", nil, outputCh)
+		writer := factory.newRollingDataWriter(writerCtx, "", nil, outputCh, factory.currentSpec)
 		for rec, err := range records {
 			if err != nil {
 				errCh <- err
@@ -2434,7 +2434,18 @@ func positionDeleteRecordsToDataFiles(ctx context.Context, rootLocation string, 
 	targetFileSize := int64(meta.props.GetInt(WriteDeleteTargetFileSizeBytesKey,
 		WriteDeleteTargetFileSizeBytesDefault))
 
-	if latestMetadata.PartitionSpec().IsUnpartitioned() {
+	currentSpec := latestMetadata.PartitionSpec()
+	// The unpartitioned writer stamps the current spec on every file, so it is
+	// safe only when every target file was written under that spec.
+	useUnpartitionedWriter := currentSpec.IsUnpartitioned()
+	for _, partition := range partitionContextByFilePath {
+		if int(partition.specID) != currentSpec.ID() {
+			useUnpartitionedWriter = false
+
+			break
+		}
+	}
+	if useUnpartitionedWriter {
 		cw := newConcurrentDataFileWriter(func(rootLocation string, fs iceio.WriteFileIO, meta *MetadataBuilder, props iceberg.Properties, opts ...dataFileWriterOption) (dataFileWriter, error) {
 			return newPositionDeleteWriter(rootLocation, fs, meta, props, opts...)
 		}, withSchemaSanitization(false))
