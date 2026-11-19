@@ -708,6 +708,7 @@ assume parity on it in multi-client deployments.</p>
 <li><code>WithURI(uri string)</code> - Thrift URI for the Hive Metastore (e.g. <code>thrift://127.0.0.1:9083</code>).</li>
 <li><code>WithWarehouse(warehouse string)</code></li>
 <li><code>WithProperties(props iceberg.Properties)</code></li>
+<li><code>WithIORegistry(registry *io.Registry)</code> - use a catalog-scoped FileIO registry.</li>
 </ul>
 <p>Lock-check catalog properties (passed via <code>WithProperties</code> / <code>catalog.Load</code> props):</p>
 <div class="table-wrapper"><table><thead><tr><th>Property</th><th>Default</th><th>Description</th></tr></thead><tbody>
@@ -724,13 +725,15 @@ assume parity on it in multi-client deployments.</p>
 <ul>
 <li><code>WithAWSConfig(cfg aws.Config)</code> - AWS SDK v2 config; respects the AWS default credential chain.</li>
 <li><code>WithAWSProperties(props AWSProperties)</code> - catalog properties, such as <code>glue.id</code> and the <code>s3.*</code> FileIO keys. <code>NewCatalog</code> ignores the <code>glue.region</code>, endpoint, credential, and retry keys; only <code>catalog.Load</code> reads them.</li>
+<li><code>WithIORegistry(registry *io.Registry)</code> - use a catalog-scoped FileIO registry.</li>
 </ul>
 <h3 id="sql-catalogsql"><a class="header" href="#sql-catalogsql">SQL (<code>catalog/sql</code>)</a></h3>
-<p>The SQL catalog has no functional-option surface. Construct it with <code>NewCatalog</code>:</p>
+<p>Pass <code>sqlcat.WithIORegistry(registry)</code> to <code>NewCatalog</code> to select isolated FileIO:</p>
 <pre><code class="language-go">db, _ := sql.Open(sqliteshim.ShimName, &quot;file:catalog.db&quot;)
+registry := io.NewRegistry() // copy currently registered global schemes
 cat, err := sqlcat.NewCatalog(ctx, &quot;default&quot;, db, sqlcat.SQLite, iceberg.Properties{
     &quot;warehouse&quot;: &quot;file:///tmp/warehouse&quot;,
-})
+}, sqlcat.WithIORegistry(registry)) // omit option for global FileIO
 </code></pre>
 <p>Supported dialects: <code>sqlcat.Postgres</code>, <code>sqlcat.MySQL</code>, <code>sqlcat.SQLite</code>, <code>sqlcat.MSSQL</code>, <code>sqlcat.Oracle</code> (<code>catalog/sql/sql.go:50</code>).</p>
 <h3 id="shared-options-on-the-base-catalog-package"><a class="header" href="#shared-options-on-the-base-catalog-package">Shared options on the base <code>catalog</code> package</a></h3>
@@ -884,7 +887,7 @@ func init() {
 <p><code>io.Register</code> and <code>io.MustRegister</code> both panic for invalid or duplicate global schemes, preserving the existing registration contract. <code>registry.Register</code> on an independent registry returns <code>ErrInvalidSchemeFactory</code> or <code>ErrSchemeAlreadyRegistered</code> instead. Built-in schemes: <code>file</code>, <code>&quot;&quot;</code> (the empty scheme).
 Cloud schemes (<code>s3</code>, <code>gs</code>, <code>abfs</code>, etc.) are registered only when the matching backend package under <code>io/gocloud</code> is blank-imported.</p>
 <p><code>io.GetRegisteredSchemes()</code> returns the current scheme list; <code>io.Unregister(scheme)</code> removes one.</p>
-<p>To register schemes at runtime without changing other users of the same process, create an independent registry (catalogs and <code>view.CreateView</code> still resolve through the default registry):</p>
+<p>To register schemes at runtime without changing other users of the same process, create an independent registry:</p>
 <pre><code class="language-go">registry := io.NewRegistry()
 if err := registry.Register(&quot;myfs&quot;, myFactory); err != nil {
     return err
@@ -892,6 +895,23 @@ if err := registry.Register(&quot;myfs&quot;, myFactory); err != nil {
 fs, err := registry.LoadFS(ctx, props, &quot;myfs://bucket/key&quot;)
 </code></pre>
 <p><code>io.NewRegistry()</code> copies schemes already registered globally (including blank-imported cloud backends) but keeps later registrations independent. <code>registry.Clone()</code> makes an isolated copy of another registry. <code>registry.Names()</code> lists the schemes registered in that instance. <code>registry.LoadFSFunc()</code> is the lazy factory equivalent. Global <code>io.LoadFS()</code> and <code>io.LoadFSFunc()</code> continue using the default registry.</p>
+<p>Pass the catalog's <code>WithIORegistry(registry)</code> option to <code>NewCatalog</code> in
+Glue, Hadoop, Hive, REST, or SQL. For direct view metadata creation or
+writes, pass <code>view.WithIORegistry(registry)</code> to the view helper.
+Omitting the option or passing nil uses the global registry. An empty
+non-nil registry has no registered schemes. A catalog-scoped registry does
+not affect <code>catalog.Load</code>, which uses the global registry with the built-in
+catalog registrars.</p>
+<p>The catalog holds the supplied registry, so registering or unregistering a
+scheme affects future FileIO resolutions. Hadoop opens its warehouse
+filesystem during construction and reuses it for warehouse operations.
+Use <code>registry.Clone()</code> to give another catalog its own set of schemes.</p>
+<p>View metadata creation accepts the same scoped registry option, but reading
+view metadata via <code>view.NewFromLocation</code> uses the filesystem factory explicitly
+passed by the caller. A catalog's own load and update methods supply their
+scoped factory. Passing credentials in <code>ioProps</code> configures the filesystem;
+only <code>metadataProps</code> are persisted in the view metadata.</p>
+<p>These FileIO options do not select a KMS implementation. <code>encryption.KMSRegistry</code> is separate; no catalog encryption path currently loads a KMS client.</p>
 <h3 id="catalog-type-registry"><a class="header" href="#catalog-type-registry">Catalog type registry</a></h3>
 <p>Register a custom catalog type with <a href="https://github.com/apache/iceberg-go/blob/main/catalog/registry.go"><code>catalog.Register</code></a>:</p>
 <pre><code class="language-go">import (
@@ -2036,6 +2056,13 @@ v.Schemas()               // map[int]*iceberg.Schema
 v.Properties()            // iceberg.Properties
 </code></pre>
 <p><code>view.New(ident, meta, metadataLocation)</code> constructs a view from already-loaded metadata; <code>view.NewFromLocation(ctx, ident, metadataLocation, fsysFactory)</code> loads metadata from disk or object storage.</p>
+<p>Pass <code>view.WithIORegistry(registry)</code> to <code>view.CreateView</code>,
+<code>view.CreateViewWithIOProperties</code>, <code>view.CreateViewFromVersion</code>, or
+<code>view.WriteMetadata</code> to use isolated FileIO. For <code>view.NewFromLocation</code>,
+pass a filesystem factory from the registry. The IO-properties helpers
+keep filesystem configuration (<code>ioProps</code>) separate from persisted view
+properties (<code>metadataProps</code>). See
+<a href="./configuration.html#file-system-credentials">FileIO configuration</a>.</p>
 <h2 id="iceberg--arrow-types"><a class="header" href="#iceberg--arrow-types">Iceberg ↔ Arrow types</a></h2>
 <p>When iceberg-go converts an Iceberg schema to Arrow (e.g. for the scanner output) or vice versa, the type mapping is:</p>
 <div class="table-wrapper"><table><thead><tr><th>Iceberg type</th><th>Arrow type</th></tr></thead><tbody>
@@ -3127,6 +3154,9 @@ make integration-external-rest
 <h3 id="unreleased-compatibility-notes"><a class="header" href="#unreleased-compatibility-notes">Unreleased compatibility notes</a></h3>
 <ul>
 <li>
+<p><strong>Catalog and view FileIO may use isolated registries.</strong> Glue, Hadoop, Hive and SQL accept <code>WithIORegistry</code>, as REST already does. <code>hadoop.NewCatalog</code>, <code>sql.NewCatalog</code>, <code>view.CreateView</code>, <code>view.CreateViewWithIOProperties</code>, <code>view.CreateViewFromVersion</code> and <code>view.WriteMetadata</code> now take a trailing variadic option. Existing calls still compile. Function values assigned to a type with the old signature need a wrapper that calls the function without options. The default remains the global registry, including for <code>catalog.Load</code>.</p>
+</li>
+<li>
 <p><strong><code>RowDelta.Commit</code> can be called once per builder.</strong> A second <code>Commit</code> on the same <code>RowDelta</code> now returns an error wrapping <code>table.ErrInvalidOperation</code> and stages nothing, even if the first call failed, as <code>RewriteFiles.Commit</code> does. Previously, calling <code>Commit</code> again after a failed first call could succeed, and calling it again after a successful one staged the builder's files a second time. Create a new builder with <code>Transaction.NewRowDelta</code> for each commit.</p>
 </li>
 <li>
@@ -3417,6 +3447,9 @@ make integration-external-rest
 </li>
 <li>
 <p><strong>Orphan cleanup refreshes metadata before deletion.</strong> Non-dry-run <code>DeleteOrphanFiles</code> requires a catalog-backed table and refreshes it before planning and again before deleting files. <code>ExecuteOrphanCleanup</code> also refreshes before deleting from a non-empty plan. If a saved plan is stale, refresh or reload the table before planning again. Dry runs still work without a catalog.</p>
+</li>
+<li>
+<p><strong>Position deletes use the data file's partition spec.</strong> After partition spec evolution, <code>Delete</code> on a merge-on-read table wrote v2 position delete files with the current spec instead of the target data file's spec. Scans and re-running <code>Delete</code> on such a table can fail with <code>invalid metadata: position delete file ... uses partition spec N, but data file ... uses partition spec M</code>; some deletes are instead silently missed, so the rows stay visible, and re-running those deletes applies them. New deletes carry the data file's spec. For the mismatch error, remove the delete files whose spec ID differs from their data file's with <code>Transaction.NewRewrite</code> (<code>RewriteFiles.DeleteFile</code>), then re-run those deletes; until then the rows they deleted are visible again.</p>
 </li>
 </ul>
 <h2 id="verifying-and-producing-releases"><a class="header" href="#verifying-and-producing-releases">Verifying and producing releases</a></h2>

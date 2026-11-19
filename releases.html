@@ -249,6 +249,9 @@
 <h3 id="unreleased-compatibility-notes"><a class="header" href="#unreleased-compatibility-notes">Unreleased compatibility notes</a></h3>
 <ul>
 <li>
+<p><strong>Catalog and view FileIO may use isolated registries.</strong> Glue, Hadoop, Hive and SQL accept <code>WithIORegistry</code>, as REST already does. <code>hadoop.NewCatalog</code>, <code>sql.NewCatalog</code>, <code>view.CreateView</code>, <code>view.CreateViewWithIOProperties</code>, <code>view.CreateViewFromVersion</code> and <code>view.WriteMetadata</code> now take a trailing variadic option. Existing calls still compile. Function values assigned to a type with the old signature need a wrapper that calls the function without options. The default remains the global registry, including for <code>catalog.Load</code>.</p>
+</li>
+<li>
 <p><strong><code>RowDelta.Commit</code> can be called once per builder.</strong> A second <code>Commit</code> on the same <code>RowDelta</code> now returns an error wrapping <code>table.ErrInvalidOperation</code> and stages nothing, even if the first call failed, as <code>RewriteFiles.Commit</code> does. Previously, calling <code>Commit</code> again after a failed first call could succeed, and calling it again after a successful one staged the builder's files a second time. Create a new builder with <code>Transaction.NewRowDelta</code> for each commit.</p>
 </li>
 <li>
@@ -539,6 +542,9 @@
 </li>
 <li>
 <p><strong>Orphan cleanup refreshes metadata before deletion.</strong> Non-dry-run <code>DeleteOrphanFiles</code> requires a catalog-backed table and refreshes it before planning and again before deleting files. <code>ExecuteOrphanCleanup</code> also refreshes before deleting from a non-empty plan. If a saved plan is stale, refresh or reload the table before planning again. Dry runs still work without a catalog.</p>
+</li>
+<li>
+<p><strong>Position deletes use the data file's partition spec.</strong> After partition spec evolution, <code>Delete</code> on a merge-on-read table wrote v2 position delete files with the current spec instead of the target data file's spec. Scans and re-running <code>Delete</code> on such a table can fail with <code>invalid metadata: position delete file ... uses partition spec N, but data file ... uses partition spec M</code>; some deletes are instead silently missed, so the rows stay visible, and re-running those deletes applies them. New deletes carry the data file's spec. For the mismatch error, remove the delete files whose spec ID differs from their data file's with <code>Transaction.NewRewrite</code> (<code>RewriteFiles.DeleteFile</code>), then re-run those deletes; until then the rows they deleted are visible again.</p>
 </li>
 </ul>
 <h2 id="verifying-and-producing-releases"><a class="header" href="#verifying-and-producing-releases">Verifying and producing releases</a></h2>

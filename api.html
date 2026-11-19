@@ -896,6 +896,13 @@ v.Schemas()               // map[int]*iceberg.Schema
 v.Properties()            // iceberg.Properties
 </code></pre>
 <p><code>view.New(ident, meta, metadataLocation)</code> constructs a view from already-loaded metadata; <code>view.NewFromLocation(ctx, ident, metadataLocation, fsysFactory)</code> loads metadata from disk or object storage.</p>
+<p>Pass <code>view.WithIORegistry(registry)</code> to <code>view.CreateView</code>,
+<code>view.CreateViewWithIOProperties</code>, <code>view.CreateViewFromVersion</code>, or
+<code>view.WriteMetadata</code> to use isolated FileIO. For <code>view.NewFromLocation</code>,
+pass a filesystem factory from the registry. The IO-properties helpers
+keep filesystem configuration (<code>ioProps</code>) separate from persisted view
+properties (<code>metadataProps</code>). See
+<a href="./configuration.html#file-system-credentials">FileIO configuration</a>.</p>
 <h2 id="iceberg--arrow-types"><a class="header" href="#iceberg--arrow-types">Iceberg ↔ Arrow types</a></h2>
 <p>When iceberg-go converts an Iceberg schema to Arrow (e.g. for the scanner output) or vice versa, the type mapping is:</p>
 <div class="table-wrapper"><table><thead><tr><th>Iceberg type</th><th>Arrow type</th></tr></thead><tbody>
