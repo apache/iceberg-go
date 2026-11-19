@@ -1008,10 +1008,6 @@ func cleanupCompactionOutputs(fs iceio.IO, batchResults []CompactionGroupResult)
 	return cleanupErr
 }
 
-func accumulateGroupMetrics(r *RewriteResult, gr CompactionGroupResult) {
-	accumulateGroupMetricsWithDeletes(r, gr, len(gr.SafePosDeletes), len(gr.SafeDeletionVectors))
-}
-
 func accumulateGroupMetricsWithDeletes(r *RewriteResult, gr CompactionGroupResult, positionDeletes, deletionVectors int) {
 	r.RewrittenGroups++
 	r.AddedDataFiles += len(gr.NewDataFiles)
