@@ -1523,6 +1523,15 @@ func WithArrowBatchSize(n int) ScanOption {
 	}
 }
 
+// WithArrowBufferReuse allows a scan to reuse released Arrow buffers when using
+// Arrow's Go allocator. Each read can cache up to 8 MiB until iteration ends.
+// Record batches can still be retained by the caller after iteration.
+func WithArrowBufferReuse() ScanOption {
+	return func(scan *Scan) {
+		scan.reuseArrowBuffers = true
+	}
+}
+
 func (t Table) Scan(opts ...ScanOption) *Scan {
 	directive, directiveErr := t.ScanPlanningDirective()
 	s := &Scan{
