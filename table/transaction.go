@@ -1767,6 +1767,9 @@ func (t *Transaction) AddDataFiles(ctx context.Context, dataFiles []iceberg.Data
 	}
 
 	appendFiles := t.appendSnapshotProducer(meta, wfs, snapshotProps)
+	if !cfg.skipDuplicateCheck {
+		appendFiles.duplicateCheckPaths = setToAdd
+	}
 	for _, df := range dataFiles {
 		appendFiles.appendDataFile(df)
 	}
@@ -1776,17 +1779,7 @@ func (t *Transaction) AddDataFiles(ctx context.Context, dataFiles []iceberg.Data
 		return err
 	}
 
-	if err := t.apply(updates, reqs); err != nil {
-		return err
-	}
-
-	if !cfg.skipDuplicateCheck {
-		t.addValidator(func(cc *conflictContext) error {
-			return validateNoConcurrentDuplicateDataFiles(cc, setToAdd)
-		})
-	}
-
-	return nil
+	return t.apply(updates, reqs)
 }
 
 // ReplaceDataFiles replaces files using pre-built DataFile objects.
@@ -2496,6 +2489,9 @@ func (t *Transaction) AddDataFilesByPath(ctx context.Context, filePaths []string
 		return err
 	}
 	updater := t.appendSnapshotProducer(meta, wfs, snapshotProps)
+	if !ignoreDuplicates {
+		updater.duplicateCheckPaths = set
+	}
 
 	dataFiles, err := filesToDataFiles(ctx, fs, meta, filePaths, addFilesOp.concurrency, partitionValues)
 	if err != nil {
@@ -2510,17 +2506,7 @@ func (t *Transaction) AddDataFilesByPath(ctx context.Context, filePaths []string
 		return err
 	}
 
-	if err := t.apply(updates, reqs); err != nil {
-		return err
-	}
-
-	if !ignoreDuplicates && len(set) > 0 {
-		t.addValidator(func(cc *conflictContext) error {
-			return validateNoConcurrentDuplicateDataFiles(cc, set)
-		})
-	}
-
-	return nil
+	return t.apply(updates, reqs)
 }
 
 // OverwriteTable overwrites the table data using an Arrow Table.

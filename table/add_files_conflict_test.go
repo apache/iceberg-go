@@ -6,7 +6,7 @@
 // "License"); you may not use this file except in compliance
 // with the License.  You may obtain a copy of the License at
 //
-//	http://www.apache.org/licenses/LICENSE-2.0
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing,
 // software distributed under the License is distributed on an
@@ -99,7 +99,7 @@ func newImportedDataFile(t *testing.T, path string) iceberg.DataFile {
 // TestAddDataFilesByPath_ConcurrentDuplicateRejected proves the duplicate
 // check covers files a concurrent commit added. Both writers plan against
 // the same snapshot, so both pass the plan-time check; without the
-// commit-time validator, the loser's retry would add the file a second time
+// commit-time check, the loser's retry would add the file a second time
 // and its rows would be read twice.
 func TestAddDataFilesByPath_ConcurrentDuplicateRejected(t *testing.T) {
 	for _, version := range []int{2, 3} {
@@ -139,13 +139,14 @@ func TestAddDataFiles_ConcurrentDuplicateRejected(t *testing.T) {
 	require.NoError(t, err)
 
 	_, err = txB.Commit(ctx)
+	require.ErrorIs(t, err, table.ErrTransactionUnusable)
 	require.ErrorIs(t, err, table.ErrConflictingDataFiles)
 	require.Equal(t, []int64{0, 1, 2}, idsInTable(t, loadCurrent(t, cat)))
 }
 
 // TestAddDataFilesByPath_ConcurrentDistinctFilesCommit is the control: a
-// concurrent commit that added a different file must not trip the validator,
-// so the replayed commit lands with both files.
+// concurrent commit that added a different file must not trip the duplicate
+// check, so the replayed commit lands with both files.
 func TestAddDataFilesByPath_ConcurrentDistinctFilesCommit(t *testing.T) {
 	ctx := t.Context()
 	tbl, _, imported := newAddFilesConflictTable(t, 2, "4")
@@ -228,5 +229,93 @@ func TestAddDataFilesByPath_RecommitAfterFailedCommitRejected(t *testing.T) {
 
 	_, err = txB.Commit(ctx)
 	require.ErrorIs(t, err, table.ErrConflictingDataFiles)
+	require.Equal(t, []int64{0, 1, 2}, idsInTable(t, loadCurrent(t, cat)))
+}
+
+// TestAddDataFilesByPath_ConcurrentRollbackCommits checks that a concurrent
+// rollback past the writer's base does not fail the commit: the retry
+// rebuilds on the rolled-back head, where the path is not present.
+func TestAddDataFilesByPath_ConcurrentRollbackCommits(t *testing.T) {
+	ctx := t.Context()
+	tbl, cat, imported := newAddFilesConflictTable(t, 2, "4")
+	seedID := tbl.CurrentSnapshot().SnapshotID
+
+	arrowSc, err := table.SchemaToArrowSchema(tbl.Schema(), nil, false, false)
+	require.NoError(t, err)
+	extra := tbl.Location() + "/data/extra.parquet"
+	writeParquetFile(t, extra, arrowSc, `[{"id": 9, "data": "z"}]`)
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.AddDataFilesByPath(ctx, []string{extra}, nil, false))
+	tbl, err = tx.Commit(ctx)
+	require.NoError(t, err)
+
+	txB := tbl.NewTransaction()
+	require.NoError(t, txB.AddDataFilesByPath(ctx, []string{imported}, nil, false))
+
+	rollback := loadCurrent(t, cat).NewTransaction()
+	require.NoError(t, rollback.RollbackToSnapshot(seedID))
+	_, err = rollback.Commit(ctx)
+	require.NoError(t, err)
+
+	_, err = txB.Commit(ctx)
+	require.NoError(t, err)
+	require.Equal(t, []int64{0, 1, 2}, idsInTable(t, loadCurrent(t, cat)))
+}
+
+// TestAddDataFilesByPath_ConcurrentExpiryCommits checks that expiring the
+// snapshots committed after the writer's base does not fail the commit.
+func TestAddDataFilesByPath_ConcurrentExpiryCommits(t *testing.T) {
+	ctx := t.Context()
+	tbl, cat, imported := newAddFilesConflictTable(t, 2, "4")
+
+	arrowSc, err := table.SchemaToArrowSchema(tbl.Schema(), nil, false, false)
+	require.NoError(t, err)
+
+	txB := tbl.NewTransaction()
+	require.NoError(t, txB.AddDataFilesByPath(ctx, []string{imported}, nil, false))
+
+	for i, name := range []string{"x", "y"} {
+		path := tbl.Location() + "/data/" + name + ".parquet"
+		writeParquetFile(t, path, arrowSc, `[{"id": `+strconv.Itoa(3+i)+`, "data": "q"}]`)
+		tx := loadCurrent(t, cat).NewTransaction()
+		require.NoError(t, tx.AddDataFilesByPath(ctx, []string{path}, nil, false))
+		_, err := tx.Commit(ctx)
+		require.NoError(t, err)
+	}
+
+	expire := loadCurrent(t, cat).NewTransaction()
+	require.NoError(t, expire.ExpireSnapshots(table.WithOlderThan(0), table.WithRetainLast(1)))
+	_, err = expire.Commit(ctx)
+	require.NoError(t, err)
+	require.Len(t, loadCurrent(t, cat).Metadata().Snapshots(), 1)
+
+	_, err = txB.Commit(ctx)
+	require.NoError(t, err)
+	require.Equal(t, []int64{0, 1, 2, 3, 4}, idsInTable(t, loadCurrent(t, cat)))
+}
+
+// TestAddDataFilesByPath_ConcurrentAddThenDeleteCommits checks that a path a
+// concurrent commit added and a later commit deleted is not a duplicate: it is
+// no longer live, so the retry adds it.
+func TestAddDataFilesByPath_ConcurrentAddThenDeleteCommits(t *testing.T) {
+	ctx := t.Context()
+	tbl, cat, imported := newAddFilesConflictTable(t, 2, "4")
+
+	txB := tbl.NewTransaction()
+	require.NoError(t, txB.AddDataFilesByPath(ctx, []string{imported}, nil, false))
+
+	txA := tbl.NewTransaction()
+	require.NoError(t, txA.AddDataFilesByPath(ctx, []string{imported}, nil, false))
+	_, err := txA.Commit(ctx)
+	require.NoError(t, err)
+
+	del := loadCurrent(t, cat).NewTransaction()
+	require.NoError(t, del.Delete(ctx, iceberg.GreaterThanEqual(iceberg.Reference("id"), int64(1)), nil))
+	_, err = del.Commit(ctx)
+	require.NoError(t, err)
+	require.Equal(t, []int64{0}, idsInTable(t, loadCurrent(t, cat)))
+
+	_, err = txB.Commit(ctx)
+	require.NoError(t, err)
 	require.Equal(t, []int64{0, 1, 2}, idsInTable(t, loadCurrent(t, cat)))
 }
