@@ -21,35 +21,83 @@ import (
 	"testing"
 	"testing/synctest"
 
+	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	"github.com/apache/iceberg-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// Path-based APIs need a real Parquet file so they can read its metadata.
+func writeDuplicateRetryParquet(t *testing.T, fs *memIO, path string) {
+	t.Helper()
+
+	schema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
+	}, nil)
+	builder := array.NewInt32Builder(memory.DefaultAllocator)
+	builder.Append(42)
+	col := builder.NewArray()
+	builder.Release()
+	defer col.Release()
+
+	rec := array.NewRecordBatch(schema, []arrow.Array{col}, 1)
+	defer rec.Release()
+	table := array.NewTableFromRecords(schema, []arrow.RecordBatch{rec})
+	defer table.Release()
+
+	out, err := fs.Create(t.Context(), path)
+	require.NoError(t, err)
+	require.NoError(t, pqarrow.WriteTable(table, out, table.NumRows(), nil, pqarrow.DefaultWriterProps()))
+	require.NoError(t, out.Close())
+}
 
 // An operation that checked its base snapshot must not replay an addition
 // against a concurrently added file with the same path.
 func TestDirectDataFileWritesRejectConcurrentDuplicatePaths(t *testing.T) {
 	cases := []struct {
 		name  string
-		stage func(*testing.T, *Transaction) error
+		stage func(*testing.T, *Transaction, *memIO) error
 	}{
 		{
 			name: "AddDataFiles",
-			stage: func(t *testing.T, tx *Transaction) error {
+			stage: func(t *testing.T, tx *Transaction, _ *memIO) error {
 				return tx.AddDataFiles(t.Context(), []iceberg.DataFile{retryCleanupFile(t, "duplicate")}, nil)
 			},
 		},
 		{
 			name: "ReplaceDataFiles",
-			stage: func(t *testing.T, tx *Transaction) error {
+			stage: func(t *testing.T, tx *Transaction, _ *memIO) error {
 				return tx.ReplaceDataFiles(t.Context(),
 					[]iceberg.DataFile{retryCleanupFile(t, "base")},
 					[]iceberg.DataFile{retryCleanupFile(t, "duplicate")}, nil)
 			},
 		},
+
+		{
+			name: "AddDataFilesByPath",
+			stage: func(t *testing.T, tx *Transaction, fs *memIO) error {
+				path := retryCleanupFile(t, "duplicate").FilePath()
+				writeDuplicateRetryParquet(t, fs, path)
+
+				return tx.AddDataFilesByPath(t.Context(), []string{path}, nil, false)
+			},
+		},
+		{
+			name: "ReplaceDataFilesByPath",
+			stage: func(t *testing.T, tx *Transaction, fs *memIO) error {
+				path := retryCleanupFile(t, "duplicate").FilePath()
+				writeDuplicateRetryParquet(t, fs, path)
+
+				return tx.ReplaceDataFilesByPath(t.Context(),
+					[]string{retryCleanupFile(t, "base").FilePath()}, []string{path}, nil)
+			},
+		},
 		{
 			name: "ReplaceFiles",
-			stage: func(t *testing.T, tx *Transaction) error {
+			stage: func(t *testing.T, tx *Transaction, _ *memIO) error {
 				return tx.ReplaceFiles(t.Context(),
 					[]iceberg.DataFile{retryCleanupFile(t, "base")},
 					[]iceberg.DataFile{retryCleanupFile(t, "duplicate")}, nil, nil)
@@ -65,7 +113,7 @@ func TestDirectDataFileWritesRejectConcurrentDuplicatePaths(t *testing.T) {
 				})
 				tbl, _ = appendOnBranch(t, tbl, MainBranch, "base")
 				tx := tbl.NewTransaction()
-				require.NoError(t, tc.stage(t, tx))
+				require.NoError(t, tc.stage(t, tx, fs))
 				peerHead := peerAppend(t, fs, cat, MainBranch, "duplicate")
 				attemptsBefore := cat.attempts.Load()
 
