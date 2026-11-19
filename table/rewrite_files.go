@@ -128,25 +128,27 @@ func (r *RewriteFiles) DeleteFile(df iceberg.DataFile) *RewriteFiles {
 // consequence of rewriting data files. These files are removed in the same
 // snapshot, but they are not considered source files for an explicit delete
 // file rewrite.
-func (r *RewriteFiles) removeAutomaticDeleteFile(df iceberg.DataFile) *RewriteFiles {
+func (r *RewriteFiles) removeAutomaticDeleteFile(df iceberg.DataFile, deletionVector bool) {
 	if r.err != nil {
-		return r
+		return
 	}
 	if df == nil {
 		r.err = fmt.Errorf("%w: automatic delete removal got nil data file", ErrInvalidOperation)
 
-		return r
+		return
 	}
 
-	switch df.ContentType() {
-	case iceberg.EntryContentPosDeletes, iceberg.EntryContentEqDeletes:
-		r.autoDeleteFilesToRemove = append(r.autoDeleteFilesToRemove, df)
-	default:
-		r.err = fmt.Errorf("%w: automatic delete removal got unsupported content type %s (%s)",
-			ErrInvalidOperation, df.ContentType(), df.FilePath())
-	}
+	if df.ContentType() != iceberg.EntryContentPosDeletes || IsDeletionVector(df) != deletionVector {
+		want := "position delete file"
+		if deletionVector {
+			want = "deletion vector"
+		}
+		r.err = fmt.Errorf("%w: automatic delete removal expected a %s for %q",
+			ErrInvalidOperation, want, df.FilePath())
 
-	return r
+		return
+	}
+	r.autoDeleteFilesToRemove = append(r.autoDeleteFilesToRemove, df)
 }
 
 // AddDataFile queues a new data file. Use [RewriteFiles.AddDeleteFile] for
@@ -293,12 +295,11 @@ func (r *RewriteFiles) ApplyResult(gr CompactionGroupResult) *RewriteFiles {
 	for _, df := range gr.NewDataFiles {
 		r.AddFile(df)
 	}
-	// DVs are automatic removals keyed by their referenced data file.
 	for _, df := range gr.SafePosDeletes {
-		r.removeAutomaticDeleteFile(df)
+		r.removeAutomaticDeleteFile(df, false)
 	}
 	for _, df := range gr.SafeDeletionVectors {
-		r.removeAutomaticDeleteFile(df)
+		r.removeAutomaticDeleteFile(df, true)
 	}
 
 	return r

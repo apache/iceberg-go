@@ -546,12 +546,9 @@ func (t *Transaction) RewriteDataFiles(ctx context.Context, groups []CompactionT
 
 	// Count only automatic delete-file removals that the coordinator kept.
 	for _, df := range rewrite.autoDeleteFilesToRemove {
-		switch {
-		case IsDeletionVector(df):
+		if IsDeletionVector(df) {
 			result.RemovedDeletionVectorFiles++
-		case df.ContentType() == iceberg.EntryContentEqDeletes:
-			result.RemovedEqualityDeleteFiles++
-		default:
+		} else {
 			result.RemovedPositionDeleteFiles++
 		}
 	}

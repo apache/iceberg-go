@@ -28,10 +28,9 @@ import (
 
 // A position delete can cover several files. Worker-level SafePosDeletes
 // does not mean that the coordinator may remove it after rewriting one file.
-func setupSharedPositionDeleteRewrite(t *testing.T) (*table.Table, []table.CompactionTaskGroup) {
+func setupSharedPositionDeleteRewrite(t *testing.T, tbl *table.Table) (*table.Table, []table.CompactionTaskGroup) {
 	t.Helper()
 
-	tbl := newRewriteTestTable(t)
 	arrowSchema, err := table.SchemaToArrowSchema(tbl.Schema(), nil, false, false)
 	require.NoError(t, err)
 
@@ -85,7 +84,7 @@ func TestRewriteCompactionKeepsSharedPositionDeleteForSurvivingFile(t *testing.T
 	for _, mode := range []string{"atomic", "distributed"} {
 		for _, groupCount := range []int{1, 2} {
 			t.Run(fmt.Sprintf("%s/%d-groups", mode, groupCount), func(t *testing.T) {
-				tbl, groups := setupSharedPositionDeleteRewrite(t)
+				tbl, groups := setupSharedPositionDeleteRewrite(t, newRewriteTestTable(t))
 				tx := tbl.NewTransaction()
 
 				if mode == "atomic" {
@@ -133,6 +132,72 @@ func TestRewriteCompactionKeepsSharedPositionDeleteForSurvivingFile(t *testing.T
 			})
 		}
 	}
+}
+
+func TestRewriteFilesRejectsMisclassifiedWorkerDeletes(t *testing.T) {
+	ctx := t.Context()
+	tbl := addSortTestFile(t, newRewriteTestTable(t), "source", "original", 1, 2)
+	deletePath := tbl.Location() + "/data/equality-delete.parquet"
+	schema, err := table.SchemaToArrowSchema(tbl.Schema(), nil, true, false)
+	require.NoError(t, err)
+	writeParquetFile(t, deletePath, schema, `[{"id":1}]`)
+	builder, err := iceberg.NewDataFileBuilder(*iceberg.UnpartitionedSpec,
+		iceberg.EntryContentEqDeletes, deletePath,
+		iceberg.ParquetFile, nil, nil, nil, 1, 128)
+	require.NoError(t, err)
+	deleteFile := builder.EqualityFieldIDs([]int{1}).Build()
+	txn := tbl.NewTransaction()
+	require.NoError(t, txn.NewRowDelta(nil).AddDeletes(deleteFile).Commit(ctx))
+	tbl, err = txn.Commit(ctx)
+	require.NoError(t, err)
+	require.Equal(t, []int64{2}, scanIDs(t, tbl))
+
+	for _, tc := range []struct {
+		name   string
+		result table.CompactionGroupResult
+	}{
+		{"position delete file", table.CompactionGroupResult{SafePosDeletes: []iceberg.DataFile{deleteFile}}},
+		{"deletion vector", table.CompactionGroupResult{SafeDeletionVectors: []iceberg.DataFile{deleteFile}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rewrite := tbl.NewTransaction().NewRewrite(nil).ApplyResult(tc.result)
+			err := rewrite.Commit(t.Context())
+			require.ErrorIs(t, err, table.ErrInvalidOperation)
+			require.ErrorContains(t, err, "automatic delete removal expected a "+tc.name)
+		})
+	}
+}
+
+func TestRewriteFilesWithAutomaticPositionRemovalRejectsStaleCommit(t *testing.T) {
+	ctx := t.Context()
+	tbl, catalog := newConcurrentRewriteTestTable(t)
+	tbl, groups := setupSharedPositionDeleteRewrite(t, tbl)
+	stale := tbl.NewTransaction()
+	rewrite := stale.NewRewrite(nil)
+	for _, group := range groups {
+		result, err := table.ExecuteCompactionGroup(ctx, tbl, group)
+		require.NoError(t, err)
+		rewrite.ApplyResult(result)
+	}
+	require.NoError(t, rewrite.Commit(ctx))
+
+	schema, err := table.SchemaToArrowSchema(tbl.Schema(), nil, false, false)
+	require.NoError(t, err)
+	path := tbl.Location() + "/data/peer.parquet"
+	writeParquetFile(t, path, schema, `[{"id":5,"data":"visible"}]`)
+	peer := tbl.NewTransaction()
+	require.NoError(t, peer.AddDataFilesByPath(ctx, []string{path}, nil, false))
+	latest, err := peer.Commit(ctx)
+	require.NoError(t, err)
+
+	attempts := catalog.attempts.Load()
+	_, err = stale.Commit(ctx)
+	require.ErrorIs(t, err, table.ErrCommitFailed)
+	require.Equal(t, attempts+1, catalog.attempts.Load())
+	current, err := catalog.LoadTable(ctx, tbl.Identifier())
+	require.NoError(t, err)
+	require.Equal(t, latest.CurrentSnapshot().SnapshotID, current.CurrentSnapshot().SnapshotID)
+	require.ElementsMatch(t, []int64{2, 4, 5}, scanIDs(t, current))
 }
 
 func TestRewriteFilesValidatesWorkerDeletionVectors(t *testing.T) {
