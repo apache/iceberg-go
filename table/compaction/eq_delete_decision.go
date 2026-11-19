@@ -19,6 +19,7 @@ package compaction
 
 import (
 	"fmt"
+	"maps"
 	"math"
 	"slices"
 	"strconv"
@@ -96,6 +97,9 @@ func (s *SurvivorSurvey) AddSurvivorWithSpec(specID int32, partition map[int]any
 	} else {
 		tuple := appendPartitionTuple(nil, partition)
 		updatePartitionMinSeq(s.PartMinSeq, string(tuple), seq)
+		if widened, ok := widenFloat32PartitionValues(partition); ok {
+			tuple = appendPartitionTuple(tuple[:0], widened)
+		}
 		specKey = partitionBucketKeyFromTuple(specID, tuple)
 	}
 
@@ -120,6 +124,9 @@ func (s *SurvivorSurvey) specAwareApplicableMinSeq(
 ) int64 {
 	if isUnpartitioned {
 		return s.minSeq
+	}
+	if widened, ok := widenFloat32PartitionValues(eqPartition); ok {
+		eqPartition = widened
 	}
 	if v, ok := s.specPartMinSeq[partitionBucketKey(eqSpecID, eqPartition)]; ok {
 		return v
@@ -293,6 +300,21 @@ func appendPartitionTuple(dst []byte, part map[int]any) []byte {
 	}
 
 	return dst
+}
+
+// widenFloat32PartitionValues widens float32 values so pre-promotion partitions key like later ones.
+func widenFloat32PartitionValues(part map[int]any) (map[int]any, bool) {
+	var widened map[int]any
+	for id, value := range part {
+		if f, ok := value.(float32); ok {
+			if widened == nil {
+				widened = maps.Clone(part)
+			}
+			widened[id] = float64(f)
+		}
+	}
+
+	return widened, widened != nil
 }
 
 func updatePartitionMinSeq(partitions map[string]int64, key string, seq int64) {
