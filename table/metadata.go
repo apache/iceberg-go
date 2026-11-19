@@ -33,6 +33,7 @@ import (
 
 	"github.com/apache/iceberg-go"
 	iceinternal "github.com/apache/iceberg-go/internal"
+	tblutils "github.com/apache/iceberg-go/table/internal"
 	"github.com/google/uuid"
 )
 
@@ -1779,11 +1780,7 @@ func (b *MetadataBuilder) NameMapping() iceberg.NameMapping {
 }
 
 func validateNameMappingProperty(props iceberg.Properties, mapping iceberg.NameMapping) error {
-	if _, exists := props[DefaultNameMappingKey]; exists && mapping == nil {
-		return fmt.Errorf("%w: invalid %s", ErrInvalidMetadata, DefaultNameMappingKey)
-	}
-
-	return nil
+	return tblutils.ValidateNameMappingProperty(props, DefaultNameMappingKey, mapping, ErrInvalidMetadata)
 }
 
 func (b *MetadataBuilder) TrimMetadataLogs(maxEntries int) *MetadataBuilder {
@@ -2265,29 +2262,6 @@ func preflightMetadataBytes(b []byte) (map[string]json.RawMessage, int, error) {
 	}
 
 	return metadata, formatVersion, nil
-}
-
-func requirePartitionSpecIDs(b []byte) error {
-	var metadata map[string]json.RawMessage
-	if err := json.Unmarshal(b, &metadata); err != nil {
-		return fmt.Errorf("%w: %w", ErrInvalidMetadata, err)
-	}
-
-	return requirePartitionSpecIDsFromMetadata(metadata)
-}
-
-func requirePartitionSpecIDsFromMetadata(metadata map[string]json.RawMessage) error {
-	rawSpecs, ok := metadata["partition-specs"]
-	if !ok {
-		return nil
-	}
-
-	var specs []rawPartitionSpec
-	if err := json.Unmarshal(rawSpecs, &specs); err != nil {
-		return fmt.Errorf("%w: invalid partition-specs: %w", ErrInvalidMetadata, err)
-	}
-
-	return validatePartitionSpecIDs(specs)
 }
 
 type rawPartitionSpec struct {

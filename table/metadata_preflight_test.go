@@ -154,9 +154,9 @@ func TestParseMetadataBytesPreservesTypeErrorOffset(t *testing.T) {
 		number int
 		target json.Unmarshaler
 	}{
-		{1, &metadataV1{}},
-		{2, &metadataV2{}},
-		{3, &metadataV3{}},
+		{number: 1, target: &metadataV1{}},
+		{number: 2, target: &metadataV2{}},
+		{number: 3, target: &metadataV3{}},
 	} {
 		t.Run(fmt.Sprintf("v%d", version.number), func(t *testing.T) {
 			for _, spec := range []struct {
@@ -167,8 +167,8 @@ func TestParseMetadataBytesPreservesTypeErrorOffset(t *testing.T) {
 				{name: "normalized", fields: `,"partition-specs":[{"spec-id":0,"fields":[{"source-id":1,"name":"id","transform":"identity"}]}]`},
 			} {
 				t.Run(spec.name, func(t *testing.T) {
-					input := []byte(fmt.Sprintf(" \t\r\n"+`{"format-version":%d,"last-updated-ms":1,"last-column-id":"not-an-int"%s}`+"\n",
-						version.number, spec.fields))
+					input := fmt.Appendf(nil, " \t\r\n"+`{"format-version":%d,"last-updated-ms":1,"last-column-id":"not-an-int"%s}`+"\n",
+						version.number, spec.fields)
 					normalized, err := assignMissingPartitionFieldIDs(input)
 					require.NoError(t, err)
 					if spec.fields != "" {

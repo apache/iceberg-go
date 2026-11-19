@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-package table
+package inspect
 
 import (
 	"testing"
@@ -25,6 +25,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	iceberg "github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/internal"
+	"github.com/apache/iceberg-go/table"
 	"github.com/stretchr/testify/require"
 )
 
@@ -146,7 +147,7 @@ func withInspectContentFileRecord(
 ) {
 	t.Helper()
 
-	arrowSchema, err := SchemaToArrowSchema(DataFilesSchema(partitionType), nil, true, false)
+	arrowSchema, err := table.SchemaToArrowSchema(DataFilesSchema(partitionType), nil, true, false)
 	require.NoError(t, err)
 	builder := array.NewRecordBuilder(memory.DefaultAllocator, arrowSchema)
 	defer builder.Release()

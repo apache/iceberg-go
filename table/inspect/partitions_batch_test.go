@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-package table
+package inspect
 
 import (
 	"context"
@@ -26,6 +26,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/table"
 	tblutils "github.com/apache/iceberg-go/table/internal"
 	"github.com/stretchr/testify/require"
 )
@@ -39,7 +40,7 @@ func inspectPartitionBatchFixture(
 	partitionType := iceberg.NewStructType(
 		iceberg.NestedField{ID: 1000, Name: "part", Type: iceberg.PrimitiveTypes.Int32, Required: true},
 	)
-	arrowSchema, err := SchemaToArrowSchema(PartitionsSchema(partitionType), nil, true, false)
+	arrowSchema, err := table.SchemaToArrowSchema(PartitionsSchema(partitionType), nil, true, false)
 	if err != nil {
 		tb.Fatal(err)
 	}
@@ -66,7 +67,7 @@ func TestInspectPartitionAggregateReaderBoundedBatches(t *testing.T) {
 			mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
 			t.Cleanup(func() { mem.AssertSize(t, 0) })
 
-			reader := (InspectTable{alloc: mem}).partitionAggregateReader(
+			reader := (inspector{alloc: mem}).partitionAggregateReader(
 				t.Context(), arrowSchema, partitionType, aggregates)
 			defer reader.Release()
 
@@ -121,7 +122,7 @@ func TestInspectPartitionsAcrossRecordBatchBoundary(t *testing.T) {
 		content: iceberg.ManifestContentData,
 		entries: entries,
 	})
-	reader, err := tbl.Inspect().Partitions(t.Context())
+	reader, err := Partitions(t.Context(), tbl)
 	require.NoError(t, err)
 	defer reader.Release()
 
@@ -156,7 +157,7 @@ func TestInspectPartitionAggregateReaderCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
-	reader := (InspectTable{alloc: memory.DefaultAllocator}).partitionAggregateReader(
+	reader := (inspector{alloc: memory.DefaultAllocator}).partitionAggregateReader(
 		ctx, arrowSchema, partitionType, aggregates)
 	defer reader.Release()
 
@@ -175,7 +176,7 @@ func BenchmarkInspectPartitionBatchEncoding(b *testing.B) {
 	for _, count := range []int{4096, 16384, 65536} {
 		partitionType, arrowSchema, aggregates := inspectPartitionBatchFixture(b, count)
 		b.Run(fmt.Sprintf("partitions=%d/bounded", count), func(b *testing.B) {
-			inspector := InspectTable{alloc: memory.DefaultAllocator}
+			inspector := inspector{alloc: memory.DefaultAllocator}
 			b.ReportAllocs()
 			b.ReportMetric(float64(count), "partitions/op")
 			b.ResetTimer()

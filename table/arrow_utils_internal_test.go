@@ -860,3 +860,13 @@ func TestCheckNoUnknownTransformInSpecs(t *testing.T) {
 		require.NoError(t, checkNoUnknownTransformInSpecs(meta, files))
 	})
 }
+
+func TestPositionDeleteDatePromotion(t *testing.T) {
+	require.True(t, canPromoteDateToTimestamp(
+		iceberg.PrimitiveTypes.Date, iceberg.PrimitiveTypes.Timestamp))
+	require.True(t, canPromoteDateToTimestamp(
+		iceberg.PrimitiveTypes.Date, iceberg.PrimitiveTypes.TimestampNs))
+	require.False(t, canPromoteDateToTimestamp(
+		iceberg.PrimitiveTypes.Date, iceberg.PrimitiveTypes.TimestampTz),
+		"date promotion must not target a timezone-aware timestamp")
+}

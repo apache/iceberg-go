@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-package table
+package inspect
 
 import (
 	"context"
@@ -27,12 +27,17 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
+	"github.com/apache/iceberg-go/table"
 	tblutils "github.com/apache/iceberg-go/table/internal"
 )
 
 // DataFiles returns the live data files in the current snapshot. Deleted
 // manifest entries are omitted, matching the data_files metadata table.
-func (i InspectTable) DataFiles(ctx context.Context) (array.RecordReader, error) {
+func DataFiles(ctx context.Context, tbl *table.Table, opts ...Option) (array.RecordReader, error) {
+	return newInspector(tbl, opts...).dataFiles(ctx)
+}
+
+func (i inspector) dataFiles(ctx context.Context) (array.RecordReader, error) {
 	return i.inspectFiles(ctx, "data files", DataFilesSchema, false,
 		func(manifest iceberg.ManifestFile) bool {
 			return manifest.ManifestContent() == iceberg.ManifestContentData
@@ -41,20 +46,32 @@ func (i InspectTable) DataFiles(ctx context.Context) (array.RecordReader, error)
 
 // Files returns all live data and delete files in the current snapshot.
 // Deleted manifest entries are omitted.
-func (i InspectTable) Files(ctx context.Context) (array.RecordReader, error) {
+func Files(ctx context.Context, tbl *table.Table, opts ...Option) (array.RecordReader, error) {
+	return newInspector(tbl, opts...).files(ctx)
+}
+
+func (i inspector) files(ctx context.Context) (array.RecordReader, error) {
 	return i.inspectFiles(ctx, "files", FilesSchema, false, nil)
 }
 
 // AllFiles returns the live data and delete files reachable from every
 // snapshot currently tracked by the table. Shared manifests are scanned once,
 // while duplicate file rows from different manifests are preserved.
-func (i InspectTable) AllFiles(ctx context.Context) (array.RecordReader, error) {
+func AllFiles(ctx context.Context, tbl *table.Table, opts ...Option) (array.RecordReader, error) {
+	return newInspector(tbl, opts...).allFiles(ctx)
+}
+
+func (i inspector) allFiles(ctx context.Context) (array.RecordReader, error) {
 	return i.inspectFiles(ctx, "all files", AllFilesSchema, true, nil)
 }
 
 // AllDataFiles returns the live data files reachable from every snapshot
 // currently tracked by the table.
-func (i InspectTable) AllDataFiles(ctx context.Context) (array.RecordReader, error) {
+func AllDataFiles(ctx context.Context, tbl *table.Table, opts ...Option) (array.RecordReader, error) {
+	return newInspector(tbl, opts...).allDataFiles(ctx)
+}
+
+func (i inspector) allDataFiles(ctx context.Context) (array.RecordReader, error) {
 	return i.inspectFiles(ctx, "all data files", AllDataFilesSchema, true,
 		func(manifest iceberg.ManifestFile) bool {
 			return manifest.ManifestContent() == iceberg.ManifestContentData
@@ -63,7 +80,11 @@ func (i InspectTable) AllDataFiles(ctx context.Context) (array.RecordReader, err
 
 // AllDeleteFiles returns the live delete files reachable from every snapshot
 // currently tracked by the table.
-func (i InspectTable) AllDeleteFiles(ctx context.Context) (array.RecordReader, error) {
+func AllDeleteFiles(ctx context.Context, tbl *table.Table, opts ...Option) (array.RecordReader, error) {
+	return newInspector(tbl, opts...).allDeleteFiles(ctx)
+}
+
+func (i inspector) allDeleteFiles(ctx context.Context) (array.RecordReader, error) {
 	return i.inspectFiles(ctx, "all delete files", AllDeleteFilesSchema, true,
 		func(manifest iceberg.ManifestFile) bool {
 			return manifest.ManifestContent() == iceberg.ManifestContentDeletes
@@ -72,7 +93,7 @@ func (i InspectTable) AllDeleteFiles(ctx context.Context) (array.RecordReader, e
 
 type inspectFilesSchema func(*iceberg.StructType) *iceberg.Schema
 
-func (i InspectTable) inspectFiles(
+func (i inspector) inspectFiles(
 	ctx context.Context,
 	name string,
 	schemaFn inspectFilesSchema,
@@ -83,7 +104,7 @@ func (i InspectTable) inspectFiles(
 	if err != nil {
 		return nil, fmt.Errorf("inspect %s: %w", name, err)
 	}
-	arrowSchema, err := SchemaToArrowSchema(schemaFn(partitionType), nil, true, false)
+	arrowSchema, err := table.SchemaToArrowSchema(schemaFn(partitionType), nil, true, false)
 	if err != nil {
 		return nil, fmt.Errorf("inspect %s: build arrow schema: %w", name, err)
 	}
@@ -108,7 +129,7 @@ func (i InspectTable) inspectFiles(
 // manifestEntryReader streams manifest entries into bounded Arrow record
 // batches. It keeps only the current batch and manifest decoder state in
 // memory instead of materializing every entry before returning a reader.
-func (i InspectTable) manifestEntryReader(
+func (i inspector) manifestEntryReader(
 	ctx context.Context,
 	arrowSchema *arrow.Schema,
 	discardDeleted bool,
@@ -144,7 +165,7 @@ func (i InspectTable) manifestEntryReader(
 // allManifestEntryReader scans each manifest reachable from the table's
 // tracked snapshots exactly once. Manifest paths are immutable and unique, so
 // the path is the stable identity used by Java and PyIceberg's all_* tables.
-func (i InspectTable) allManifestEntryReader(
+func (i inspector) allManifestEntryReader(
 	ctx context.Context,
 	arrowSchema *arrow.Schema,
 	discardDeleted bool,
@@ -164,10 +185,10 @@ func (i InspectTable) allManifestEntryReader(
 
 	return i.manifestEntryReaderFromManifestSource(
 		ctx, arrowSchema, fs, discardDeleted, includeManifest, appendEntry,
-		provider.uniqueManifests(ctx, snapshots)), nil
+		provider.UniqueManifests(ctx, snapshots)), nil
 }
 
-func (i InspectTable) manifestEntryReaderFromManifestSource(
+func (i inspector) manifestEntryReaderFromManifestSource(
 	ctx context.Context,
 	arrowSchema *arrow.Schema,
 	fs iceio.IO,

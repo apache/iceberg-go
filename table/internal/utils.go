@@ -171,21 +171,6 @@ func BigEndianToDecimal(buf []byte) (decimal.Decimal128, error) {
 	return decimal128.New(hi, uint64(lo)), nil
 }
 
-func PartitionRecordValue(field iceberg.PartitionField, val iceberg.Literal, schema *iceberg.Schema) (iceberg.Optional[iceberg.Literal], error) {
-	var ret iceberg.Optional[iceberg.Literal]
-	if val == nil {
-		return ret, nil
-	}
-
-	f, ok := schema.FindFieldByIDRef(field.FirstSourceID(), iceberginternal.SchemaRef{})
-	if !ok {
-		return ret, fmt.Errorf("%w: could not find source field in schema for %s",
-			iceberg.ErrInvalidSchema, field.String())
-	}
-
-	return partitionRecordValue(val, f.Type)
-}
-
 func partitionRecordValue(val iceberg.Literal, sourceType iceberg.Type) (iceberg.Optional[iceberg.Literal], error) {
 	var ret iceberg.Optional[iceberg.Literal]
 	if val == nil {
