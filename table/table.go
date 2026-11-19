@@ -439,10 +439,6 @@ func (t Table) Delete(ctx context.Context, filter iceberg.BooleanExpression, sna
 	return txn.Commit(ctx)
 }
 
-func (t Table) manifestSet(ctx context.Context, snapshot Snapshot) (snapshotManifestSet, error) {
-	return t.manifestSetWithFSF(ctx, snapshot, t.fsF)
-}
-
 func (t Table) manifestSetWithFSF(
 	ctx context.Context,
 	snapshot Snapshot,

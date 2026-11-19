@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-package table
+package inspect
 
 import (
 	"bytes"
@@ -25,6 +25,7 @@ import (
 
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
+	"github.com/apache/iceberg-go/table"
 	"github.com/stretchr/testify/require"
 )
 
@@ -38,7 +39,7 @@ func BenchmarkInspectPartitionsParallelManifests(b *testing.B) {
 			b.ReportAllocs()
 			b.ResetTimer()
 			for range b.N {
-				reader, err := tbl.Inspect().Partitions(b.Context())
+				reader, err := Partitions(b.Context(), tbl)
 				if err != nil {
 					b.Fatal(err)
 				}
@@ -48,16 +49,16 @@ func BenchmarkInspectPartitionsParallelManifests(b *testing.B) {
 	}
 }
 
-func benchmarkInspectPartitionTable(b *testing.B, manifestCount int) *Table {
+func benchmarkInspectPartitionTable(b *testing.B, manifestCount int) *table.Table {
 	b.Helper()
 
 	const snapshotID = int64(1)
 	sequenceNumber := int64(1)
 	spec := *iceberg.UnpartitionedSpec
 	schema := iceberg.NewSchema(0)
-	meta, err := NewMetadata(schema, &spec, UnsortedSortOrder, "mem://inspect-bench/table", nil)
+	meta, err := table.NewMetadata(schema, &spec, table.UnsortedSortOrder, "mem://inspect-bench/table", nil)
 	require.NoError(b, err)
-	builder, err := MetadataBuilderFromBase(meta, "metadata.json")
+	builder, err := table.MetadataBuilderFromBase(meta, "metadata.json")
 	require.NoError(b, err)
 
 	fs := iceio.NewMemFS()
@@ -92,21 +93,21 @@ func benchmarkInspectPartitionTable(b *testing.B, manifestCount int) *Table {
 	require.NoError(b, fs.WriteFile(context.Background(), manifestListPath, listBuf.Bytes()))
 
 	schemaID := schema.ID
-	require.NoError(b, builder.AddSnapshot(&Snapshot{
+	require.NoError(b, builder.AddSnapshot(&table.Snapshot{
 		SnapshotID:     snapshotID,
 		SequenceNumber: sequenceNumber,
 		TimestampMs:    meta.LastUpdatedMillis() + 1,
 		ManifestList:   manifestListPath,
 		SchemaID:       &schemaID,
-		Summary:        &Summary{Operation: OpAppend},
+		Summary:        &table.Summary{Operation: table.OpAppend},
 	}))
-	require.NoError(b, builder.SetSnapshotRef(MainBranch, snapshotID, BranchRef))
+	require.NoError(b, builder.SetSnapshotRef(table.MainBranch, snapshotID, table.BranchRef))
 
 	built, err := builder.Build()
 	require.NoError(b, err)
 
 	delayed := &inspectPartitionManifestTrackingIO{IO: fs}
 
-	return New(Identifier{"db", "inspect-bench"}, built, "metadata.json",
+	return table.New(table.Identifier{"db", "inspect-bench"}, built, "metadata.json",
 		func(context.Context) (iceio.IO, error) { return delayed, nil }, nil)
 }

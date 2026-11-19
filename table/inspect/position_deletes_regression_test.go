@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-package table
+package inspect
 
 import (
 	"bytes"
@@ -28,6 +28,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
+	"github.com/apache/iceberg-go/table"
 	"github.com/apache/iceberg-go/table/dv"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
@@ -79,7 +80,7 @@ func TestInspectPositionDeletesV3MixesParquetAndDeletionVector(t *testing.T) {
 		t, 3, newInspectPositionDeletesMetadata(t, 3), memFS,
 		[]iceberg.DataFile{parquetFile, dvFiles[0]},
 	)
-	rr, err := tbl.Inspect().PositionDeletes(context.Background())
+	rr, err := PositionDeletes(context.Background(), tbl)
 	require.NoError(t, err)
 	defer rr.Release()
 	record := collectRecord(t, rr)
@@ -173,24 +174,24 @@ func TestInspectPositionDeletesUsesLiveEntriesFromCurrentSnapshot(t *testing.T) 
 	mb := newInspectPositionDeletesMetadataWithSchema(t, 2, tableSchema)
 	schemaID := tableSchema.ID
 	timestamp := time.Now().UnixMilli()
-	require.NoError(t, mb.AddSnapshot(&Snapshot{
+	require.NoError(t, mb.AddSnapshot(&table.Snapshot{
 		SnapshotID: oldSnapshotID, SequenceNumber: oldSequenceNumber,
 		TimestampMs: timestamp, ManifestList: oldManifestListPath, SchemaID: &schemaID,
 	}))
-	require.NoError(t, mb.AddSnapshot(&Snapshot{
+	require.NoError(t, mb.AddSnapshot(&table.Snapshot{
 		SnapshotID: currentSnapshotID, ParentSnapshotID: &oldSnapshotID,
 		SequenceNumber: currentSequenceNumber, TimestampMs: timestamp + 1,
 		ManifestList: currentManifestListPath, SchemaID: &schemaID,
 	}))
-	require.NoError(t, mb.SetSnapshotRef(MainBranch, currentSnapshotID, BranchRef))
+	require.NoError(t, mb.SetSnapshotRef(table.MainBranch, currentSnapshotID, table.BranchRef))
 	metadata, err := mb.Build()
 	require.NoError(t, err)
-	tbl := New(
-		Identifier{"db", "position_deletes"}, metadata, "metadata.json",
+	tbl := table.New(
+		table.Identifier{"db", "position_deletes"}, metadata, "metadata.json",
 		func(context.Context) (iceio.IO, error) { return memFS, nil }, nil,
 	)
 
-	rr, err := tbl.Inspect().PositionDeletes(context.Background())
+	rr, err := PositionDeletes(context.Background(), tbl)
 	require.NoError(t, err)
 	defer rr.Release()
 	record := collectRecord(t, rr)
@@ -208,7 +209,7 @@ func TestPositionDeletesPartitionTypeAvoidsHistoricalSchemaFieldIDs(t *testing.T
 	})
 	spec := partitionedSpec()
 	lastPartitionID := 1000
-	metadata := &metadataV2{commonMetadata: commonMetadata{
+	metadata := newTestMetadata(testMetadata{
 		FormatVersion:   2,
 		UUID:            uuid.New(),
 		LastColumnId:    2,
@@ -217,7 +218,7 @@ func TestPositionDeletesPartitionTypeAvoidsHistoricalSchemaFieldIDs(t *testing.T
 		Specs:           []iceberg.PartitionSpec{spec},
 		DefaultSpecID:   0,
 		LastPartitionID: &lastPartitionID,
-	}}
+	})
 
 	partitionType, partitionIDs, err := positionDeletesPartitionType(metadataWithoutSchemaHistory{Metadata: metadata})
 	require.NoError(t, err)
@@ -233,7 +234,7 @@ func TestPositionDeletesPartitionTypeAvoidsCurrentSchemaFieldIDs(t *testing.T) {
 		SourceIDs: []int{2}, FieldID: 1000, Name: "id", Transform: iceberg.IdentityTransform{},
 	})
 	lastPartitionID := 1000
-	metadata := &metadataV2{commonMetadata: commonMetadata{
+	metadata := newTestMetadata(testMetadata{
 		FormatVersion:   2,
 		UUID:            uuid.New(),
 		LastColumnId:    1,
@@ -242,7 +243,7 @@ func TestPositionDeletesPartitionTypeAvoidsCurrentSchemaFieldIDs(t *testing.T) {
 		Specs:           []iceberg.PartitionSpec{spec},
 		DefaultSpecID:   spec.ID(),
 		LastPartitionID: &lastPartitionID,
-	}}
+	})
 
 	partitionType, partitionIDs, err := positionDeletesPartitionType(metadataWithoutSchemaHistory{Metadata: metadata})
 	require.NoError(t, err)
@@ -254,7 +255,7 @@ func TestPositionDeletesPartitionTypeAvoidsCurrentSchemaFieldIDs(t *testing.T) {
 }
 
 type metadataWithoutSchemaHistory struct {
-	Metadata
+	table.Metadata
 }
 
 func (metadataWithoutSchemaHistory) Schemas() []*iceberg.Schema {
@@ -265,7 +266,7 @@ func TestPositionDeletesPartitionTypeSkipsReservedIDsAfterLastColumnID(t *testin
 	currentSchema := simpleSchema()
 	spec := partitionedSpec()
 	lastPartitionID := 1000
-	metadata := &metadataV2{commonMetadata: commonMetadata{
+	metadata := newTestMetadata(testMetadata{
 		FormatVersion:   2,
 		LastColumnId:    positionDeleteContentSizeID - 1,
 		SchemaList:      []*iceberg.Schema{currentSchema},
@@ -273,7 +274,7 @@ func TestPositionDeletesPartitionTypeSkipsReservedIDsAfterLastColumnID(t *testin
 		Specs:           []iceberg.PartitionSpec{spec},
 		DefaultSpecID:   spec.ID(),
 		LastPartitionID: &lastPartitionID,
-	}}
+	})
 
 	partitionType, partitionIDs, err := positionDeletesPartitionType(metadataWithoutSchemaHistory{Metadata: metadata})
 	require.NoError(t, err)
@@ -300,7 +301,7 @@ func TestPositionDeletesPartitionTypeFallsBackWhenFieldIDsReachLimit(t *testing.
 	currentSchema := iceberg.NewSchema(0, currentFields...)
 	spec := iceberg.NewPartitionSpec(partitionFields...)
 	lastPartitionID := 1000 + partitionFieldCount - 1
-	metadata := &metadataV2{commonMetadata: commonMetadata{
+	metadata := newTestMetadata(testMetadata{
 		FormatVersion:   2,
 		UUID:            uuid.New(),
 		LastColumnId:    iceberg.MaxStructFieldID,
@@ -309,7 +310,7 @@ func TestPositionDeletesPartitionTypeFallsBackWhenFieldIDsReachLimit(t *testing.
 		Specs:           []iceberg.PartitionSpec{spec},
 		DefaultSpecID:   spec.ID(),
 		LastPartitionID: &lastPartitionID,
-	}}
+	})
 
 	partitionType, partitionIDs, err := positionDeletesPartitionType(metadataWithoutSchemaHistory{Metadata: metadata})
 	require.NoError(t, err)
@@ -323,4 +324,22 @@ func TestPositionDeletesPartitionTypeFallsBackWhenFieldIDsReachLimit(t *testing.
 	require.NotPanics(t, func() {
 		_ = PositionDeletesSchema(currentSchema, partitionType, metadata.FormatVersion())
 	})
+}
+
+func TestInspectPositionDeletesRejectsUnparseableNameMapping(t *testing.T) {
+	for _, mapping := range []string{"{not valid json", "null", ""} {
+		t.Run(mapping, func(t *testing.T) {
+			tbl, fs := newMemTable(t, *iceberg.UnpartitionedSpec)
+			builder, err := table.MetadataBuilderFromBase(tbl.Metadata(), tbl.MetadataLocation())
+			require.NoError(t, err)
+			require.NoError(t, builder.SetProperties(iceberg.Properties{table.DefaultNameMappingKey: mapping}))
+			meta, err := builder.Build()
+			require.NoError(t, err)
+			tbl = table.New(tbl.Identifier(), meta, tbl.MetadataLocation(),
+				func(context.Context) (iceio.IO, error) { return fs, nil }, nil)
+			_, err = PositionDeletes(t.Context(), tbl)
+			require.ErrorIs(t, err, table.ErrInvalidMetadata)
+			require.ErrorContains(t, err, table.DefaultNameMappingKey)
+		})
+	}
 }

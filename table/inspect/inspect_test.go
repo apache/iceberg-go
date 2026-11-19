@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-package table
+package inspect
 
 import (
 	"bytes"
@@ -39,6 +39,7 @@ import (
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
+	"github.com/apache/iceberg-go/table"
 	"github.com/apache/iceberg-go/table/dv"
 	tblutils "github.com/apache/iceberg-go/table/internal"
 	"github.com/google/uuid"
@@ -57,19 +58,19 @@ import (
 // parent is S1, so S2 is NOT an ancestor of the current snapshot. A trailing
 // log entry references an expired snapshot (id 999, absent from the snapshot
 // list) to exercise the null-parent path.
-func historyTestTable() *Table {
-	return inspectTestTable(Identifier{"history"}, map[string]SnapshotRef{
-		MainBranch: {SnapshotID: 103, Type: BranchRef},
+func historyTestTable() *table.Table {
+	return inspectTestTable(table.Identifier{"history"}, map[string]table.SnapshotRef{
+		table.MainBranch: {SnapshotID: 103, Type: table.BranchRef},
 	})
 }
 
-func refsTestTable(snapshotRefs map[string]SnapshotRef) *Table {
-	return inspectTestTable(Identifier{"refs"}, snapshotRefs)
+func refsTestTable(snapshotRefs map[string]table.SnapshotRef) *table.Table {
+	return inspectTestTable(table.Identifier{"refs"}, snapshotRefs)
 }
 
 // inspectTestTable builds the shared metadata fixture with the supplied
 // identifier and snapshot refs.
-func inspectTestTable(identifier Identifier, snapshotRefs map[string]SnapshotRef) *Table {
+func inspectTestTable(identifier table.Identifier, snapshotRefs map[string]table.SnapshotRef) *table.Table {
 	const (
 		s1 = int64(101)
 		s2 = int64(102)
@@ -80,7 +81,7 @@ func inspectTestTable(identifier Identifier, snapshotRefs map[string]SnapshotRef
 	current := s3
 	lastPartitionID := 999
 
-	meta := &metadataV2{commonMetadata: commonMetadata{
+	meta := newTestMetadata(testMetadata{
 		FormatVersion:   2,
 		UUID:            uuid.New(),
 		Loc:             "s3://test/history",
@@ -92,24 +93,24 @@ func inspectTestTable(identifier Identifier, snapshotRefs map[string]SnapshotRef
 		DefaultSpecID:   0,
 		LastPartitionID: &lastPartitionID,
 		Props:           iceberg.Properties{},
-		SnapshotList: []Snapshot{
+		SnapshotList: []table.Snapshot{
 			{SnapshotID: s1, TimestampMs: 1100, ManifestList: "/snap-101.avro"},
 			{SnapshotID: s2, ParentSnapshotID: new(s1), TimestampMs: 1200, ManifestList: "/snap-102.avro"},
 			{SnapshotID: s3, ParentSnapshotID: new(s1), TimestampMs: 1300, ManifestList: "/snap-103.avro"},
 		},
 		CurrentSnapshotID: &current,
-		SnapshotLog: []SnapshotLogEntry{
+		SnapshotLog: []table.SnapshotLogEntry{
 			{SnapshotID: s1, TimestampMs: 1100},
 			{SnapshotID: s2, TimestampMs: 1200},
 			{SnapshotID: s3, TimestampMs: 1300},
 			{SnapshotID: expired, TimestampMs: 1400},
 		},
-		SortOrderList:      []SortOrder{UnsortedSortOrder},
+		SortOrderList:      []table.SortOrder{table.UnsortedSortOrder},
 		DefaultSortOrderID: 0,
 		SnapshotRefs:       snapshotRefs,
-	}}
+	})
 
-	return New(identifier, meta, "", nil, nil)
+	return table.New(identifier, meta, "", nil, nil)
 }
 
 // collectRecord drains a RecordReader into a single record for assertions and
@@ -124,13 +125,13 @@ func collectRecord(t *testing.T, rr array.RecordReader) arrow.RecordBatch {
 	return rec
 }
 
-func inspectTableWithManifestList(t *testing.T, spec iceberg.PartitionSpec, version int, manifests []iceberg.ManifestFile) *Table {
+func inspectTableWithManifestList(t *testing.T, spec iceberg.PartitionSpec, version int, manifests []iceberg.ManifestFile) *table.Table {
 	return inspectTableWithManifestListAndSchemas(t, simpleSchema(), nil, spec, version, manifests)
 }
 
 func inspectTableWithManifestListAndSchemas(t *testing.T, initialSchema, currentSchema *iceberg.Schema,
 	spec iceberg.PartitionSpec, version int, manifests []iceberg.ManifestFile,
-) *Table {
+) *table.Table {
 	t.Helper()
 
 	const snapshotID = int64(1)
@@ -138,14 +139,15 @@ func inspectTableWithManifestListAndSchemas(t *testing.T, initialSchema, current
 	fs, err := iceio.LoadFS(ctx, nil, "mem://default/table-location")
 	require.NoError(t, err)
 	memIO := fs.(iceio.WriteFileIO)
-	meta, err := NewMetadata(initialSchema, &spec, UnsortedSortOrder, "mem://default/table-location", nil)
+	base, err := table.NewMetadata(initialSchema, &spec, table.UnsortedSortOrder, "mem://default/table-location", nil)
 	require.NoError(t, err)
-	tbl := New(Identifier{"db", "tbl"}, meta, "metadata.json",
-		func(context.Context) (iceio.IO, error) { return memIO, nil }, nil)
-	txn := tbl.NewTransaction()
 	if currentSchema != nil {
-		require.NoError(t, txn.meta.AddSchema(currentSchema))
-		require.NoError(t, txn.meta.SetCurrentSchemaID(currentSchema.ID))
+		builder, err := table.MetadataBuilderFromBase(base, "metadata.json")
+		require.NoError(t, err)
+		require.NoError(t, builder.AddSchema(currentSchema))
+		require.NoError(t, builder.SetCurrentSchemaID(currentSchema.ID))
+		base, err = builder.Build()
+		require.NoError(t, err)
 	}
 
 	manifestListPath := "mem://default/table-location/metadata/snap-1-manifest-list.avro"
@@ -161,16 +163,13 @@ func inspectTableWithManifestListAndSchemas(t *testing.T, initialSchema, current
 	require.NoError(t, memIO.WriteFile(context.Background(), manifestListPath, listBuf.Bytes()))
 
 	snapID := snapshotID
-	txn.meta.snapshotList = []Snapshot{{
+	built := withSnapshots(t, base, []table.Snapshot{{
 		SnapshotID:     snapshotID,
 		ManifestList:   manifestListPath,
 		SequenceNumber: sequenceNumber,
-	}}
-	txn.meta.currentSnapshotID = &snapID
-	built, err := txn.meta.Build()
-	require.NoError(t, err)
+	}}, &snapID)
 
-	return New(Identifier{"db", "tbl"}, built, "metadata.json",
+	return table.New(table.Identifier{"db", "tbl"}, built, "metadata.json",
 		func(context.Context) (iceio.IO, error) { return memIO, nil }, nil)
 }
 
@@ -200,7 +199,7 @@ func TestInspectHistorySchema(t *testing.T) {
 func TestInspectHistory(t *testing.T) {
 	tbl := historyTestTable()
 
-	rr, err := tbl.Inspect().History(context.Background())
+	rr, err := History(context.Background(), tbl)
 	require.NoError(t, err)
 	defer rr.Release()
 
@@ -252,7 +251,7 @@ func TestInspectHistory(t *testing.T) {
 // created): History must yield an empty, well-formed record.
 func TestInspectHistoryEmpty(t *testing.T) {
 	lastPartitionID := 999
-	meta := &metadataV2{commonMetadata: commonMetadata{
+	meta := newTestMetadata(testMetadata{
 		FormatVersion:      2,
 		UUID:               uuid.New(),
 		Loc:                "s3://test/empty",
@@ -264,13 +263,13 @@ func TestInspectHistoryEmpty(t *testing.T) {
 		DefaultSpecID:      0,
 		LastPartitionID:    &lastPartitionID,
 		Props:              iceberg.Properties{},
-		SortOrderList:      []SortOrder{UnsortedSortOrder},
+		SortOrderList:      []table.SortOrder{table.UnsortedSortOrder},
 		DefaultSortOrderID: 0,
-		SnapshotRefs:       map[string]SnapshotRef{},
-	}}
-	tbl := New(Identifier{"empty"}, meta, "", nil, nil)
+		SnapshotRefs:       map[string]table.SnapshotRef{},
+	})
+	tbl := table.New(table.Identifier{"empty"}, meta, "", nil, nil)
 
-	rr, err := tbl.Inspect().History(context.Background())
+	rr, err := History(context.Background(), tbl)
 	require.NoError(t, err)
 	defer rr.Release()
 
@@ -288,7 +287,7 @@ func TestInspectHistoryEmpty(t *testing.T) {
 func TestInspectHistoryNoCurrentSnapshot(t *testing.T) {
 	const s1 = int64(101)
 	lastPartitionID := 999
-	meta := &metadataV2{commonMetadata: commonMetadata{
+	meta := newTestMetadata(testMetadata{
 		FormatVersion:   2,
 		UUID:            uuid.New(),
 		Loc:             "s3://test/no-current",
@@ -300,18 +299,18 @@ func TestInspectHistoryNoCurrentSnapshot(t *testing.T) {
 		DefaultSpecID:   0,
 		LastPartitionID: &lastPartitionID,
 		Props:           iceberg.Properties{},
-		SnapshotList: []Snapshot{
+		SnapshotList: []table.Snapshot{
 			{SnapshotID: s1, TimestampMs: 1100, ManifestList: "/snap-101.avro"},
 		},
 		// CurrentSnapshotID intentionally nil.
-		SnapshotLog:        []SnapshotLogEntry{{SnapshotID: s1, TimestampMs: 1100}},
-		SortOrderList:      []SortOrder{UnsortedSortOrder},
+		SnapshotLog:        []table.SnapshotLogEntry{{SnapshotID: s1, TimestampMs: 1100}},
+		SortOrderList:      []table.SortOrder{table.UnsortedSortOrder},
 		DefaultSortOrderID: 0,
-		SnapshotRefs:       map[string]SnapshotRef{},
-	}}
-	tbl := New(Identifier{"no-current"}, meta, "", nil, nil)
+		SnapshotRefs:       map[string]table.SnapshotRef{},
+	})
+	tbl := table.New(table.Identifier{"no-current"}, meta, "", nil, nil)
 
-	rr, err := tbl.Inspect().History(context.Background())
+	rr, err := History(context.Background(), tbl)
 	require.NoError(t, err)
 	defer rr.Release()
 
@@ -362,21 +361,21 @@ func TestInspectRefs(t *testing.T) {
 	minSnapshotsToKeep := 2
 	maxSnapshotAge := int64(3000)
 	maxReferenceAge := int64(4000)
-	tbl := refsTestTable(map[string]SnapshotRef{
+	tbl := refsTestTable(map[string]table.SnapshotRef{
 		"main": {
 			SnapshotID:         103,
-			Type:               BranchRef,
+			Type:               table.BranchRef,
 			MinSnapshotsToKeep: &minSnapshotsToKeep,
 			MaxSnapshotAgeMs:   &maxSnapshotAge,
 		},
 		"release": {
 			SnapshotID:  102,
-			Type:        TagRef,
+			Type:        table.TagRef,
 			MaxRefAgeMs: &maxReferenceAge,
 		},
 	})
 
-	rr, err := tbl.Inspect().Refs(context.Background())
+	rr, err := Refs(context.Background(), tbl)
 	require.NoError(t, err)
 	defer rr.Release()
 
@@ -410,9 +409,9 @@ func TestInspectRefs(t *testing.T) {
 }
 
 func TestInspectRefsEmpty(t *testing.T) {
-	tbl := refsTestTable(map[string]SnapshotRef{})
+	tbl, _ := newMemTable(t, *iceberg.UnpartitionedSpec)
 
-	rr, err := tbl.Inspect().Refs(context.Background())
+	rr, err := Refs(context.Background(), tbl)
 	require.NoError(t, err)
 	defer rr.Release()
 
@@ -426,11 +425,11 @@ func TestInspectRefsEmpty(t *testing.T) {
 func TestInspectRefsAllocator(t *testing.T) {
 	checked := memory.NewCheckedAllocator(memory.DefaultAllocator)
 	t.Cleanup(func() { checked.AssertSize(t, 0) })
-	tbl := refsTestTable(map[string]SnapshotRef{
-		MainBranch: {SnapshotID: 103, Type: BranchRef},
+	tbl := refsTestTable(map[string]table.SnapshotRef{
+		table.MainBranch: {SnapshotID: 103, Type: table.BranchRef},
 	})
 
-	rr, err := tbl.Inspect(WithInspectAllocator(checked)).Refs(context.Background())
+	rr, err := Refs(context.Background(), tbl, WithAllocator(checked))
 	require.NoError(t, err)
 	defer rr.Release()
 
@@ -447,30 +446,30 @@ func TestInspectRefsRejectsMinSnapshotsToKeepOverflow(t *testing.T) {
 
 	tooLarge := int64(math.MaxInt32) + 1
 	minSnapshotsToKeep := int(tooLarge)
-	tbl := refsTestTable(map[string]SnapshotRef{
+	tbl := refsTestTable(map[string]table.SnapshotRef{
 		"main": {
 			SnapshotID:         103,
-			Type:               BranchRef,
+			Type:               table.BranchRef,
 			MinSnapshotsToKeep: &minSnapshotsToKeep,
 		},
 	})
 
-	rr, err := tbl.Inspect().Refs(context.Background())
+	rr, err := Refs(context.Background(), tbl)
 	require.ErrorContains(t, err, "min snapshots to keep 2147483648 is outside int32 range")
 	require.Nil(t, rr)
 }
 
 func TestInspectRefsAcceptsMaxInt32MinSnapshotsToKeep(t *testing.T) {
 	minSnapshotsToKeep := int(math.MaxInt32)
-	tbl := refsTestTable(map[string]SnapshotRef{
+	tbl := refsTestTable(map[string]table.SnapshotRef{
 		"main": {
 			SnapshotID:         103,
-			Type:               BranchRef,
+			Type:               table.BranchRef,
 			MinSnapshotsToKeep: &minSnapshotsToKeep,
 		},
 	})
 
-	rr, err := tbl.Inspect().Refs(context.Background())
+	rr, err := Refs(context.Background(), tbl)
 	require.NoError(t, err)
 	defer rr.Release()
 
@@ -485,7 +484,7 @@ func TestInspectRefsAcceptsMaxInt32MinSnapshotsToKeep(t *testing.T) {
 // snapshotsTestTable builds a table with two snapshots: a root carrying a
 // summary (operation + properties) and a child with no summary at all, to
 // exercise both the populated and null operation/summary paths.
-func snapshotsTestTable() *Table {
+func snapshotsTestTable() *table.Table {
 	const (
 		s1 = int64(101)
 		s2 = int64(102)
@@ -493,7 +492,7 @@ func snapshotsTestTable() *Table {
 	current := s2
 	lastPartitionID := 999
 
-	meta := &metadataV2{commonMetadata: commonMetadata{
+	meta := newTestMetadata(testMetadata{
 		FormatVersion:   2,
 		UUID:            uuid.New(),
 		Loc:             "s3://test/snapshots",
@@ -505,13 +504,13 @@ func snapshotsTestTable() *Table {
 		DefaultSpecID:   0,
 		LastPartitionID: &lastPartitionID,
 		Props:           iceberg.Properties{},
-		SnapshotList: []Snapshot{
+		SnapshotList: []table.Snapshot{
 			{
 				SnapshotID:   s1,
 				TimestampMs:  1100,
 				ManifestList: "/snap-101.avro",
-				Summary: &Summary{
-					Operation:  OpAppend,
+				Summary: &table.Summary{
+					Operation:  table.OpAppend,
 					Properties: iceberg.Properties{"added-records": "10", "total-records": "10"},
 				},
 			},
@@ -519,12 +518,12 @@ func snapshotsTestTable() *Table {
 			{SnapshotID: s2, ParentSnapshotID: new(s1), TimestampMs: 1200},
 		},
 		CurrentSnapshotID:  &current,
-		SortOrderList:      []SortOrder{UnsortedSortOrder},
+		SortOrderList:      []table.SortOrder{table.UnsortedSortOrder},
 		DefaultSortOrderID: 0,
-		SnapshotRefs:       map[string]SnapshotRef{MainBranch: {SnapshotID: current, Type: BranchRef}},
-	}}
+		SnapshotRefs:       map[string]table.SnapshotRef{table.MainBranch: {SnapshotID: current, Type: table.BranchRef}},
+	})
 
-	return New(Identifier{"snapshots"}, meta, "", nil, nil)
+	return table.New(table.Identifier{"snapshots"}, meta, "", nil, nil)
 }
 
 func TestInspectSnapshotsSchema(t *testing.T) {
@@ -557,7 +556,7 @@ func TestInspectSnapshotsSchema(t *testing.T) {
 func TestInspectSnapshots(t *testing.T) {
 	tbl := snapshotsTestTable()
 
-	rr, err := tbl.Inspect().Snapshots(context.Background())
+	rr, err := Snapshots(context.Background(), tbl)
 	require.NoError(t, err)
 	defer rr.Release()
 
@@ -612,7 +611,7 @@ func TestInspectSnapshots(t *testing.T) {
 // TestInspectSnapshotsEmpty covers a table with no snapshots.
 func TestInspectSnapshotsEmpty(t *testing.T) {
 	lastPartitionID := 999
-	meta := &metadataV2{commonMetadata: commonMetadata{
+	meta := newTestMetadata(testMetadata{
 		FormatVersion:      2,
 		UUID:               uuid.New(),
 		Loc:                "s3://test/empty",
@@ -624,13 +623,13 @@ func TestInspectSnapshotsEmpty(t *testing.T) {
 		DefaultSpecID:      0,
 		LastPartitionID:    &lastPartitionID,
 		Props:              iceberg.Properties{},
-		SortOrderList:      []SortOrder{UnsortedSortOrder},
+		SortOrderList:      []table.SortOrder{table.UnsortedSortOrder},
 		DefaultSortOrderID: 0,
-		SnapshotRefs:       map[string]SnapshotRef{},
-	}}
-	tbl := New(Identifier{"empty"}, meta, "", nil, nil)
+		SnapshotRefs:       map[string]table.SnapshotRef{},
+	})
+	tbl := table.New(table.Identifier{"empty"}, meta, "", nil, nil)
 
-	rr, err := tbl.Inspect().Snapshots(context.Background())
+	rr, err := Snapshots(context.Background(), tbl)
 	require.NoError(t, err)
 	defer rr.Release()
 
@@ -676,7 +675,7 @@ func TestInspectMetadataLogEntries(t *testing.T) {
 	schema2 := 2
 	current := s2
 	lastPartitionID := 999
-	meta := &metadataV2{commonMetadata: commonMetadata{
+	meta := newTestMetadata(testMetadata{
 		FormatVersion: 2,
 		UUID:          uuid.New(),
 		Loc:           "s3://test/metadata-log-entries",
@@ -692,27 +691,27 @@ func TestInspectMetadataLogEntries(t *testing.T) {
 		DefaultSpecID:   0,
 		LastPartitionID: &lastPartitionID,
 		Props:           iceberg.Properties{},
-		MetadataLog: []MetadataLogEntry{
+		MetadataLog: []table.MetadataLogEntry{
 			{MetadataFile: "/metadata/v1.json", TimestampMs: 1000},
 			{MetadataFile: "/metadata/v2.json", TimestampMs: 2000},
 		},
-		SnapshotList: []Snapshot{
+		SnapshotList: []table.Snapshot{
 			{SnapshotID: s1, SequenceNumber: 7, TimestampMs: 1500, SchemaID: &schema1},
 			{SnapshotID: s2, SequenceNumber: 8, TimestampMs: 3000, SchemaID: &schema2},
 		},
-		SnapshotLog: []SnapshotLogEntry{
+		SnapshotLog: []table.SnapshotLogEntry{
 			{SnapshotID: s1, TimestampMs: 1500},
 			{SnapshotID: s2, TimestampMs: 3000},
 			{SnapshotID: expired, TimestampMs: 3500},
 		},
 		CurrentSnapshotID:  &current,
-		SortOrderList:      []SortOrder{UnsortedSortOrder},
+		SortOrderList:      []table.SortOrder{table.UnsortedSortOrder},
 		DefaultSortOrderID: 0,
-		SnapshotRefs:       map[string]SnapshotRef{MainBranch: {SnapshotID: s2, Type: BranchRef}},
-	}}
-	tbl := New(Identifier{"metadata-log-entries"}, meta, "/metadata/v3.json", nil, nil)
+		SnapshotRefs:       map[string]table.SnapshotRef{table.MainBranch: {SnapshotID: s2, Type: table.BranchRef}},
+	})
+	tbl := table.New(table.Identifier{"metadata-log-entries"}, meta, "/metadata/v3.json", nil, nil)
 
-	rr, err := tbl.Inspect().MetadataLogEntries(context.Background())
+	rr, err := MetadataLogEntries(context.Background(), tbl)
 	require.NoError(t, err)
 	defer rr.Release()
 
@@ -757,9 +756,9 @@ func TestInspectMetadataLogEntries(t *testing.T) {
 
 func TestLatestSnapshotAtKeepsExpiredSnapshotID(t *testing.T) {
 	const expiredSnapshot = int64(101)
-	meta := &metadataV2{commonMetadata: commonMetadata{
-		SnapshotLog: []SnapshotLogEntry{{SnapshotID: expiredSnapshot, TimestampMs: 2000}},
-	}}
+	meta := newTestMetadata(testMetadata{
+		SnapshotLog: []table.SnapshotLogEntry{{SnapshotID: expiredSnapshot, TimestampMs: 2000}},
+	})
 
 	snapshotID, snapshot, found := latestSnapshotAt(meta, 2500)
 	require.True(t, found)
@@ -773,20 +772,20 @@ func TestLatestSnapshotAtScansAllSnapshotLogEntries(t *testing.T) {
 		secondSnapshot = int64(102)
 		lateSnapshot   = int64(103)
 	)
-	meta := &metadataV2{commonMetadata: commonMetadata{
-		SnapshotList: []Snapshot{
+	meta := newTestMetadata(testMetadata{
+		SnapshotList: []table.Snapshot{
 			{SnapshotID: firstSnapshot},
 			{SnapshotID: secondSnapshot},
 			{SnapshotID: lateSnapshot},
 		},
 		// The 500ms inversion is intentional and models clock skew within the
 		// metadata validator's one-minute tolerance.
-		SnapshotLog: []SnapshotLogEntry{
+		SnapshotLog: []table.SnapshotLogEntry{
 			{SnapshotID: firstSnapshot, TimestampMs: 2000},
 			{SnapshotID: secondSnapshot, TimestampMs: 3000},
 			{SnapshotID: lateSnapshot, TimestampMs: 2500},
 		},
-	}}
+	})
 
 	snapshotID, snapshot, found := latestSnapshotAt(meta, 2600)
 	require.True(t, found)
@@ -801,16 +800,16 @@ func TestLatestSnapshotAtUsesFirstEntryForEqualTimestamps(t *testing.T) {
 		secondSnapshot = int64(102)
 		timestamp      = int64(2000)
 	)
-	meta := &metadataV2{commonMetadata: commonMetadata{
-		SnapshotList: []Snapshot{
+	meta := newTestMetadata(testMetadata{
+		SnapshotList: []table.Snapshot{
 			{SnapshotID: firstSnapshot},
 			{SnapshotID: secondSnapshot},
 		},
-		SnapshotLog: []SnapshotLogEntry{
+		SnapshotLog: []table.SnapshotLogEntry{
 			{SnapshotID: firstSnapshot, TimestampMs: timestamp},
 			{SnapshotID: secondSnapshot, TimestampMs: timestamp},
 		},
-	}}
+	})
 
 	snapshotID, snapshot, found := latestSnapshotAt(meta, timestamp)
 	require.True(t, found)
@@ -821,15 +820,15 @@ func TestLatestSnapshotAtUsesFirstEntryForEqualTimestamps(t *testing.T) {
 
 func TestInspectMetadataLogEntriesAllowsLiveSnapshotWithoutSchemaID(t *testing.T) {
 	const snapshotID = int64(101)
-	meta := &metadataV2{commonMetadata: commonMetadata{
+	meta := newTestMetadata(testMetadata{
 		LastUpdatedMS: 2000,
-		SnapshotList:  []Snapshot{{SnapshotID: snapshotID, SequenceNumber: 7}},
-		SnapshotLog:   []SnapshotLogEntry{{SnapshotID: snapshotID, TimestampMs: 1500}},
-		SnapshotRefs:  map[string]SnapshotRef{},
-	}}
-	tbl := New(Identifier{"metadata-log-entries-nil-schema"}, meta, "/metadata/v2.json", nil, nil)
+		SnapshotList:  []table.Snapshot{{SnapshotID: snapshotID, SequenceNumber: 7}},
+		SnapshotLog:   []table.SnapshotLogEntry{{SnapshotID: snapshotID, TimestampMs: 1500}},
+		SnapshotRefs:  map[string]table.SnapshotRef{},
+	})
+	tbl := table.New(table.Identifier{"metadata-log-entries-nil-schema"}, meta, "/metadata/v2.json", nil, nil)
 
-	rr, err := tbl.Inspect().MetadataLogEntries(context.Background())
+	rr, err := MetadataLogEntries(context.Background(), tbl)
 	require.NoError(t, err)
 	defer rr.Release()
 
@@ -846,7 +845,7 @@ func TestInspectMetadataLogEntriesAllowsLiveSnapshotWithoutSchemaID(t *testing.T
 
 func TestInspectMetadataLogEntriesEmpty(t *testing.T) {
 	lastPartitionID := 999
-	meta := &metadataV2{commonMetadata: commonMetadata{
+	meta := newTestMetadata(testMetadata{
 		FormatVersion:      2,
 		UUID:               uuid.New(),
 		Loc:                "s3://test/empty-metadata-log",
@@ -858,13 +857,13 @@ func TestInspectMetadataLogEntriesEmpty(t *testing.T) {
 		DefaultSpecID:      0,
 		LastPartitionID:    &lastPartitionID,
 		Props:              iceberg.Properties{},
-		SnapshotRefs:       map[string]SnapshotRef{},
-		SortOrderList:      []SortOrder{UnsortedSortOrder},
+		SnapshotRefs:       map[string]table.SnapshotRef{},
+		SortOrderList:      []table.SortOrder{table.UnsortedSortOrder},
 		DefaultSortOrderID: 0,
-	}}
-	tbl := New(Identifier{"empty-metadata-log"}, meta, "/metadata/v1.json", nil, nil)
+	})
+	tbl := table.New(table.Identifier{"empty-metadata-log"}, meta, "/metadata/v1.json", nil, nil)
 
-	rr, err := tbl.Inspect().MetadataLogEntries(context.Background())
+	rr, err := MetadataLogEntries(context.Background(), tbl)
 	require.NoError(t, err)
 	defer rr.Release()
 
@@ -879,10 +878,10 @@ func TestInspectMetadataLogEntriesEmpty(t *testing.T) {
 }
 
 func TestInspectMetadataLogEntriesSkipsEmptyCurrentMetadataLocation(t *testing.T) {
-	meta := &metadataV2{commonMetadata: commonMetadata{LastUpdatedMS: 1000}}
-	tbl := New(Identifier{"empty-metadata-location"}, meta, "", nil, nil)
+	meta := newTestMetadata(testMetadata{LastUpdatedMS: 1000})
+	tbl := table.New(table.Identifier{"empty-metadata-location"}, meta, "", nil, nil)
 
-	rr, err := tbl.Inspect().MetadataLogEntries(context.Background())
+	rr, err := MetadataLogEntries(context.Background(), tbl)
 	require.NoError(t, err)
 	defer rr.Release()
 
@@ -968,7 +967,7 @@ func TestInspectDeleteFiles(t *testing.T) {
 			},
 		})
 
-	rr, err := tbl.Inspect().DeleteFiles(context.Background())
+	rr, err := DeleteFiles(context.Background(), tbl)
 	require.NoError(t, err)
 	defer rr.Release()
 
@@ -1055,15 +1054,15 @@ func TestInspectDeleteFiles(t *testing.T) {
 
 func TestInspectDeleteFilesEmpty(t *testing.T) {
 	spec := *iceberg.UnpartitionedSpec
-	meta := &metadataV2{commonMetadata: commonMetadata{
+	meta := newTestMetadata(testMetadata{
 		SchemaList:      []*iceberg.Schema{simpleSchema()},
 		CurrentSchemaID: 0,
 		Specs:           []iceberg.PartitionSpec{spec},
 		DefaultSpecID:   0,
-	}}
-	tbl := New(Identifier{"empty-delete-files"}, meta, "metadata.json", nil, nil)
+	})
+	tbl := table.New(table.Identifier{"empty-delete-files"}, meta, "metadata.json", nil, nil)
 
-	rr, err := tbl.Inspect().DeleteFiles(context.Background())
+	rr, err := DeleteFiles(context.Background(), tbl)
 	require.NoError(t, err)
 	defer rr.Release()
 
@@ -1078,11 +1077,11 @@ type inspectManifestSpec struct {
 	entries []iceberg.ManifestEntry
 }
 
-func inspectFilesTableWithManifests(t *testing.T, spec iceberg.PartitionSpec, manifests ...inspectManifestSpec) *Table {
+func inspectFilesTableWithManifests(t *testing.T, spec iceberg.PartitionSpec, manifests ...inspectManifestSpec) *table.Table {
 	t.Helper()
 	const snapshotID = int64(1)
 
-	txn, memIO := createTestTransactionWithMemIO(t, spec)
+	base, memIO := newMemTable(t, spec)
 	manifestFiles := make([]iceberg.ManifestFile, 0, len(manifests))
 	for index, manifestSpec := range manifests {
 		manifestPath := "mem://default/table-location/metadata/inspect-" + strconv.Itoa(index) + ".avro"
@@ -1117,16 +1116,13 @@ func inspectFilesTableWithManifests(t *testing.T, spec iceberg.PartitionSpec, ma
 	require.NoError(t, memIO.WriteFile(context.Background(), manifestListPath, listBuf.Bytes()))
 
 	snapshotIDValue := snapshotID
-	txn.meta.snapshotList = []Snapshot{{
+	built := withSnapshots(t, base.Metadata(), []table.Snapshot{{
 		SnapshotID:     snapshotID,
 		ManifestList:   manifestListPath,
 		SequenceNumber: sequenceNumber,
-	}}
-	txn.meta.currentSnapshotID = &snapshotIDValue
-	built, err := txn.meta.Build()
-	require.NoError(t, err)
+	}}, &snapshotIDValue)
 
-	return New(Identifier{"db", "inspect-files"}, built, "metadata.json",
+	return table.New(table.Identifier{"db", "inspect-files"}, built, "metadata.json",
 		func(context.Context) (iceio.IO, error) { return memIO, nil }, nil)
 }
 
@@ -1155,7 +1151,7 @@ func TestInspectManifestsSchema(t *testing.T) {
 	require.True(t, fields[11].Type.(*iceberg.ListType).ElementRequired)
 	require.Equal(t, 9, fields[11].Type.(*iceberg.ListType).ElementID)
 
-	arrowSchema, err := SchemaToArrowSchema(sc, nil, true, false)
+	arrowSchema, err := table.SchemaToArrowSchema(sc, nil, true, false)
 	require.NoError(t, err)
 	require.False(t, arrowSchema.Field(4).Nullable)
 	for _, idx := range []int{5, 6, 7, 8, 9, 10} {
@@ -1192,10 +1188,10 @@ func TestInspectAllManifestsPreservesSnapshotReferences(t *testing.T) {
 	memFS := iceio.NewMemFS()
 	schema := simpleSchema()
 	const tableLocation = "mem://default/inspect-all-manifests"
-	meta, err := NewMetadata(schema, iceberg.UnpartitionedSpec, UnsortedSortOrder, tableLocation,
-		iceberg.Properties{PropertyFormatVersion: "2"})
+	meta, err := table.NewMetadata(schema, iceberg.UnpartitionedSpec, table.UnsortedSortOrder, tableLocation,
+		iceberg.Properties{table.PropertyFormatVersion: "2"})
 	require.NoError(t, err)
-	builder, err := MetadataBuilderFromBase(meta, "")
+	builder, err := table.MetadataBuilderFromBase(meta, "")
 	require.NoError(t, err)
 
 	manifest := iceberg.NewManifestBuilder(2, tableLocation+"/metadata/shared-manifest.avro", 100, 0, 1).
@@ -1213,21 +1209,21 @@ func TestInspectAllManifestsPreservesSnapshotReferences(t *testing.T) {
 	schemaID := schema.ID
 	snapshotOne := int64(1)
 	timestamp := meta.LastUpdatedMillis()
-	require.NoError(t, builder.AddSnapshot(&Snapshot{
+	require.NoError(t, builder.AddSnapshot(&table.Snapshot{
 		SnapshotID: snapshotOne, SequenceNumber: 1, TimestampMs: timestamp + 1,
 		ManifestList: manifestListPath, SchemaID: &schemaID,
 	}))
-	require.NoError(t, builder.AddSnapshot(&Snapshot{
+	require.NoError(t, builder.AddSnapshot(&table.Snapshot{
 		SnapshotID: 2, ParentSnapshotID: &snapshotOne, SequenceNumber: 2, TimestampMs: timestamp + 2,
 		ManifestList: manifestListPath, SchemaID: &schemaID,
 	}))
-	require.NoError(t, builder.SetSnapshotRef(MainBranch, 2, BranchRef))
+	require.NoError(t, builder.SetSnapshotRef(table.MainBranch, 2, table.BranchRef))
 	built, err := builder.Build()
 	require.NoError(t, err)
-	tbl := New(Identifier{"db", "all_manifests"}, built, tableLocation+"/metadata/metadata.json",
+	tbl := table.New(table.Identifier{"db", "all_manifests"}, built, tableLocation+"/metadata/metadata.json",
 		func(context.Context) (iceio.IO, error) { return memFS, nil }, nil)
 
-	rr, err := tbl.Inspect().AllManifests(context.Background())
+	rr, err := AllManifests(context.Background(), tbl)
 	require.NoError(t, err)
 	defer rr.Release()
 	record := collectRecord(t, rr)
@@ -1258,7 +1254,7 @@ func TestInspectAllManifestsStreamsRecordBatches(t *testing.T) {
 	}
 	tbl := inspectTableWithManifestList(t, *iceberg.UnpartitionedSpec, 2, manifests)
 
-	rr, err := tbl.Inspect().AllManifests(context.Background())
+	rr, err := AllManifests(context.Background(), tbl)
 	require.NoError(t, err)
 	defer rr.Release()
 
@@ -1295,7 +1291,7 @@ func TestInspectAllManifestsAllocator(t *testing.T) {
 			tbl := inspectTableWithManifestList(t, *iceberg.UnpartitionedSpec, 2,
 				manifests)
 
-			rr, err := tbl.Inspect(WithInspectAllocator(checked)).AllManifests(context.Background())
+			rr, err := AllManifests(context.Background(), tbl, WithAllocator(checked))
 			require.NoError(t, err)
 			if tt.next {
 				require.True(t, rr.Next())
@@ -1308,7 +1304,7 @@ func TestInspectAllManifestsAllocator(t *testing.T) {
 func TestInspectManifests(t *testing.T) {
 	const snapshotID = int64(1)
 	spec := partitionedSpec()
-	txn, memIO := createTestTransactionWithMemIO(t, spec)
+	base, memIO := newMemTable(t, spec)
 	schema := simpleSchema()
 	file := newTestDataFileWithCount(t, spec,
 		"mem://default/table-location/data/data.parquet", map[int]any{1000: int32(7)}, 3)
@@ -1330,18 +1326,15 @@ func TestInspectManifests(t *testing.T) {
 	require.NoError(t, memIO.WriteFile(context.Background(), manifestListPath, listBuf.Bytes()))
 
 	snapID := snapshotID
-	txn.meta.snapshotList = []Snapshot{{
+	built := withSnapshots(t, base.Metadata(), []table.Snapshot{{
 		SnapshotID:     snapshotID,
 		ManifestList:   manifestListPath,
 		SequenceNumber: sequenceNumber,
-	}}
-	txn.meta.currentSnapshotID = &snapID
-	built, err := txn.meta.Build()
-	require.NoError(t, err)
+	}}, &snapID)
 
-	tbl := New(Identifier{"db", "tbl"}, built, "metadata.json",
+	tbl := table.New(table.Identifier{"db", "tbl"}, built, "metadata.json",
 		func(context.Context) (iceio.IO, error) { return memIO, nil }, nil)
-	rr, err := tbl.Inspect().Manifests(context.Background())
+	rr, err := Manifests(context.Background(), tbl)
 	require.NoError(t, err)
 	defer rr.Release()
 
@@ -1380,7 +1373,7 @@ func TestInspectManifestsContainsNaN(t *testing.T) {
 		Build()
 	tbl := inspectTableWithManifestList(t, spec, 2, []iceberg.ManifestFile{manifest})
 
-	rr, err := tbl.Inspect().Manifests(context.Background())
+	rr, err := Manifests(context.Background(), tbl)
 	require.NoError(t, err)
 	defer rr.Release()
 	record := collectRecord(t, rr)
@@ -1436,7 +1429,7 @@ func TestInspectManifestsPromotedPartitionSummaryBounds(t *testing.T) {
 			tbl := inspectTableWithManifestListAndSchemas(t, initialSchema, currentSchema,
 				spec, 2, []iceberg.ManifestFile{manifest})
 
-			rr, err := tbl.Inspect().Manifests(context.Background())
+			rr, err := Manifests(context.Background(), tbl)
 			require.NoError(t, err)
 			defer rr.Release()
 			record := collectRecord(t, rr)
@@ -1466,7 +1459,7 @@ func TestInspectManifestsDroppedPartitionSource(t *testing.T) {
 	tbl := inspectTableWithManifestListAndSchemas(t, initialSchema, currentSchema,
 		spec, 2, []iceberg.ManifestFile{manifest})
 
-	rr, err := tbl.Inspect().Manifests(context.Background())
+	rr, err := Manifests(context.Background(), tbl)
 	require.NoError(t, err)
 	defer rr.Release()
 	record := collectRecord(t, rr)
@@ -1492,7 +1485,7 @@ func TestInspectManifestsDeleteCounts(t *testing.T) {
 		Build()
 	tbl := inspectTableWithManifestList(t, spec, 2, []iceberg.ManifestFile{manifest})
 
-	rr, err := tbl.Inspect().Manifests(context.Background())
+	rr, err := Manifests(context.Background(), tbl)
 	require.NoError(t, err)
 	defer rr.Release()
 	record := collectRecord(t, rr)
@@ -1517,7 +1510,7 @@ func TestInspectManifestsV1UnknownCounts(t *testing.T) {
 		Build()
 	tbl := inspectTableWithManifestList(t, spec, 1, []iceberg.ManifestFile{manifest})
 
-	rr, err := tbl.Inspect().Manifests(context.Background())
+	rr, err := Manifests(context.Background(), tbl)
 	require.NoError(t, err)
 	defer rr.Release()
 	record := collectRecord(t, rr)
@@ -1584,7 +1577,7 @@ func TestInspectManifestsRejectsNegativeAddedSnapshotID(t *testing.T) {
 		Build()
 	tbl := inspectTableWithManifestList(t, spec, 1, []iceberg.ManifestFile{manifest})
 
-	_, err := tbl.Inspect().Manifests(context.Background())
+	_, err := Manifests(context.Background(), tbl)
 	require.ErrorContains(t, err, "negative added_snapshot_id -1")
 }
 
@@ -1623,7 +1616,7 @@ func TestInspectManifestsRejectsNegativeCountsForV2AndV3(t *testing.T) {
 				Build()
 			tbl := inspectTableWithManifestList(t, spec, tt.version, []iceberg.ManifestFile{manifest})
 
-			_, err := tbl.Inspect().Manifests(context.Background())
+			_, err := Manifests(context.Background(), tbl)
 			require.ErrorContains(t, err, fmt.Sprintf("negative %s count -123", tt.invalidCountName))
 			require.ErrorContains(t, err, fmt.Sprintf("manifest list version %d", tt.version))
 		})
@@ -1639,7 +1632,7 @@ func TestInspectManifestsRejectsMissingPartitionSpec(t *testing.T) {
 		Build()
 	tbl := inspectTableWithManifestList(t, spec, 2, []iceberg.ManifestFile{manifest})
 
-	_, err := tbl.Inspect().Manifests(context.Background())
+	_, err := Manifests(context.Background(), tbl)
 	require.Error(t, err)
 	require.ErrorContains(t, err, "references missing partition spec 999")
 }
@@ -1652,7 +1645,7 @@ func TestInspectManifestsAllowsMissingPartitionSpecWithoutSummaries(t *testing.T
 		Build()
 	tbl := inspectTableWithManifestList(t, spec, 2, []iceberg.ManifestFile{manifest})
 
-	rr, err := tbl.Inspect().Manifests(context.Background())
+	rr, err := Manifests(context.Background(), tbl)
 	require.NoError(t, err)
 	defer rr.Release()
 	record := collectRecord(t, rr)
@@ -1674,7 +1667,7 @@ func TestInspectManifestsReportsPartitionFieldNameInBoundErrors(t *testing.T) {
 		Build()
 	tbl := inspectTableWithManifestList(t, spec, 2, []iceberg.ManifestFile{manifest})
 
-	_, err := tbl.Inspect().Manifests(context.Background())
+	_, err := Manifests(context.Background(), tbl)
 	require.ErrorContains(t, err, "partition field \"id\" lower bound")
 }
 
@@ -1686,20 +1679,20 @@ func TestInspectManifestsWrapsFileIOFactoryError(t *testing.T) {
 		Build()
 	tbl := inspectTableWithManifestList(t, spec, 2, []iceberg.ManifestFile{manifest})
 	factoryErr := errors.New("factory failed")
-	tbl.fsF = func(context.Context) (iceio.IO, error) { return nil, factoryErr }
+	tbl = withFS(tbl, func(context.Context) (iceio.IO, error) { return nil, factoryErr })
 
-	_, err := tbl.Inspect().Manifests(context.Background())
+	_, err := Manifests(context.Background(), tbl)
 	require.ErrorIs(t, err, factoryErr)
 	require.ErrorContains(t, err, "inspect manifests: get file IO")
 }
 
 func TestInspectManifestsNoCurrentSnapshot(t *testing.T) {
 	spec := partitionedSpec()
-	meta, err := NewMetadata(simpleSchema(), &spec, UnsortedSortOrder, "mem://default/table-location", nil)
+	meta, err := table.NewMetadata(simpleSchema(), &spec, table.UnsortedSortOrder, "mem://default/table-location", nil)
 	require.NoError(t, err)
-	tbl := New(Identifier{"db", "tbl"}, meta, "metadata.json", nil, nil)
+	tbl := table.New(table.Identifier{"db", "tbl"}, meta, "metadata.json", nil, nil)
 
-	rr, err := tbl.Inspect().Manifests(context.Background())
+	rr, err := Manifests(context.Background(), tbl)
 	require.NoError(t, err)
 	defer rr.Release()
 	record := collectRecord(t, rr)
@@ -1718,7 +1711,7 @@ func TestInspectManifestsRejectsExtraPartitionSummaries(t *testing.T) {
 		Build()
 	tbl := inspectTableWithManifestList(t, spec, 2, []iceberg.ManifestFile{manifest})
 
-	_, err := tbl.Inspect().Manifests(context.Background())
+	_, err := Manifests(context.Background(), tbl)
 	require.Error(t, err)
 	require.ErrorContains(t, err, "has 2 partition summaries")
 }
@@ -1732,14 +1725,14 @@ func TestInspectManifestsRejectsUnknownContent(t *testing.T) {
 		Build()
 	tbl := inspectTableWithManifestList(t, spec, 2, []iceberg.ManifestFile{manifest})
 
-	_, err := tbl.Inspect().Manifests(context.Background())
+	_, err := Manifests(context.Background(), tbl)
 	require.Error(t, err)
 	require.ErrorContains(t, err, "has unknown content 2")
 }
 
 func TestInspectAllEntriesDeduplicatesSharedManifests(t *testing.T) {
 	spec := *iceberg.UnpartitionedSpec
-	txn, memIO := createTestTransactionWithMemIO(t, spec)
+	base, memIO := newMemTable(t, spec)
 	schema := simpleSchema()
 	snapshotOne, snapshotTwo := int64(1), int64(2)
 	sequenceOne, sequenceTwo := int64(1), int64(2)
@@ -1793,20 +1786,17 @@ func TestInspectAllEntriesDeduplicatesSharedManifests(t *testing.T) {
 	writeList(listTwo, snapshotTwo, &snapshotOne, sequenceTwo,
 		[]iceberg.ManifestFile{writtenOne[0], newManifest})
 
-	txn.meta.snapshotList = []Snapshot{
+	built := withSnapshots(t, base.Metadata(), []table.Snapshot{
 		{SnapshotID: snapshotOne, ManifestList: listOne, SequenceNumber: sequenceOne},
 		{
 			SnapshotID: snapshotTwo, ParentSnapshotID: &snapshotOne,
 			ManifestList: listTwo, SequenceNumber: sequenceTwo,
 		},
-	}
-	txn.meta.currentSnapshotID = &snapshotTwo
-	built, err := txn.meta.Build()
-	require.NoError(t, err)
-	tbl := New(Identifier{"db", "tbl"}, built, "metadata.json",
+	}, &snapshotTwo)
+	tbl := table.New(table.Identifier{"db", "tbl"}, built, "metadata.json",
 		func(context.Context) (iceio.IO, error) { return memIO, nil }, nil)
 
-	rr, err := tbl.Inspect().AllEntries(context.Background())
+	rr, err := AllEntries(context.Background(), tbl)
 	require.NoError(t, err)
 	defer rr.Release()
 	record := collectRecord(t, rr)
@@ -1831,7 +1821,7 @@ func TestInspectAllEntriesDeduplicatesSharedManifests(t *testing.T) {
 func TestInspectAllEntriesIncludesDeleteManifests(t *testing.T) {
 	tbl := inspectAllFilesTable(t)
 
-	rr, err := tbl.Inspect().AllEntries(context.Background())
+	rr, err := AllEntries(context.Background(), tbl)
 	require.NoError(t, err)
 	defer rr.Release()
 
@@ -1874,7 +1864,7 @@ func TestInspectAllEntriesStreamsBatches(t *testing.T) {
 	tbl := inspectDataFilesTable(t, spec,
 		inspectDataFileEntries(t, spec, tblutils.RecordBatchSize+1))
 
-	rr, err := tbl.Inspect().AllEntries(context.Background())
+	rr, err := AllEntries(context.Background(), tbl)
 	require.NoError(t, err)
 	defer rr.Release()
 
@@ -1889,15 +1879,15 @@ func TestInspectAllEntriesStreamsBatches(t *testing.T) {
 func TestInspectAllEntriesEmptyTableEarlyRelease(t *testing.T) {
 	checked := memory.NewCheckedAllocator(memory.DefaultAllocator)
 	t.Cleanup(func() { checked.AssertSize(t, 0) })
-	meta := &metadataV2{commonMetadata: commonMetadata{
+	meta := newTestMetadata(testMetadata{
 		SchemaList:      []*iceberg.Schema{simpleSchema()},
 		CurrentSchemaID: 0,
 		Specs:           []iceberg.PartitionSpec{*iceberg.UnpartitionedSpec},
 		DefaultSpecID:   0,
-	}}
-	tbl := New(Identifier{"empty-all-entries"}, meta, "metadata.json", nil, nil)
+	})
+	tbl := table.New(table.Identifier{"empty-all-entries"}, meta, "metadata.json", nil, nil)
 
-	rr, err := tbl.Inspect(WithInspectAllocator(checked)).AllEntries(context.Background())
+	rr, err := AllEntries(context.Background(), tbl, WithAllocator(checked))
 	require.NoError(t, err)
 	require.True(t, rr.Next())
 	require.EqualValues(t, 0, rr.RecordBatch().NumRows())
@@ -1909,7 +1899,7 @@ func TestInspectAllEntriesStopsOnContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	rr, err := tbl.Inspect().AllEntries(ctx)
+	rr, err := AllEntries(ctx, tbl)
 	require.NoError(t, err)
 	cancel()
 
@@ -1957,11 +1947,11 @@ func TestDeleteFilesSchema(t *testing.T) {
 	require.NotContains(t, names, "partition")
 }
 
-func inspectDataFilesTable(t *testing.T, spec iceberg.PartitionSpec, entries []iceberg.ManifestEntry) *Table {
+func inspectDataFilesTable(t *testing.T, spec iceberg.PartitionSpec, entries []iceberg.ManifestEntry) *table.Table {
 	t.Helper()
 	const snapshotID = int64(1)
 
-	txn, memIO := createTestTransactionWithMemIO(t, spec)
+	base, memIO := newMemTable(t, spec)
 	schema := simpleSchema()
 	manifestPath := "mem://default/table-location/metadata/data-manifest.avro"
 	manifestListPath := "mem://default/table-location/metadata/snap-1-manifest-list.avro"
@@ -1978,16 +1968,13 @@ func inspectDataFilesTable(t *testing.T, spec iceberg.PartitionSpec, entries []i
 	require.NoError(t, memIO.WriteFile(context.Background(), manifestListPath, listBuf.Bytes()))
 
 	snapID := snapshotID
-	txn.meta.snapshotList = []Snapshot{{
+	built := withSnapshots(t, base.Metadata(), []table.Snapshot{{
 		SnapshotID:     snapshotID,
 		ManifestList:   manifestListPath,
 		SequenceNumber: sequenceNumber,
-	}}
-	txn.meta.currentSnapshotID = &snapID
-	built, err := txn.meta.Build()
-	require.NoError(t, err)
+	}}, &snapID)
 
-	return New(Identifier{"db", "tbl"}, built, "metadata.json",
+	return table.New(table.Identifier{"db", "tbl"}, built, "metadata.json",
 		func(context.Context) (iceio.IO, error) { return memIO, nil }, nil)
 }
 
@@ -2042,11 +2029,11 @@ func writeInspectManifest(
 	return manifest
 }
 
-func inspectAllFilesTable(t *testing.T) *Table {
+func inspectAllFilesTable(t *testing.T) *table.Table {
 	t.Helper()
 
 	spec := *iceberg.UnpartitionedSpec
-	txn, memIO := createTestTransactionWithMemIO(t, spec)
+	base, memIO := newMemTable(t, spec)
 	schema := simpleSchema()
 	sequenceOne, sequenceTwo := int64(1), int64(2)
 	snapshotOne, snapshotTwo := int64(1), int64(2)
@@ -2101,15 +2088,12 @@ func inspectAllFilesTable(t *testing.T) *Table {
 	writeList(listTwo, snapshotTwo, &snapshotOne, sequenceTwo,
 		[]iceberg.ManifestFile{writtenOne[0], newManifest, deleteManifest})
 
-	txn.meta.snapshotList = []Snapshot{
+	built := withSnapshots(t, base.Metadata(), []table.Snapshot{
 		{SnapshotID: snapshotOne, ManifestList: listOne, SequenceNumber: sequenceOne},
 		{SnapshotID: snapshotTwo, ParentSnapshotID: &snapshotOne, ManifestList: listTwo, SequenceNumber: sequenceTwo},
-	}
-	txn.meta.currentSnapshotID = &snapshotTwo
-	built, err := txn.meta.Build()
-	require.NoError(t, err)
+	}, &snapshotTwo)
 
-	return New(Identifier{"db", "tbl"}, built, "metadata.json",
+	return table.New(table.Identifier{"db", "tbl"}, built, "metadata.json",
 		func(context.Context) (iceio.IO, error) { return memIO, nil }, nil)
 }
 
@@ -2140,7 +2124,7 @@ func TestInspectFilesTables(t *testing.T) {
 	}{
 		{
 			name: "files",
-			read: tbl.Inspect().Files,
+			read: newInspector(tbl).files,
 			wantPaths: []string{
 				"mem://default/table-location/data/shared.parquet",
 				"mem://default/table-location/data/new.parquet",
@@ -2153,7 +2137,7 @@ func TestInspectFilesTables(t *testing.T) {
 		},
 		{
 			name: "all files deduplicates shared manifest and preserves duplicate rows",
-			read: tbl.Inspect().AllFiles,
+			read: newInspector(tbl).allFiles,
 			wantPaths: []string{
 				"mem://default/table-location/data/shared.parquet",
 				"mem://default/table-location/data/shared.parquet",
@@ -2168,7 +2152,7 @@ func TestInspectFilesTables(t *testing.T) {
 		},
 		{
 			name: "all data files",
-			read: tbl.Inspect().AllDataFiles,
+			read: newInspector(tbl).allDataFiles,
 			wantPaths: []string{
 				"mem://default/table-location/data/shared.parquet",
 				"mem://default/table-location/data/shared.parquet",
@@ -2181,7 +2165,7 @@ func TestInspectFilesTables(t *testing.T) {
 		},
 		{
 			name:        "all delete files",
-			read:        tbl.Inspect().AllDeleteFiles,
+			read:        newInspector(tbl).allDeleteFiles,
 			wantPaths:   []string{"mem://default/table-location/data/delete.parquet"},
 			wantContent: []int32{int32(iceberg.EntryContentPosDeletes)},
 		},
@@ -2213,24 +2197,24 @@ func (fs inspectManifestListContextIO) Open(_ context.Context, path string) (ice
 
 func TestInspectFilesKeepCallerContextForManifestListRead(t *testing.T) {
 	tbl := inspectAllFilesTable(t)
-	baseFS, err := tbl.fsF(context.Background())
+	baseFS, err := tbl.FS(context.Background())
 	require.NoError(t, err)
 
 	var calls int
-	tbl.fsF = func(ctx context.Context) (iceio.IO, error) {
+	tbl = withFS(tbl, func(ctx context.Context) (iceio.IO, error) {
 		calls++
 
 		return inspectManifestListContextIO{
 			IO:                 baseFS,
 			rejectManifestList: ctx.Done() == nil,
 		}, nil
-	}
+	})
 
 	ctx := t.Context()
-	manifests, err := tbl.Inspect().Manifests(ctx)
+	manifests, err := Manifests(ctx, tbl)
 	require.NoError(t, err)
 	manifests.Release()
-	rr, err := tbl.Inspect().Files(ctx)
+	rr, err := Files(ctx, tbl)
 	require.NoError(t, err)
 	paths, contents := inspectFileRows(t, rr)
 	require.Len(t, paths, 3)
@@ -2242,17 +2226,17 @@ func TestInspectFilesReuseManifestListIO(t *testing.T) {
 	for _, all := range []bool{false, true} {
 		t.Run(fmt.Sprintf("all=%t", all), func(t *testing.T) {
 			tbl := inspectAllFilesTable(t)
-			baseFS, err := tbl.fsF(t.Context())
+			baseFS, err := tbl.FS(t.Context())
 			require.NoError(t, err)
 			calls := 0
-			tbl.fsF = func(context.Context) (iceio.IO, error) {
+			tbl = withFS(tbl, func(context.Context) (iceio.IO, error) {
 				calls++
 
 				return baseFS, nil
-			}
-			read := tbl.Inspect().Files
+			})
+			read := newInspector(tbl).files
 			if all {
-				read = tbl.Inspect().AllFiles
+				read = newInspector(tbl).allFiles
 			}
 			rr, err := read(t.Context())
 			require.NoError(t, err)
@@ -2267,7 +2251,7 @@ func TestInspectAllFilesStopsOnContextCancellation(t *testing.T) {
 	tbl := inspectAllFilesTable(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	rr, err := tbl.Inspect().AllFiles(ctx)
+	rr, err := AllFiles(ctx, tbl)
 	require.NoError(t, err)
 
 	cancel()
@@ -2284,13 +2268,13 @@ func TestInspectFilesTablesEarlyRelease(t *testing.T) {
 		name string
 		read func(context.Context) (array.RecordReader, error)
 	}{
-		{name: "files", read: tbl.Inspect(WithInspectAllocator(checked)).Files},
-		{name: "data files", read: tbl.Inspect(WithInspectAllocator(checked)).DataFiles},
-		{name: "delete files", read: tbl.Inspect(WithInspectAllocator(checked)).DeleteFiles},
-		{name: "all files", read: tbl.Inspect(WithInspectAllocator(checked)).AllFiles},
-		{name: "all data files", read: tbl.Inspect(WithInspectAllocator(checked)).AllDataFiles},
-		{name: "all delete files", read: tbl.Inspect(WithInspectAllocator(checked)).AllDeleteFiles},
-		{name: "all entries", read: tbl.Inspect(WithInspectAllocator(checked)).AllEntries},
+		{name: "files", read: newInspector(tbl, WithAllocator(checked)).files},
+		{name: "data files", read: newInspector(tbl, WithAllocator(checked)).dataFiles},
+		{name: "delete files", read: newInspector(tbl, WithAllocator(checked)).deleteFiles},
+		{name: "all files", read: newInspector(tbl, WithAllocator(checked)).allFiles},
+		{name: "all data files", read: newInspector(tbl, WithAllocator(checked)).allDataFiles},
+		{name: "all delete files", read: newInspector(tbl, WithAllocator(checked)).allDeleteFiles},
+		{name: "all entries", read: newInspector(tbl, WithAllocator(checked)).allEntries},
 	}
 
 	for _, tt := range reads {
@@ -2306,9 +2290,9 @@ func TestInspectFilesTablesEarlyRelease(t *testing.T) {
 func TestInspectAllFilesReadsManifestListsLazily(t *testing.T) {
 	tbl := historyTestTable()
 	fs := iceio.NewMemFS()
-	tbl.fsF = func(context.Context) (iceio.IO, error) { return fs, nil }
+	tbl = withFS(tbl, func(context.Context) (iceio.IO, error) { return fs, nil })
 
-	rr, err := tbl.Inspect().AllFiles(context.Background())
+	rr, err := AllFiles(context.Background(), tbl)
 	require.NoError(t, err)
 	require.False(t, rr.Next())
 	require.ErrorContains(t, rr.Err(), "read snapshot 101 manifests")
@@ -2333,7 +2317,7 @@ func TestInspectAllFilesSchemasMatchFiles(t *testing.T) {
 func TestInspectDataFilesStreamsBatchesAndSkipsDeleted(t *testing.T) {
 	const snapshotID = int64(1)
 	spec := *iceberg.UnpartitionedSpec
-	txn, memIO := createTestTransactionWithMemIO(t, spec)
+	base, memIO := newMemTable(t, spec)
 	schema := simpleSchema()
 
 	entries := make([]iceberg.ManifestEntry, 0, tblutils.RecordBatchSize+2)
@@ -2364,18 +2348,15 @@ func TestInspectDataFilesStreamsBatchesAndSkipsDeleted(t *testing.T) {
 	require.NoError(t, memIO.WriteFile(context.Background(), manifestListPath, listBuf.Bytes()))
 
 	snapID := snapshotID
-	txn.meta.snapshotList = []Snapshot{{
+	built := withSnapshots(t, base.Metadata(), []table.Snapshot{{
 		SnapshotID:     snapshotID,
 		ManifestList:   manifestListPath,
 		SequenceNumber: sequenceNumber,
-	}}
-	txn.meta.currentSnapshotID = &snapID
-	built, err := txn.meta.Build()
-	require.NoError(t, err)
+	}}, &snapID)
 
-	tbl := New(Identifier{"db", "tbl"}, built, "metadata.json",
+	tbl := table.New(table.Identifier{"db", "tbl"}, built, "metadata.json",
 		func(context.Context) (iceio.IO, error) { return memIO, nil }, nil)
-	rr, err := tbl.Inspect().DataFiles(context.Background())
+	rr, err := DataFiles(context.Background(), tbl)
 	require.NoError(t, err)
 	defer rr.Release()
 
@@ -2405,7 +2386,7 @@ func TestInspectDataFilesReturnsPartitionValues(t *testing.T) {
 		iceberg.EntryStatusADDED, new(snapshotID), &sequenceNumber, &sequenceNumber, file)
 	tbl := inspectDataFilesTable(t, spec, []iceberg.ManifestEntry{entry})
 
-	rr, err := tbl.Inspect().DataFiles(context.Background())
+	rr, err := DataFiles(context.Background(), tbl)
 	require.NoError(t, err)
 	defer rr.Release()
 
@@ -2428,7 +2409,7 @@ func TestInspectDataFilesEmitsEmptyBatchWhenAllEntriesAreDeleted(t *testing.T) {
 		iceberg.EntryStatusDELETED, new(snapshotID), &sequenceNumber, &sequenceNumber, file)
 	tbl := inspectDataFilesTable(t, spec, []iceberg.ManifestEntry{entry})
 
-	rr, err := tbl.Inspect().DataFiles(context.Background())
+	rr, err := DataFiles(context.Background(), tbl)
 	require.NoError(t, err)
 	require.True(t, rr.Next())
 	record := rr.RecordBatch()
@@ -2437,15 +2418,15 @@ func TestInspectDataFilesEmitsEmptyBatchWhenAllEntriesAreDeleted(t *testing.T) {
 }
 
 func TestInspectDataFilesEmptyTableEarlyRelease(t *testing.T) {
-	meta := &metadataV2{commonMetadata: commonMetadata{
+	meta := newTestMetadata(testMetadata{
 		SchemaList:      []*iceberg.Schema{simpleSchema()},
 		CurrentSchemaID: 0,
 		Specs:           []iceberg.PartitionSpec{*iceberg.UnpartitionedSpec},
 		DefaultSpecID:   0,
-	}}
-	tbl := New(Identifier{"empty-data-files"}, meta, "metadata.json", nil, nil)
+	})
+	tbl := table.New(table.Identifier{"empty-data-files"}, meta, "metadata.json", nil, nil)
 
-	rr, err := tbl.Inspect().DataFiles(context.Background())
+	rr, err := DataFiles(context.Background(), tbl)
 	require.NoError(t, err)
 	require.True(t, rr.Next())
 	require.EqualValues(t, 0, rr.RecordBatch().NumRows())
@@ -2466,7 +2447,7 @@ func TestInspectDataFilesAllocator(t *testing.T) {
 
 			spec := *iceberg.UnpartitionedSpec
 			tbl := inspectDataFilesTable(t, spec, inspectDataFileEntries(t, spec, tblutils.RecordBatchSize+1))
-			rr, err := tbl.Inspect(WithInspectAllocator(checked)).DataFiles(context.Background())
+			rr, err := DataFiles(context.Background(), tbl, WithAllocator(checked))
 			require.NoError(t, err)
 
 			if tt.abandon {
@@ -2492,7 +2473,7 @@ func TestAppendContentFileRecordUsesFieldIDs(t *testing.T) {
 	reordered = append(reordered, fields[1:]...)
 	reordered = append(reordered, fields[0])
 	schema := iceberg.NewSchema(0, reordered...)
-	arrowSchema, err := SchemaToArrowSchema(schema, nil, true, false)
+	arrowSchema, err := table.SchemaToArrowSchema(schema, nil, true, false)
 	require.NoError(t, err)
 
 	bldr := array.NewRecordBuilder(memory.DefaultAllocator, arrowSchema)
@@ -2517,7 +2498,7 @@ func TestAppendContentFileRecordUsesPartitionFieldIDs(t *testing.T) {
 	reorderedPartitionType := iceberg.NewStructType(
 		partitionType.Field(1), partitionType.Field(0),
 	)
-	arrowSchema, err := SchemaToArrowSchema(DataFilesSchema(reorderedPartitionType), nil, true, false)
+	arrowSchema, err := table.SchemaToArrowSchema(DataFilesSchema(reorderedPartitionType), nil, true, false)
 	require.NoError(t, err)
 
 	bldr := array.NewRecordBuilder(memory.DefaultAllocator, arrowSchema)
@@ -2566,7 +2547,7 @@ func TestPartitionsSchema(t *testing.T) {
 func TestInspectPartitionsAggregatesDataAndDeletes(t *testing.T) {
 	const snapshotID = int64(1)
 	spec := partitionedSpec()
-	txn, memIO := createTestTransactionWithMemIO(t, spec)
+	base, memIO := newMemTable(t, spec)
 	schema := simpleSchema()
 	partition := map[int]any{1000: int32(7)}
 	dataSequenceNumber := int64(1)
@@ -2626,19 +2607,16 @@ func TestInspectPartitionsAggregatesDataAndDeletes(t *testing.T) {
 		&manifestListSequenceNumber, 0, []iceberg.ManifestFile{dataManifest, deleteManifest}))
 	require.NoError(t, memIO.WriteFile(context.Background(), manifestListPath, listBuf.Bytes()))
 
-	txn.meta.snapshotList = []Snapshot{{
+	built := withSnapshots(t, base.Metadata(), []table.Snapshot{{
 		SnapshotID:     snapshotID,
 		ManifestList:   manifestListPath,
 		SequenceNumber: manifestListSequenceNumber,
 		TimestampMs:    2000,
-	}}
-	txn.meta.currentSnapshotID = new(snapshotID)
-	built, err := txn.meta.Build()
-	require.NoError(t, err)
+	}}, new(snapshotID))
 
-	tbl := New(Identifier{"db", "tbl"}, built, "metadata.json",
+	tbl := table.New(table.Identifier{"db", "tbl"}, built, "metadata.json",
 		func(context.Context) (iceio.IO, error) { return memIO, nil }, nil)
-	rr, err := tbl.Inspect().Partitions(context.Background())
+	rr, err := Partitions(context.Background(), tbl)
 	require.NoError(t, err)
 	defer rr.Release()
 
@@ -2668,7 +2646,7 @@ func TestInspectPartitionsLeavesSpecIDUnsetForExpiredSnapshot(t *testing.T) {
 	spec := iceberg.NewPartitionSpecID(7, iceberg.PartitionField{
 		SourceIDs: []int{1}, FieldID: 1000, Name: "id", Transform: iceberg.IdentityTransform{},
 	})
-	txn, memIO := createTestTransactionWithMemIO(t, spec)
+	base, memIO := newMemTable(t, spec)
 	schema := simpleSchema()
 	file := newTestDataFile(t, spec,
 		"mem://default/table-location/data/expired.parquet", map[int]any{1000: int32(7)})
@@ -2693,19 +2671,16 @@ func TestInspectPartitionsLeavesSpecIDUnsetForExpiredSnapshot(t *testing.T) {
 		&currentSequenceNumber, 0, []iceberg.ManifestFile{manifest}))
 	require.NoError(t, memIO.WriteFile(context.Background(), manifestListPath, listBuf.Bytes()))
 
-	txn.meta.snapshotList = []Snapshot{{
+	built := withSnapshots(t, base.Metadata(), []table.Snapshot{{
 		SnapshotID:     currentSnapshotID,
 		ManifestList:   manifestListPath,
 		SequenceNumber: currentSequenceNumber,
 		TimestampMs:    2000,
-	}}
-	txn.meta.currentSnapshotID = new(currentSnapshotID)
-	built, err := txn.meta.Build()
-	require.NoError(t, err)
+	}}, new(currentSnapshotID))
 
-	tbl := New(Identifier{"db", "tbl"}, built, "metadata.json",
+	tbl := table.New(table.Identifier{"db", "tbl"}, built, "metadata.json",
 		func(context.Context) (iceio.IO, error) { return memIO, nil }, nil)
-	rr, err := tbl.Inspect().Partitions(context.Background())
+	rr, err := Partitions(context.Background(), tbl)
 	require.NoError(t, err)
 	defer rr.Release()
 
@@ -2731,7 +2706,7 @@ func TestEntriesSchema(t *testing.T) {
 }
 
 func TestEntriesDataFileStructBuilderAppendsParent(t *testing.T) {
-	arrowSchema, err := SchemaToArrowSchema(EntriesSchema(iceberg.NewStructType()), nil, true, false)
+	arrowSchema, err := table.SchemaToArrowSchema(EntriesSchema(iceberg.NewStructType()), nil, true, false)
 	require.NoError(t, err)
 
 	bldr := array.NewRecordBuilder(memory.DefaultAllocator, arrowSchema)
@@ -2759,7 +2734,7 @@ func TestEntriesDataFileStructBuilderAppendsParent(t *testing.T) {
 func TestInspectEntriesIncludesDeletedEntries(t *testing.T) {
 	const snapshotID = int64(1)
 	spec := *iceberg.UnpartitionedSpec
-	txn, memIO := createTestTransactionWithMemIO(t, spec)
+	base, memIO := newMemTable(t, spec)
 	schema := simpleSchema()
 	addedFile := newTestDataFile(t, spec,
 		"mem://default/table-location/data/added.parquet", nil)
@@ -2783,18 +2758,15 @@ func TestInspectEntriesIncludesDeletedEntries(t *testing.T) {
 		[]iceberg.ManifestFile{manifest}))
 	require.NoError(t, memIO.WriteFile(context.Background(), manifestListPath, listBuf.Bytes()))
 
-	txn.meta.snapshotList = []Snapshot{{
+	built := withSnapshots(t, base.Metadata(), []table.Snapshot{{
 		SnapshotID:     snapshotID,
 		ManifestList:   manifestListPath,
 		SequenceNumber: sequenceNumber,
-	}}
-	txn.meta.currentSnapshotID = new(snapshotID)
-	built, err := txn.meta.Build()
-	require.NoError(t, err)
+	}}, new(snapshotID))
 
-	tbl := New(Identifier{"db", "tbl"}, built, "metadata.json",
+	tbl := table.New(table.Identifier{"db", "tbl"}, built, "metadata.json",
 		func(context.Context) (iceio.IO, error) { return memIO, nil }, nil)
-	rr, err := tbl.Inspect().Entries(context.Background())
+	rr, err := Entries(context.Background(), tbl)
 	require.NoError(t, err)
 	defer rr.Release()
 
@@ -2819,7 +2791,7 @@ func TestAllEntriesSchemaMatchesEntries(t *testing.T) {
 	require.True(t, EntriesSchema(partitionType).Equals(AllEntriesSchema(partitionType)))
 }
 
-func newInspectPositionDeletesMetadata(t *testing.T, formatVersion int) *MetadataBuilder {
+func newInspectPositionDeletesMetadata(t *testing.T, formatVersion int) *table.MetadataBuilder {
 	return newInspectPositionDeletesMetadataWithSchema(t, formatVersion, simpleSchema())
 }
 
@@ -2827,10 +2799,10 @@ func newInspectPositionDeletesMetadataWithSchema(
 	t *testing.T,
 	formatVersion int,
 	tableSchema *iceberg.Schema,
-) *MetadataBuilder {
+) *table.MetadataBuilder {
 	t.Helper()
 
-	mb, err := NewMetadataBuilder(formatVersion)
+	mb, err := table.NewMetadataBuilder(formatVersion)
 	require.NoError(t, err)
 	require.NoError(t, mb.AddSchema(tableSchema))
 	require.NoError(t, mb.SetCurrentSchemaID(0))
@@ -2840,7 +2812,7 @@ func newInspectPositionDeletesMetadataWithSchema(
 	addUnsortedSortOrder(t, mb)
 	metadata, err := mb.Build()
 	require.NoError(t, err)
-	mb, err = MetadataBuilderFromBase(metadata, "")
+	mb, err = table.MetadataBuilderFromBase(metadata, "")
 	require.NoError(t, err)
 
 	return mb
@@ -2849,21 +2821,21 @@ func newInspectPositionDeletesMetadataWithSchema(
 func inspectPositionDeletesTable(
 	t *testing.T,
 	formatVersion int,
-	mb *MetadataBuilder,
+	mb *table.MetadataBuilder,
 	fs iceio.WriteFileIO,
 	files []iceberg.DataFile,
-) *Table {
+) *table.Table {
 	return inspectPositionDeletesTableWithSchema(t, formatVersion, mb, simpleSchema(), fs, files)
 }
 
 func inspectPositionDeletesTableWithSchema(
 	t *testing.T,
 	formatVersion int,
-	mb *MetadataBuilder,
+	mb *table.MetadataBuilder,
 	tableSchema *iceberg.Schema,
 	fs iceio.WriteFileIO,
 	files []iceberg.DataFile,
-) *Table {
+) *table.Table {
 	t.Helper()
 
 	snapshotID := int64(1)
@@ -2894,11 +2866,11 @@ func inspectPositionDeletesTableWithSchema(
 func inspectPositionDeletesTableWithManifests(
 	t *testing.T,
 	formatVersion int,
-	mb *MetadataBuilder,
+	mb *table.MetadataBuilder,
 	tableSchema *iceberg.Schema,
 	fs iceio.WriteFileIO,
 	manifests []iceberg.ManifestFile,
-) *Table {
+) *table.Table {
 	t.Helper()
 
 	snapshotID := int64(1)
@@ -2912,7 +2884,7 @@ func inspectPositionDeletesTableWithManifests(
 	require.NoError(t, fs.WriteFile(context.Background(), manifestListPath, manifestListBuffer.Bytes()))
 
 	schemaID := tableSchema.ID
-	snapshot := &Snapshot{
+	snapshot := &table.Snapshot{
 		SnapshotID:     snapshotID,
 		SequenceNumber: sequenceNumber,
 		TimestampMs:    time.Now().UnixMilli(),
@@ -2925,12 +2897,12 @@ func inspectPositionDeletesTableWithManifests(
 		snapshot.AddedRows = &addedRows
 	}
 	require.NoError(t, mb.AddSnapshot(snapshot))
-	require.NoError(t, mb.SetSnapshotRef(MainBranch, snapshotID, BranchRef))
+	require.NoError(t, mb.SetSnapshotRef(table.MainBranch, snapshotID, table.BranchRef))
 	metadata, err := mb.Build()
 	require.NoError(t, err)
 
-	return New(
-		Identifier{"db", "position_deletes"}, metadata, "metadata.json",
+	return table.New(
+		table.Identifier{"db", "position_deletes"}, metadata, "metadata.json",
 		func(context.Context) (iceio.IO, error) { return fs, nil }, nil,
 	)
 }
@@ -2950,7 +2922,7 @@ func TestInspectPositionDeletesParquet(t *testing.T) {
 		[]iceberg.DataFile{deleteFile},
 	)
 
-	rr, err := tbl.Inspect().PositionDeletes(ctx)
+	rr, err := PositionDeletes(ctx, tbl)
 	require.NoError(t, err)
 	defer rr.Release()
 	rec := collectRecord(t, rr)
@@ -2989,7 +2961,7 @@ func TestInspectPositionDeletesV3ParquetLeavesDVMetadataNull(t *testing.T) {
 		[]iceberg.DataFile{deleteFile},
 	)
 
-	rr, err := tbl.Inspect().PositionDeletes(ctx)
+	rr, err := PositionDeletes(ctx, tbl)
 	require.NoError(t, err)
 	defer rr.Release()
 	record := collectRecord(t, rr)
@@ -3059,7 +3031,7 @@ func TestInspectPositionDeletesDefersLaterManifestReads(t *testing.T) {
 		memFS, []iceberg.ManifestFile{firstManifest, missingManifest},
 	)
 
-	rr, err := tbl.Inspect().PositionDeletes(context.Background())
+	rr, err := PositionDeletes(context.Background(), tbl)
 	require.NoError(t, err)
 	defer rr.Release()
 	require.True(t, rr.Next(), "reader error: %v", rr.Err())
@@ -3122,7 +3094,7 @@ func TestInspectPositionDeletesParquetProjectsEvolvedNestedRow(t *testing.T) {
 	)
 	memFS := iceio.NewMemFS()
 	fieldID := func(id int) arrow.Metadata {
-		return arrow.MetadataFrom(map[string]string{ArrowParquetFieldIDKey: strconv.Itoa(id)})
+		return arrow.MetadataFrom(map[string]string{table.ArrowParquetFieldIDKey: strconv.Itoa(id)})
 	}
 
 	tableListType := iceberg.NewListType(3, iceberg.PrimitiveTypes.Int64, true)
@@ -3187,7 +3159,7 @@ func TestInspectPositionDeletesParquetProjectsEvolvedNestedRow(t *testing.T) {
 	tbl := inspectPositionDeletesTableWithSchema(
 		t, 2, newInspectPositionDeletesMetadataWithSchema(t, 2, tableSchema),
 		tableSchema, memFS, []iceberg.DataFile{deleteFile})
-	rr, err := tbl.Inspect(WithInspectAllocator(checked)).PositionDeletes(context.Background())
+	rr, err := PositionDeletes(context.Background(), tbl, WithAllocator(checked))
 	require.NoError(t, err)
 	defer rr.Release()
 	record = collectRecord(t, rr)
@@ -3228,7 +3200,7 @@ func TestInspectPositionDeletesParquetUsesNameMappingAndInitialDefault(t *testin
 	mappingJSON, err := json.Marshal(mapping)
 	require.NoError(t, err)
 	require.NoError(t, metadata.SetProperties(iceberg.Properties{
-		DefaultNameMappingKey: string(mappingJSON),
+		table.DefaultNameMappingKey: string(mappingJSON),
 	}))
 
 	sourcePayloadType := arrow.StructOf(arrow.Field{
@@ -3271,7 +3243,7 @@ func TestInspectPositionDeletesParquetUsesNameMappingAndInitialDefault(t *testin
 		t, 3, metadata, tableSchema, memFS,
 		[]iceberg.DataFile{newPosDeleteFile(t, deletePath, 1, 128)},
 	)
-	rr, err := tbl.Inspect().PositionDeletes(context.Background())
+	rr, err := PositionDeletes(context.Background(), tbl)
 	require.NoError(t, err)
 	defer rr.Release()
 	result := collectRecord(t, rr)
@@ -3295,7 +3267,7 @@ func TestInspectPositionDeletesRejectsUnsupportedFileFormat(t *testing.T) {
 		t, 2, newInspectPositionDeletesMetadata(t, 2), memFS,
 		[]iceberg.DataFile{builder.Build()},
 	)
-	rr, err := tbl.Inspect().PositionDeletes(context.Background())
+	rr, err := PositionDeletes(context.Background(), tbl)
 	require.NoError(t, err)
 	defer rr.Release()
 
@@ -3313,7 +3285,7 @@ func TestInspectPositionDeletesParquetProjectsDateToTimestampsV3(t *testing.T) {
 	memFS := iceio.NewMemFS()
 
 	fieldID := func(id int) arrow.Metadata {
-		return arrow.MetadataFrom(map[string]string{ArrowParquetFieldIDKey: strconv.Itoa(id)})
+		return arrow.MetadataFrom(map[string]string{table.ArrowParquetFieldIDKey: strconv.Itoa(id)})
 	}
 	tableSchema := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "created_at", Type: iceberg.PrimitiveTypes.Timestamp, Required: true},
@@ -3353,7 +3325,7 @@ func TestInspectPositionDeletesParquetProjectsDateToTimestampsV3(t *testing.T) {
 	tbl := inspectPositionDeletesTableWithSchema(
 		t, 3, newInspectPositionDeletesMetadataWithSchema(t, 3, tableSchema),
 		tableSchema, memFS, []iceberg.DataFile{deleteFile})
-	rr, err := tbl.Inspect().PositionDeletes(context.Background())
+	rr, err := PositionDeletes(context.Background(), tbl)
 	require.NoError(t, err)
 	defer rr.Release()
 	record = collectRecord(t, rr)
@@ -3406,7 +3378,7 @@ func TestPositionDeleteRowProjection(t *testing.T) {
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
 		iceberg.NestedField{ID: 2, Name: "data", Type: iceberg.PrimitiveTypes.String, Required: true},
 	)
-	outputSchema, err := SchemaToArrowSchema(
+	outputSchema, err := table.SchemaToArrowSchema(
 		PositionDeletesSchema(tableSchema, iceberg.NewStructType(), 2), nil, true, false)
 	require.NoError(t, err)
 	bldr := array.NewRecordBuilder(memory.DefaultAllocator, outputSchema)
@@ -3418,7 +3390,7 @@ func TestPositionDeleteRowProjection(t *testing.T) {
 		Name:     "data",
 		Type:     arrow.BinaryTypes.String,
 		Nullable: true,
-		Metadata: arrow.MetadataFrom(map[string]string{ArrowParquetFieldIDKey: "2"}),
+		Metadata: arrow.MetadataFrom(map[string]string{table.ArrowParquetFieldIDKey: "2"}),
 	})
 	row := scalar.NewStructScalar([]scalar.Scalar{scalar.NewStringScalar("deleted")}, sourceType)
 	deleteFile := newPosDeleteFile(t, "mem://position-deletes/table/data/delete.parquet", 1, 128)
@@ -3440,7 +3412,7 @@ func TestPositionDeleteRowProjectionAllowsMissingRequiredNestedField(t *testing.
 	tableSchema := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "details", Type: tableDetailsType, Required: true},
 	)
-	outputSchema, err := SchemaToArrowSchema(
+	outputSchema, err := table.SchemaToArrowSchema(
 		PositionDeletesSchema(tableSchema, iceberg.NewStructType(), 2), nil, true, false)
 	require.NoError(t, err)
 	bldr := array.NewRecordBuilder(memory.DefaultAllocator, outputSchema)
@@ -3449,7 +3421,7 @@ func TestPositionDeleteRowProjectionAllowsMissingRequiredNestedField(t *testing.
 	require.NoError(t, err)
 
 	fieldID := func(id int) arrow.Metadata {
-		return arrow.MetadataFrom(map[string]string{ArrowParquetFieldIDKey: strconv.Itoa(id)})
+		return arrow.MetadataFrom(map[string]string{table.ArrowParquetFieldIDKey: strconv.Itoa(id)})
 	}
 	sourceDetailsType := arrow.StructOf(arrow.Field{
 		Name:     "present",
@@ -3483,7 +3455,7 @@ func TestPositionDeleteRowProjectionPromotesTypes(t *testing.T) {
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
 		iceberg.NestedField{ID: 2, Name: "ratio", Type: iceberg.PrimitiveTypes.Float64, Required: true},
 	)
-	outputSchema, err := SchemaToArrowSchema(
+	outputSchema, err := table.SchemaToArrowSchema(
 		PositionDeletesSchema(tableSchema, iceberg.NewStructType(), 2), nil, true, false)
 	require.NoError(t, err)
 	bldr := array.NewRecordBuilder(memory.DefaultAllocator, outputSchema)
@@ -3496,13 +3468,13 @@ func TestPositionDeleteRowProjectionPromotesTypes(t *testing.T) {
 			Name:     "id",
 			Type:     arrow.PrimitiveTypes.Int32,
 			Nullable: true,
-			Metadata: arrow.MetadataFrom(map[string]string{ArrowParquetFieldIDKey: "1"}),
+			Metadata: arrow.MetadataFrom(map[string]string{table.ArrowParquetFieldIDKey: "1"}),
 		},
 		arrow.Field{
 			Name:     "ratio",
 			Type:     arrow.PrimitiveTypes.Float32,
 			Nullable: true,
-			Metadata: arrow.MetadataFrom(map[string]string{ArrowParquetFieldIDKey: "2"}),
+			Metadata: arrow.MetadataFrom(map[string]string{table.ArrowParquetFieldIDKey: "2"}),
 		},
 	)
 	row := scalar.NewStructScalar([]scalar.Scalar{
@@ -3523,7 +3495,7 @@ func TestPositionDeleteRowProjectionPromotesLargeBinaryToBinary(t *testing.T) {
 	tableSchema := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "payload", Type: iceberg.PrimitiveTypes.Binary, Required: true},
 	)
-	outputSchema, err := SchemaToArrowSchema(
+	outputSchema, err := table.SchemaToArrowSchema(
 		PositionDeletesSchema(tableSchema, iceberg.NewStructType(), 2), nil, true, false)
 	require.NoError(t, err)
 	bldr := array.NewRecordBuilder(memory.DefaultAllocator, outputSchema)
@@ -3531,7 +3503,7 @@ func TestPositionDeleteRowProjectionPromotesLargeBinaryToBinary(t *testing.T) {
 	appender, err := newPositionDeleteRecordAppender(bldr, iceberg.NewStructType(), nil, 2)
 	require.NoError(t, err)
 
-	fieldID := arrow.MetadataFrom(map[string]string{ArrowParquetFieldIDKey: "1"})
+	fieldID := arrow.MetadataFrom(map[string]string{table.ArrowParquetFieldIDKey: "1"})
 	sourceType := arrow.StructOf(arrow.Field{
 		Name:     "payload",
 		Type:     arrow.BinaryTypes.LargeBinary,
@@ -3559,7 +3531,7 @@ func TestPositionDeleteRowProjectionPromotesDateInV3(t *testing.T) {
 		iceberg.NestedField{ID: 1, Name: "created_at", Type: iceberg.PrimitiveTypes.Timestamp, Required: true},
 		iceberg.NestedField{ID: 2, Name: "created_at_ns", Type: iceberg.PrimitiveTypes.TimestampNs, Required: true},
 	)
-	outputSchema, err := SchemaToArrowSchema(
+	outputSchema, err := table.SchemaToArrowSchema(
 		PositionDeletesSchema(tableSchema, iceberg.NewStructType(), 3), nil, true, false)
 	require.NoError(t, err)
 	bldr := array.NewRecordBuilder(memory.DefaultAllocator, outputSchema)
@@ -3568,7 +3540,7 @@ func TestPositionDeleteRowProjectionPromotesDateInV3(t *testing.T) {
 	require.NoError(t, err)
 
 	fieldID := func(id int) arrow.Metadata {
-		return arrow.MetadataFrom(map[string]string{ArrowParquetFieldIDKey: strconv.Itoa(id)})
+		return arrow.MetadataFrom(map[string]string{table.ArrowParquetFieldIDKey: strconv.Itoa(id)})
 	}
 	dateValue := arrow.Date32(20_000)
 	sourceType := arrow.StructOf(
@@ -3598,21 +3570,11 @@ func TestPositionDeleteRowProjectionPromotesDateInV3(t *testing.T) {
 		arrow.Timestamp(int64(dateValue)*int64(24*time.Hour/time.Nanosecond)), dateNanos.Value(0))
 }
 
-func TestPositionDeleteDatePromotion(t *testing.T) {
-	require.True(t, canPromoteDateToTimestamp(
-		iceberg.PrimitiveTypes.Date, iceberg.PrimitiveTypes.Timestamp))
-	require.True(t, canPromoteDateToTimestamp(
-		iceberg.PrimitiveTypes.Date, iceberg.PrimitiveTypes.TimestampNs))
-	require.False(t, canPromoteDateToTimestamp(
-		iceberg.PrimitiveTypes.Date, iceberg.PrimitiveTypes.TimestampTz),
-		"date promotion must not target a timezone-aware timestamp")
-}
-
 func TestPositionDeleteRowProjectionRejectsDatePromotionBeforeV3(t *testing.T) {
 	tableSchema := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "created_at", Type: iceberg.PrimitiveTypes.Timestamp, Required: true},
 	)
-	outputSchema, err := SchemaToArrowSchema(
+	outputSchema, err := table.SchemaToArrowSchema(
 		PositionDeletesSchema(tableSchema, iceberg.NewStructType(), 2), nil, true, false)
 	require.NoError(t, err)
 	bldr := array.NewRecordBuilder(memory.DefaultAllocator, outputSchema)
@@ -3625,7 +3587,7 @@ func TestPositionDeleteRowProjectionRejectsDatePromotionBeforeV3(t *testing.T) {
 			Name:     "created_at",
 			Type:     arrow.FixedWidthTypes.Date32,
 			Nullable: true,
-			Metadata: arrow.MetadataFrom(map[string]string{ArrowParquetFieldIDKey: "1"}),
+			Metadata: arrow.MetadataFrom(map[string]string{table.ArrowParquetFieldIDKey: "1"}),
 		}))
 	defer row.Release()
 
@@ -3642,7 +3604,7 @@ func TestPositionDeleteRowProjectionPromotesNestedValues(t *testing.T) {
 		iceberg.NestedField{ID: 2, Name: "attributes", Type: tableMapType, Required: true},
 		iceberg.NestedField{ID: 6, Name: "amount", Type: iceberg.MustDecimalTypeOf(18, 2), Required: true},
 	)
-	outputSchema, err := SchemaToArrowSchema(
+	outputSchema, err := table.SchemaToArrowSchema(
 		PositionDeletesSchema(tableSchema, iceberg.NewStructType(), 2), nil, true, false)
 	require.NoError(t, err)
 	bldr := array.NewRecordBuilder(memory.DefaultAllocator, outputSchema)
@@ -3651,7 +3613,7 @@ func TestPositionDeleteRowProjectionPromotesNestedValues(t *testing.T) {
 	require.NoError(t, err)
 
 	fieldID := func(id int) arrow.Metadata {
-		return arrow.MetadataFrom(map[string]string{ArrowParquetFieldIDKey: strconv.Itoa(id)})
+		return arrow.MetadataFrom(map[string]string{table.ArrowParquetFieldIDKey: strconv.Itoa(id)})
 	}
 	sourceListType := arrow.ListOfField(arrow.Field{
 		Name:     "element",
@@ -3723,7 +3685,7 @@ func TestPositionDeleteRowProjectionPromotesNestedStructValues(t *testing.T) {
 	tableSchema := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "items", Type: tableListType, Required: true},
 	)
-	outputSchema, err := SchemaToArrowSchema(
+	outputSchema, err := table.SchemaToArrowSchema(
 		PositionDeletesSchema(tableSchema, iceberg.NewStructType(), 2), nil, true, false)
 	require.NoError(t, err)
 	bldr := array.NewRecordBuilder(memory.DefaultAllocator, outputSchema)
@@ -3732,7 +3694,7 @@ func TestPositionDeleteRowProjectionPromotesNestedStructValues(t *testing.T) {
 	require.NoError(t, err)
 
 	fieldID := func(id int) arrow.Metadata {
-		return arrow.MetadataFrom(map[string]string{ArrowParquetFieldIDKey: strconv.Itoa(id)})
+		return arrow.MetadataFrom(map[string]string{table.ArrowParquetFieldIDKey: strconv.Itoa(id)})
 	}
 	sourceElementType := arrow.StructOf(
 		arrow.Field{Name: "name", Type: arrow.BinaryTypes.String, Nullable: true, Metadata: fieldID(9)},
@@ -3777,7 +3739,7 @@ func TestPositionDeleteRowProjectionRejectsNullMapKey(t *testing.T) {
 	tableSchema := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "attributes", Type: tableMapType, Required: true},
 	)
-	outputSchema, err := SchemaToArrowSchema(
+	outputSchema, err := table.SchemaToArrowSchema(
 		PositionDeletesSchema(tableSchema, iceberg.NewStructType(), 2), nil, true, false)
 	require.NoError(t, err)
 	bldr := array.NewRecordBuilder(memory.DefaultAllocator, outputSchema)
@@ -3786,7 +3748,7 @@ func TestPositionDeleteRowProjectionRejectsNullMapKey(t *testing.T) {
 	require.NoError(t, err)
 
 	fieldID := func(id int) arrow.Metadata {
-		return arrow.MetadataFrom(map[string]string{ArrowParquetFieldIDKey: strconv.Itoa(id)})
+		return arrow.MetadataFrom(map[string]string{table.ArrowParquetFieldIDKey: strconv.Itoa(id)})
 	}
 	sourceEntryType := arrow.StructOf(
 		arrow.Field{Name: "key", Type: arrow.BinaryTypes.String, Nullable: true, Metadata: fieldID(2)},
@@ -3830,13 +3792,13 @@ func TestInspectPositionDeletesStopsOnContextCancellation(t *testing.T) {
 	metadata, err := newInspectPositionDeletesMetadata(t, 2).Build()
 	require.NoError(t, err)
 	memFS := iceio.NewMemFS()
-	tbl := New(
-		Identifier{"db", "position_deletes"}, metadata, "metadata.json",
+	tbl := table.New(
+		table.Identifier{"db", "position_deletes"}, metadata, "metadata.json",
 		func(context.Context) (iceio.IO, error) { return memFS, nil }, nil,
 	)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	rr, err := tbl.Inspect().PositionDeletes(ctx)
+	rr, err := PositionDeletes(ctx, tbl)
 	require.NoError(t, err)
 	cancel()
 
@@ -3860,7 +3822,7 @@ func TestInspectPositionDeletesEarlyRelease(t *testing.T) {
 			memFS := iceio.NewMemFS()
 			deletePath := "mem://position-deletes/table/data/delete.parquet"
 			dataPath := "mem://position-deletes/table/data/data.parquet"
-			var tbl *Table
+			var tbl *table.Table
 			if tt.populated {
 				writePosDeleteParquetToMemFS(t, memFS, deletePath,
 					`[{"file_path": "`+dataPath+`", "pos": 1}]`)
@@ -3871,25 +3833,25 @@ func TestInspectPositionDeletesEarlyRelease(t *testing.T) {
 			} else {
 				metadata, buildErr := newInspectPositionDeletesMetadata(t, 2).Build()
 				require.NoError(t, buildErr)
-				tbl = New(
-					Identifier{"db", "position_deletes"}, metadata, "metadata.json",
+				tbl = table.New(
+					table.Identifier{"db", "position_deletes"}, metadata, "metadata.json",
 					func(context.Context) (iceio.IO, error) { return memFS, nil }, nil,
 				)
 			}
-			inspect := tbl.Inspect(WithInspectAllocator(checked))
+			inspect := newInspector(tbl, WithAllocator(checked))
 
 			var rr array.RecordReader
 			var err error
 			if tt.populated {
-				rr, err = inspect.PositionDeletes(context.Background())
+				rr, err = inspect.positionDeletes(context.Background())
 			} else {
-				partitionType, partitionIDs, partitionErr := positionDeletesPartitionType(tbl.metadata)
+				partitionType, partitionIDs, partitionErr := positionDeletesPartitionType(tbl.Metadata())
 				require.NoError(t, partitionErr)
-				schema := PositionDeletesSchema(tbl.metadata.CurrentSchema(), partitionType, tbl.metadata.FormatVersion())
-				arrowSchema, schemaErr := SchemaToArrowSchema(schema, nil, true, false)
+				schema := PositionDeletesSchema(tbl.Metadata().CurrentSchema(), partitionType, tbl.Metadata().FormatVersion())
+				arrowSchema, schemaErr := table.SchemaToArrowSchema(schema, nil, true, false)
 				require.NoError(t, schemaErr)
 				rr = inspect.positionDeleteRecordReader(
-					context.Background(), arrowSchema, nil, slices.Values([]iceberg.ManifestFile(nil)), partitionType, partitionIDs, tbl.metadata.FormatVersion(), nil)
+					context.Background(), arrowSchema, nil, slices.Values([]iceberg.ManifestFile(nil)), partitionType, partitionIDs, tbl.Metadata().FormatVersion(), nil)
 			}
 			require.NoError(t, err)
 			require.True(t, rr.Next())
@@ -3918,7 +3880,7 @@ func TestInspectPositionDeletesDeletionVector(t *testing.T) {
 		t, 3, newInspectPositionDeletesMetadata(t, 3), memFS, deleteFiles,
 	)
 
-	rr, err := tbl.Inspect().PositionDeletes(ctx)
+	rr, err := PositionDeletes(ctx, tbl)
 	require.NoError(t, err)
 	defer rr.Release()
 	rec := collectRecord(t, rr)
@@ -3970,8 +3932,8 @@ func TestPositionDeletesSchema(t *testing.T) {
 	require.Equal(t, positionDeleteContentSizeID, v3Fields[6].ID)
 
 	spec := partitionedSpec()
-	metadata, err := NewMetadata(
-		simpleSchema(), &spec, UnsortedSortOrder, "mem://position-deletes/table", nil,
+	metadata, err := table.NewMetadata(
+		simpleSchema(), &spec, table.UnsortedSortOrder, "mem://position-deletes/table", nil,
 	)
 	require.NoError(t, err)
 	partitionType, partitionIDs, err := positionDeletesPartitionType(metadata)
@@ -3985,7 +3947,7 @@ func TestPositionDeletesSchema(t *testing.T) {
 	)
 }
 
-// TestInspectAllocatorOption verifies WithInspectAllocator routes allocations
+// TestInspectAllocatorOption verifies WithAllocator routes allocations
 // through the supplied allocator, and that all buffers are released.
 func TestInspectAllocatorOption(t *testing.T) {
 	checked := memory.NewCheckedAllocator(memory.DefaultAllocator)
@@ -3994,7 +3956,7 @@ func TestInspectAllocatorOption(t *testing.T) {
 	t.Cleanup(func() { checked.AssertSize(t, 0) })
 	tbl := snapshotsTestTable()
 
-	rr, err := tbl.Inspect(WithInspectAllocator(checked)).Snapshots(context.Background())
+	rr, err := Snapshots(context.Background(), tbl, WithAllocator(checked))
 	require.NoError(t, err)
 	defer rr.Release()
 
@@ -4007,17 +3969,17 @@ func TestInspectAllocatorOption(t *testing.T) {
 func TestInspectMetadataLogEntriesAllocator(t *testing.T) {
 	checked := memory.NewCheckedAllocator(memory.DefaultAllocator)
 	t.Cleanup(func() { checked.AssertSize(t, 0) })
-	meta := &metadataV2{commonMetadata: commonMetadata{
+	meta := newTestMetadata(testMetadata{
 		LastUpdatedMS: 2000,
-		MetadataLog: []MetadataLogEntry{
+		MetadataLog: []table.MetadataLogEntry{
 			{MetadataFile: "/metadata/v1.json", TimestampMs: 1000},
 		},
-		SnapshotList: []Snapshot{{SnapshotID: 101, SequenceNumber: 7}},
-		SnapshotLog:  []SnapshotLogEntry{{SnapshotID: 101, TimestampMs: 1500}},
-	}}
-	tbl := New(Identifier{"metadata-log-entries-allocator"}, meta, "/metadata/v2.json", nil, nil)
+		SnapshotList: []table.Snapshot{{SnapshotID: 101, SequenceNumber: 7}},
+		SnapshotLog:  []table.SnapshotLogEntry{{SnapshotID: 101, TimestampMs: 1500}},
+	})
+	tbl := table.New(table.Identifier{"metadata-log-entries-allocator"}, meta, "/metadata/v2.json", nil, nil)
 
-	rr, err := tbl.Inspect(WithInspectAllocator(checked)).MetadataLogEntries(context.Background())
+	rr, err := MetadataLogEntries(context.Background(), tbl, WithAllocator(checked))
 	require.NoError(t, err)
 	defer rr.Release()
 
@@ -4059,4 +4021,38 @@ func TestInspectInt32ValueRejectsOverflow(t *testing.T) {
 
 	_, err := inspectInt32Value(int(^uint32(0)>>1)+1, "field ID")
 	require.ErrorContains(t, err, "does not fit in int32")
+}
+
+// refreshCatalog serves a fixed table to Table.Refresh.
+type refreshCatalog struct{ fresh *table.Table }
+
+func (c refreshCatalog) LoadTable(context.Context, table.Identifier) (*table.Table, error) {
+	return c.fresh, nil
+}
+
+func (refreshCatalog) CommitTable(context.Context, table.Identifier, []table.Requirement, []table.Update) (table.Metadata, string, error) {
+	return nil, "", errors.New("not supported")
+}
+
+// TestInspectReadsTableAsOfCall pins that a metadata-table reader keeps the
+// table it was created from when the caller's table is refreshed before the
+// reader is consumed, as the value-receiver Table.Inspect did.
+func TestInspectReadsTableAsOfCall(t *testing.T) {
+	base, memIO := newMemTable(t, *iceberg.UnpartitionedSpec)
+	fsF := func(context.Context) (iceio.IO, error) { return memIO, nil }
+	builder, err := table.MetadataBuilderFromBase(base.Metadata(), base.MetadataLocation())
+	require.NoError(t, err)
+	require.NoError(t, builder.SetProperties(iceberg.Properties{"refreshed": "true"}))
+	refreshed, err := builder.Build()
+	require.NoError(t, err)
+
+	fresh := table.New(base.Identifier(), refreshed, "refreshed.json", fsF, nil)
+	tbl := table.New(base.Identifier(), base.Metadata(), base.MetadataLocation(), fsF,
+		refreshCatalog{fresh: fresh})
+
+	i := newInspector(tbl)
+	require.NoError(t, tbl.Refresh(t.Context()))
+	require.Equal(t, "true", tbl.Metadata().Properties()["refreshed"])
+	require.NotContains(t, i.tbl.Metadata().Properties(), "refreshed")
+	require.Equal(t, base.MetadataLocation(), i.tbl.MetadataLocation())
 }

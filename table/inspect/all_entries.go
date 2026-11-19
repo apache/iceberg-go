@@ -14,19 +14,24 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package table
+package inspect
 
 import (
 	"context"
 
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/table"
 )
 
 // AllEntries returns every entry from each manifest reachable from any
 // snapshot currently tracked by the table. Shared manifests are scanned once,
 // and deleted entries remain visible.
-func (i InspectTable) AllEntries(ctx context.Context) (array.RecordReader, error) {
+func AllEntries(ctx context.Context, tbl *table.Table, opts ...Option) (array.RecordReader, error) {
+	return newInspector(tbl, opts...).allEntries(ctx)
+}
+
+func (i inspector) allEntries(ctx context.Context) (array.RecordReader, error) {
 	return i.inspectEntries(ctx, "all entries", true, AllEntriesSchema)
 }
 

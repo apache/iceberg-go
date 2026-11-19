@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-package table
+package inspect
 
 import (
 	"context"
@@ -23,17 +23,22 @@ import (
 
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/table"
 	tblutils "github.com/apache/iceberg-go/table/internal"
 )
 
 // Entries returns every manifest entry in the current snapshot, including
 // entries marked deleted. This exposes commit history that data_files and
 // delete_files intentionally hide.
-func (i InspectTable) Entries(ctx context.Context) (array.RecordReader, error) {
+func Entries(ctx context.Context, tbl *table.Table, opts ...Option) (array.RecordReader, error) {
+	return newInspector(tbl, opts...).entries(ctx)
+}
+
+func (i inspector) entries(ctx context.Context) (array.RecordReader, error) {
 	return i.inspectEntries(ctx, "entries", false, EntriesSchema)
 }
 
-func (i InspectTable) inspectEntries(
+func (i inspector) inspectEntries(
 	ctx context.Context,
 	name string,
 	allSnapshots bool,
@@ -43,7 +48,7 @@ func (i InspectTable) inspectEntries(
 	if err != nil {
 		return nil, fmt.Errorf("inspect %s: %w", name, err)
 	}
-	arrowSchema, err := SchemaToArrowSchema(schemaFn(partitionType), nil, true, false)
+	arrowSchema, err := table.SchemaToArrowSchema(schemaFn(partitionType), nil, true, false)
 	if err != nil {
 		return nil, fmt.Errorf("inspect %s: build arrow schema: %w", name, err)
 	}
