@@ -271,6 +271,16 @@ func TestPartitionValueScalarDecimal(t *testing.T) {
 	require.Equal(t, value.Val, got.(*scalar.Decimal128).Value)
 }
 
+func TestPartitionValueScalarWidensPromotedValues(t *testing.T) {
+	got, err := internal.PartitionValueScalar(int32(5), iceberg.PrimitiveTypes.Int64, arrow.PrimitiveTypes.Int64)
+	require.NoError(t, err)
+	require.Equal(t, int64(5), got.(*scalar.Int64).Value)
+
+	got, err = internal.PartitionValueScalar(float32(1.5), iceberg.PrimitiveTypes.Float64, arrow.PrimitiveTypes.Float64)
+	require.NoError(t, err)
+	require.Equal(t, float64(1.5), got.(*scalar.Float64).Value)
+}
+
 func TestPartitionValueScalarRejectsMismatchedPartitionValues(t *testing.T) {
 	tests := []struct {
 		name      string
