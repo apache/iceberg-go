@@ -73,6 +73,7 @@ func (p *arrowBufferPool) Reallocate(size int, buf []byte) []byte {
 		if size > len(buf) {
 			clear(next[len(buf):])
 		}
+
 		return next
 	}
 	next := p.Allocate(size)

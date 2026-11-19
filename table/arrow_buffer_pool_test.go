@@ -87,6 +87,7 @@ func TestReadTasksArrowBufferReuse(t *testing.T) {
 				} else {
 					require.Same(t, tc.allocator, allocator)
 				}
+
 				return schema, func(yield func(arrow.RecordBatch, error) bool) {
 					builder := array.NewInt64Builder(allocator)
 					defer builder.Release()
@@ -103,6 +104,7 @@ func TestReadTasksArrowBufferReuse(t *testing.T) {
 			for batch, err := range records {
 				require.NoError(t, err)
 				retained = batch
+
 				break
 			}
 			require.NotNil(t, retained)
