@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-package table
+package inspect
 
 import (
 	"fmt"
@@ -24,13 +24,14 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/table"
 )
 
 func BenchmarkInspectContentFileAppender(b *testing.B) {
 	for _, fieldCount := range []int{1, 8, 32} {
 		b.Run(fmt.Sprintf("fields=%d/files=4096", fieldCount), func(b *testing.B) {
 			partitionType, files := benchmarkInspectContentFiles(b, fieldCount, 4096)
-			arrowSchema, err := SchemaToArrowSchema(DataFilesSchema(partitionType), nil, true, false)
+			arrowSchema, err := table.SchemaToArrowSchema(DataFilesSchema(partitionType), nil, true, false)
 			if err != nil {
 				b.Fatal(err)
 			}
@@ -126,7 +127,7 @@ func BenchmarkInspectContentFileAppenderMixedPartitions(b *testing.B) {
 				}
 				files[i] = file.Build()
 			}
-			arrowSchema, err := SchemaToArrowSchema(DataFilesSchema(partitionType), nil, true, false)
+			arrowSchema, err := table.SchemaToArrowSchema(DataFilesSchema(partitionType), nil, true, false)
 			if err != nil {
 				b.Fatal(err)
 			}

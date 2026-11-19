@@ -162,12 +162,12 @@ func TestRecordBatchBufferSizeReachesRollingWriter(t *testing.T) {
 	outputCh := make(chan iceberg.DataFile, 1)
 
 	overridden := newTuningTestWriterFactory(t, 3)
-	w := overridden.newRollingDataWriter(t.Context(), "", nil, outputCh)
+	w := overridden.newRollingDataWriter(t.Context(), "", nil, outputCh, overridden.currentSpec)
 	assert.Equal(t, 3, cap(w.recordCh))
 	w.abortAndWait()
 
 	defaulted := newTuningTestWriterFactory(t, 0)
-	dw := defaulted.newRollingDataWriter(t.Context(), "", nil, outputCh)
+	dw := defaulted.newRollingDataWriter(t.Context(), "", nil, outputCh, defaulted.currentSpec)
 	assert.Equal(t, rollingDataWriterQueueCapacity, cap(dw.recordCh))
 	dw.abortAndWait()
 }

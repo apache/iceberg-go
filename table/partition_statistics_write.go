@@ -610,8 +610,8 @@ func validatePartitionStatisticsTuple(spec iceberg.PartitionSpec, path string, v
 	return nil
 }
 
-// sortPartitionStatistics obeys the spec's NULL FIRST tuple ordering, not
-// inspectPartitionKey's text ordering (where "10" sorts before "2").
+// sortPartitionStatistics obeys the spec's NULL FIRST tuple ordering, not the
+// text ordering of the inspect partitions table (where "10" sorts before "2").
 // A spec ID only breaks equal tuple ties; it is not the primary sort key.
 func sortPartitionStatistics(rows []*tblutils.PartitionAggregate, partitionType *iceberg.StructType) error {
 	// Collection already validates each partition value before using it as

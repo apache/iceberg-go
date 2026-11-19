@@ -94,8 +94,7 @@ func (r SnapshotValidationReport) Valid() bool {
 //
 // Spec: https://iceberg.apache.org/spec/#content-file-uniqueness
 // Spec: https://iceberg.apache.org/spec/#manifest-lists
-func (i InspectTable) ValidateSnapshot(ctx context.Context, snapshotID int64) (*SnapshotValidationReport, error) {
-	t := i.tbl
+func (t Table) ValidateSnapshot(ctx context.Context, snapshotID int64) (*SnapshotValidationReport, error) {
 	if t.metadata == nil {
 		return nil, fmt.Errorf("%w: table metadata is nil", ErrInvalidMetadata)
 	}
