@@ -40,6 +40,60 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestRecordFilterAllPassingBatch(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "keep", Type: iceberg.PrimitiveTypes.Bool},
+		iceberg.NestedField{ID: 2, Name: "value", Type: iceberg.PrimitiveTypes.Int64},
+	)
+	arrowSchema, err := SchemaToArrowSchema(schema, nil, true, false)
+	require.NoError(t, err)
+	filter, err := iceberg.BindExpr(schema, iceberg.EqualTo(iceberg.Reference("keep"), true), true)
+	require.NoError(t, err)
+	plan, err := compileFileFilterPlan(schema, filter, true, true, false)
+	require.NoError(t, err)
+
+	for _, tc := range []struct {
+		name        string
+		keep, valid []bool
+		start, end  int64
+		want        []int64
+		reuse       bool
+	}{
+		{name: "all pass", keep: []bool{true, true, true}, end: 3, want: []int64{0, 1, 2}, reuse: true},
+		{name: "sliced all pass", keep: []bool{false, true, true, false}, start: 1, end: 3, want: []int64{1, 2}, reuse: true},
+		{name: "mixed", keep: []bool{true, false, true}, end: 3, want: []int64{0, 2}},
+		{name: "null", keep: []bool{true, true, true}, valid: []bool{true, false, true}, end: 3, want: []int64{0, 2}},
+		{name: "none pass", keep: []bool{false}, end: 1},
+		{name: "empty", keep: []bool{true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+			defer mem.AssertSize(t, 0)
+			builder := array.NewRecordBuilder(mem, arrowSchema)
+			defer builder.Release()
+			builder.Field(0).(*array.BooleanBuilder).AppendValues(tc.keep, tc.valid)
+			for i := range tc.keep {
+				builder.Field(1).(*array.Int64Builder).Append(int64(i))
+			}
+
+			original := builder.NewRecordBatch()
+			input := original.NewSlice(tc.start, tc.end)
+			original.Release()
+			result, err := plan.recordProcessor(compute.WithAllocator(t.Context(), mem))(input)
+			require.NoError(t, err)
+			defer result.Release()
+			if tc.reuse {
+				require.Same(t, input, result)
+			}
+			values := result.Column(1).(*array.Int64)
+			require.EqualValues(t, len(tc.want), values.Len())
+			for i, value := range tc.want {
+				require.Equal(t, value, values.Value(i))
+			}
+		})
+	}
+}
+
 type failAfterGoodCloseFS struct {
 	*iceio.MemFS
 

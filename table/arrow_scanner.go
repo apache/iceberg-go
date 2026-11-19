@@ -34,6 +34,7 @@ import (
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/bitutil"
 	"github.com/apache/arrow-go/v18/arrow/compute"
 	"github.com/apache/arrow-go/v18/arrow/compute/exprs"
 	"github.com/apache/arrow-go/v18/arrow/memory"
@@ -1600,6 +1601,18 @@ func filterRecords(ctx context.Context, recordFilter expr.Expression) recProcess
 			return nil, err
 		}
 		defer mask.Release()
+
+		if arrayMask, ok := mask.(*compute.ArrayDatum); ok {
+			data := arrayMask.Value
+			if data.DataType().ID() == arrow.BOOL && data.Len() > 0 &&
+				int64(data.Len()) == rec.NumRows() && data.NullN() == 0 {
+				if values := data.Buffers()[1]; values != nil &&
+					bitutil.BitmapAllSet(values.Bytes(), data.Offset(), data.Len()) {
+					rec.Retain()
+					return rec, nil
+				}
+			}
+		}
 
 		result, err := compute.Filter(ctx, input, mask, *compute.DefaultFilterOptions())
 		if err != nil {
