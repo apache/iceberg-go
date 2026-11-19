@@ -115,6 +115,33 @@ func TestExecuteOrphanCleanupRejectsStalePlanWhenFileBecomesLive(t *testing.T) {
 	require.Empty(t, result.DeletedFiles)
 }
 
+func TestExecuteOrphanCleanupRejectsRefsOnlyHistoryAfterRefresh(t *testing.T) {
+	ctx := t.Context()
+	fs := iceio.NewMemFS()
+	const location = "mem://stale-plan/refs-only"
+	const metadataLocation = location + "/metadata/v1.metadata.json"
+	const orphanPath = location + "/data/orphan.parquet"
+	meta, err := table.NewMetadata(iceberg.NewSchema(0), iceberg.UnpartitionedSpec,
+		table.UnsortedSortOrder, location, nil)
+	require.NoError(t, err)
+	fsF := testFSF(fs)
+	catalog := &orphanCleanupTestCatalog{metadata: meta, location: metadataLocation, fsF: fsF}
+	tbl := table.New(table.Identifier{"db", "refs_only_refresh"}, meta, metadataLocation, fsF, catalog)
+	require.NoError(t, fs.WriteFile(ctx, orphanPath, []byte("orphan")))
+	plan, err := PlanOrphanFiles(ctx, tbl, WithCleanupFilesOlderThan(0))
+	require.NoError(t, err)
+	require.Equal(t, []string{orphanPath}, plan.Files())
+
+	// A load can return refs-only metadata at the same metadata location.
+	catalog.refsOnly = true
+	_, err = ExecuteOrphanCleanup(ctx, tbl, plan)
+	require.ErrorIs(t, err, table.ErrInvalidOperation)
+	require.ErrorContains(t, err, "snapshot-loading-mode=refs")
+	file, err := fs.Open(ctx, orphanPath)
+	require.NoError(t, err)
+	require.NoError(t, file.Close())
+}
+
 func TestDeleteOrphanFilesRefreshesAroundPlanning(t *testing.T) {
 	for _, afterPlanning := range []bool{false, true} {
 		name := "peer commits before cleanup"
@@ -335,6 +362,7 @@ type orphanCleanupTestCatalog struct {
 	fsF        table.FSysF
 	nextFile   int
 	beforeLoad func() error
+	refsOnly   bool
 }
 
 func (c *orphanCleanupTestCatalog) LoadTable(_ context.Context, ident table.Identifier) (*table.Table, error) {
@@ -346,7 +374,7 @@ func (c *orphanCleanupTestCatalog) LoadTable(_ context.Context, ident table.Iden
 		}
 	}
 
-	return table.New(ident, c.metadata, c.location, c.fsF, c), nil
+	return table.New(ident, c.metadata, c.location, c.fsF, c, table.WithSnapshotHistoryLimitedToRefs(c.refsOnly)), nil
 }
 
 func (c *orphanCleanupTestCatalog) CommitTable(

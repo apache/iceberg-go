@@ -445,7 +445,7 @@ func refreshOrphanCleanupTable(ctx context.Context, tbl *table.Table) (*table.Ta
 	if err := refreshed.Refresh(ctx); err != nil {
 		return nil, fmt.Errorf("failed to refresh table before orphan cleanup: %w", err)
 	}
-	if err := validateOrphanCleanupGC(&refreshed); err != nil {
+	if err := validateOrphanCleanupTable(&refreshed); err != nil {
 		return nil, err
 	}
 
