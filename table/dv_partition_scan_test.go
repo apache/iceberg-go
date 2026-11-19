@@ -176,6 +176,23 @@ func TestLocalScanValidatesDeletionVectorPartitionsAcrossSchemaPromotion(t *test
 					}
 				})
 			}
+			t.Run("should validate a promoted partition if the changelog adds a DV", func(t *testing.T) {
+				tasks, err := tbl.NewIncrementalChangelogScan().PlanFiles(t.Context())
+				if tt.mismatch {
+					require.ErrorIs(t, err, ErrInvalidMetadata)
+					require.ErrorContains(t, err, dvPath)
+					require.ErrorContains(t, err, dataPath)
+
+					return
+				}
+
+				require.NoError(t, err)
+				require.Len(t, tasks, 2)
+				deleted, ok := tasks[1].(DeletedRowsScanTask)
+				require.True(t, ok)
+				require.Equal(t, dataPath, deleted.ScanTask().File.FilePath())
+				require.Equal(t, []string{dvPath}, changelogFilePaths(deleted.AddedDeletes()))
+			})
 			if tt.mismatch {
 				t.Run("copy-on-write delete", func(t *testing.T) {
 					// A non-partition predicate without file bounds requires a
