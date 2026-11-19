@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-package table
+package inspect
 
 import (
 	"fmt"
@@ -25,6 +25,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/internal"
+	"github.com/apache/iceberg-go/table"
 )
 
 type inspectPublicStatsDataFile struct {
@@ -136,7 +137,7 @@ func benchmarkAppendInspectContentFiles(
 ) {
 	b.Helper()
 
-	arrowSchema, err := SchemaToArrowSchema(DataFilesSchema(partitionType), nil, true, false)
+	arrowSchema, err := table.SchemaToArrowSchema(DataFilesSchema(partitionType), nil, true, false)
 	if err != nil {
 		b.Fatal(err)
 	}

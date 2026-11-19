@@ -111,7 +111,7 @@ func TestDeleteParquetSettingsOnDisk(t *testing.T) {
 					defer factory.stopCount()
 					writerProps = factory.writeProps.([]parquet.WriterProperty)
 					rowGroupBytes = factory.rowGroupBytes
-					writer, err := factory.openFileWriter(ctx, "", nil, 0, 1, nil)
+					writer, err := factory.openFileWriter(ctx, "", nil, 0, 1, nil, factory.currentSpec)
 					require.NoError(t, err)
 					for _, rec := range batches {
 						require.NoError(t, writer.Write(rec))

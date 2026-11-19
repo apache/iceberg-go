@@ -39,7 +39,7 @@ func TestDiffSnapshotFilesWithRealBranchesAndManifestRewrite(t *testing.T) {
 	require.Len(t, branchPaths, 2)
 	require.Len(t, mainPaths, 2)
 
-	diff, err := tbl.Inspect().DiffSnapshotFiles(t.Context(), branch.SnapshotID, main.SnapshotID)
+	diff, err := tbl.DiffSnapshotFiles(t.Context(), branch.SnapshotID, main.SnapshotID)
 	require.NoError(t, err)
 	require.Len(t, diff.AddedDataFiles, 1)
 	require.Len(t, diff.RemovedDataFiles, 1)
@@ -56,7 +56,7 @@ func TestDiffSnapshotFilesWithRealBranchesAndManifestRewrite(t *testing.T) {
 
 	rewritten := tbl.SnapshotByName(table.MainBranch)
 	require.NotNil(t, rewritten)
-	unchanged, err := tbl.Inspect().DiffSnapshotFiles(t.Context(), main.SnapshotID, rewritten.SnapshotID)
+	unchanged, err := tbl.DiffSnapshotFiles(t.Context(), main.SnapshotID, rewritten.SnapshotID)
 	require.NoError(t, err)
 	require.False(t, unchanged.HasChanges(), "rewriting manifests must not change physical files")
 }
@@ -76,7 +76,7 @@ func TestDiffSnapshotFilesWithBranchDelete(t *testing.T) {
 
 	after := tbl.SnapshotByName(branchPlanningRef)
 	require.NotNil(t, after)
-	diff, err := tbl.Inspect().DiffSnapshotFiles(t.Context(), before.SnapshotID, after.SnapshotID)
+	diff, err := tbl.DiffSnapshotFiles(t.Context(), before.SnapshotID, after.SnapshotID)
 	require.NoError(t, err)
 	require.Empty(t, diff.AddedDataFiles)
 	require.Len(t, diff.RemovedDataFiles, 1)

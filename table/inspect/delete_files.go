@@ -15,19 +15,24 @@
 // specific language governing permissions and limitations
 // under the License.
 
-package table
+package inspect
 
 import (
 	"context"
 
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/table"
 )
 
 // DeleteFiles returns the live equality-delete, position-delete, and
 // deletion-vector files in the current snapshot. It reports file metadata and
 // does not open or scan the delete-file contents.
-func (i InspectTable) DeleteFiles(ctx context.Context) (array.RecordReader, error) {
+func DeleteFiles(ctx context.Context, tbl *table.Table, opts ...Option) (array.RecordReader, error) {
+	return newInspector(tbl, opts...).deleteFiles(ctx)
+}
+
+func (i inspector) deleteFiles(ctx context.Context) (array.RecordReader, error) {
 	return i.inspectFiles(ctx, "delete files", DeleteFilesSchema, false,
 		func(manifest iceberg.ManifestFile) bool {
 			return manifest.ManifestContent() == iceberg.ManifestContentDeletes
