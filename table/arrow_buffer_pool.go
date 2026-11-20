@@ -19,47 +19,55 @@ package table
 import (
 	"math/bits"
 	"sync"
-	"sync/atomic"
 
 	"github.com/apache/arrow-go/v18/arrow/memory"
 )
 
 const (
-	arrowBufferMinClass  = 6
-	arrowBufferMaxClass  = 20
-	arrowBuffersPerClass = 4
+	arrowBufferMinClass   = 6
+	arrowBufferMaxClass   = 20
+	arrowBuffersPerClass  = 16
+	arrowBufferCacheBytes = 8 << 20
 )
 
 type arrowBufferBucket struct {
-	mu      sync.Mutex
 	count   int
 	buffers [arrowBuffersPerClass][]byte
 }
 
-// arrowBufferPool keeps at most four released buffers per size class, for
-// less than 8 MiB total. Live buffers are owned by their Arrow references.
+// arrowBufferPool shares a fixed byte budget among size classes so buffers
+// released by several scan workers can fill the classes they actually use.
+// Live buffers are owned by their Arrow references.
 type arrowBufferPool struct {
-	backing *memory.GoAllocator
-	closed  atomic.Bool
-	buckets [arrowBufferMaxClass - arrowBufferMinClass + 1]arrowBufferBucket
+	backing     *memory.GoAllocator
+	mu          sync.Mutex
+	closed      bool
+	cachedBytes int
+	buckets     [arrowBufferMaxClass - arrowBufferMinClass + 1]arrowBufferBucket
 }
 
 func (p *arrowBufferPool) Allocate(size int) []byte {
-	if size <= 0 || size > 1<<arrowBufferMaxClass || p.closed.Load() {
+	if size <= 0 || size > 1<<arrowBufferMaxClass {
 		return p.backing.Allocate(size)
 	}
 	class := max(arrowBufferMinClass, bits.Len(uint(size-1)))
 	bucket := &p.buckets[class-arrowBufferMinClass]
-	bucket.mu.Lock()
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+
+		return p.backing.Allocate(size)
+	}
 	if bucket.count == 0 {
-		bucket.mu.Unlock()
+		p.mu.Unlock()
 
 		return p.backing.Allocate(1 << class)[:size]
 	}
 	bucket.count--
 	buf := bucket.buffers[bucket.count]
 	bucket.buffers[bucket.count] = nil
-	bucket.mu.Unlock()
+	p.cachedBytes -= cap(buf)
+	p.mu.Unlock()
 
 	// A caller can reslice to capacity, so clear the entire size class.
 	clear(buf)
@@ -86,28 +94,27 @@ func (p *arrowBufferPool) Reallocate(size int, buf []byte) []byte {
 func (p *arrowBufferPool) Free(buf []byte) {
 	capacity := cap(buf)
 	if capacity < 1<<arrowBufferMinClass || capacity > 1<<arrowBufferMaxClass ||
-		capacity&(capacity-1) != 0 || p.closed.Load() {
+		capacity&(capacity-1) != 0 {
 		return
 	}
 	class := bits.TrailingZeros(uint(capacity))
 	bucket := &p.buckets[class-arrowBufferMinClass]
-	bucket.mu.Lock()
-	defer bucket.mu.Unlock()
-	if !p.closed.Load() && bucket.count < len(bucket.buffers) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.closed && bucket.count < len(bucket.buffers) && p.cachedBytes+capacity <= arrowBufferCacheBytes {
 		bucket.buffers[bucket.count] = buf[:capacity]
 		bucket.count++
+		p.cachedBytes += capacity
 	}
 }
 
 func (p *arrowBufferPool) close() {
-	if p.closed.Swap(true) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed {
 		return
 	}
-	for i := range p.buckets {
-		bucket := &p.buckets[i]
-		bucket.mu.Lock()
-		clear(bucket.buffers[:])
-		bucket.count = 0
-		bucket.mu.Unlock()
-	}
+	p.closed = true
+	clear(p.buckets[:])
+	p.cachedBytes = 0
 }

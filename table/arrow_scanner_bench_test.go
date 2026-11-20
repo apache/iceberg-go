@@ -204,29 +204,54 @@ func benchmarkSplitParquetScanWithRowGroups(
 	b *testing.B, rowGroups, rowsPerGroup int,
 ) (Metadata, iceio.IO, []FileScanTask, []FileScanTask, int64) {
 	b.Helper()
+
+	return benchmarkSplitParquetScanWithPayloads(b, rowGroups, rowsPerGroup, 1)
+}
+
+func benchmarkSplitParquetScanWithPayloads(
+	b *testing.B, rowGroups, rowsPerGroup, payloadColumns int,
+) (Metadata, iceio.IO, []FileScanTask, []FileScanTask, int64) {
+	b.Helper()
 	rowCount := int64(rowGroups * rowsPerGroup)
-	schema := iceberg.NewSchema(0,
-		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
-		iceberg.NestedField{ID: 2, Name: "payload", Type: iceberg.PrimitiveTypes.String},
-	)
+	fields := []iceberg.NestedField{
+		{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		{ID: 2, Name: "payload", Type: iceberg.PrimitiveTypes.String},
+	}
+	for i := 1; i < payloadColumns; i++ {
+		fields = append(fields, iceberg.NestedField{
+			ID: i + 2, Name: fmt.Sprintf("payload_%d", i), Type: iceberg.PrimitiveTypes.String,
+		})
+	}
+	schema := iceberg.NewSchema(0, fields...)
 	arrowSchema, err := SchemaToArrowSchema(schema, nil, true, false)
 	if err != nil {
 		b.Fatal(err)
 	}
 
-	idBuilder := array.NewInt64Builder(memory.DefaultAllocator)
-	payloadBuilder := array.NewStringBuilder(memory.DefaultAllocator)
+	builder := array.NewRecordBuilder(memory.DefaultAllocator, arrowSchema)
+	defer builder.Release()
+	builder.Reserve(int(rowCount))
+	ids := builder.Field(0).(*array.Int64Builder)
 	for i := range rowCount {
-		idBuilder.Append(i)
-		payloadBuilder.Append(fmt.Sprintf("payload-%d", i%128))
+		ids.Append(i)
 	}
-	ids := idBuilder.NewArray()
-	payload := payloadBuilder.NewArray()
-	idBuilder.Release()
-	payloadBuilder.Release()
-	record := array.NewRecordBatch(arrowSchema, []arrow.Array{ids, payload}, rowCount)
-	ids.Release()
-	payload.Release()
+	for i := range payloadColumns {
+		payload := builder.Field(i + 1).(*array.StringBuilder)
+		var values [128]string
+		prefix := strings.Repeat("x", i*20)
+		for j := range values {
+			values[j] = fmt.Sprintf("%spayload-%d", prefix, j)
+		}
+		for row := range rowCount {
+			if i > 0 && (row+int64(i))%11 == 0 {
+				payload.AppendNull()
+
+				continue
+			}
+			payload.Append(values[row%int64(len(values))])
+		}
+	}
+	record := builder.NewRecordBatch()
 	table := array.NewTableFromRecords(arrowSchema, []arrow.RecordBatch{record})
 	record.Release()
 	defer table.Release()

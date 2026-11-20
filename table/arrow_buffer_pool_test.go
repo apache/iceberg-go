@@ -21,6 +21,7 @@ import (
 	"context"
 	"iter"
 	"math/bits"
+	"slices"
 	"sync"
 	"testing"
 
@@ -115,7 +116,7 @@ func TestReadTasksArrowBufferReuse(t *testing.T) {
 			require.NotNil(t, retained)
 			require.Equal(t, int64(42), retained.Column(0).(*array.Int64).Value(0))
 			if tc.wantPool {
-				require.True(t, pool.closed.Load())
+				require.True(t, pool.closed)
 			}
 			retained.Release()
 			if checked, ok := tc.allocator.(*memory.CheckedAllocator); ok {
@@ -126,7 +127,17 @@ func TestReadTasksArrowBufferReuse(t *testing.T) {
 }
 
 func BenchmarkReadTasksArrowBufferReuse(b *testing.B) {
-	meta, fs, _, tasks, wantRows := benchmarkSplitParquetScanWithRowGroups(b, 16, 8192)
+	benchmarkArrowBufferReuse(b, 1, []int{1, 4})
+}
+
+func BenchmarkReadTasksArrowBufferReuseWide(b *testing.B) {
+	benchmarkArrowBufferReuse(b, 6, []int{4})
+}
+
+func benchmarkArrowBufferReuse(b *testing.B, payloadColumns int, workerCounts []int) {
+	b.Helper()
+
+	meta, fs, _, tasks, wantRows := benchmarkSplitParquetScanWithPayloads(b, 16, 8192, payloadColumns)
 	table := New(Identifier{"benchmark"}, meta, "", func(context.Context) (iceio.IO, error) {
 		return fs, nil
 	}, nil)
@@ -137,6 +148,9 @@ func BenchmarkReadTasksArrowBufferReuse(b *testing.B) {
 		{name: "one_worker", workers: 1},
 		{name: "four_workers", workers: 4},
 	} {
+		if !slices.Contains(workerCounts, tc.workers) {
+			continue
+		}
 		for _, workload := range []struct {
 			name string
 			rows int64
@@ -195,15 +209,18 @@ func TestArrowBufferPoolBoundsEachSizeClass(t *testing.T) {
 		for _, buf := range held {
 			pool.Free(buf)
 		}
-		require.Equal(t, arrowBuffersPerClass, bucket.count,
+		wantCached := min(arrowBuffersPerClass, arrowBufferCacheBytes/(1<<class))
+		require.Equal(t, wantCached, bucket.count,
 			"size %d must not retain more than the configured buffer count", size)
+		require.Equal(t, wantCached<<class, pool.cachedBytes)
 
-		for range arrowBuffersPerClass {
+		for range wantCached {
 			reused := pool.Allocate(size)
 			require.Equal(t, make([]byte, cap(reused)), reused[:cap(reused)],
 				"size %d must clear the full buffer, including its spare capacity", size)
 		}
 		require.Zero(t, bucket.count)
+		require.Zero(t, pool.cachedBytes)
 	}
 
 	oversized := pool.Allocate((1 << arrowBufferMaxClass) + 1)
@@ -211,6 +228,39 @@ func TestArrowBufferPoolBoundsEachSizeClass(t *testing.T) {
 	for i := range pool.buckets {
 		require.Zero(t, pool.buckets[i].count, "oversized allocations must bypass the cache")
 	}
+}
+
+func TestArrowBufferPoolSharesBudgetAcrossSizeClasses(t *testing.T) {
+	pool := &arrowBufferPool{backing: memory.NewGoAllocator()}
+	const largeSize = 1 << arrowBufferMaxClass
+	large := make([][]byte, arrowBufferCacheBytes/largeSize-1)
+	for i := range large {
+		large[i] = pool.Allocate(largeSize)
+	}
+	halfA := pool.Allocate(largeSize / 2)
+	halfB := pool.Allocate(largeSize / 2)
+	small := pool.Allocate(1 << arrowBufferMinClass)
+
+	for _, buffer := range large {
+		pool.Free(buffer)
+	}
+	pool.Free(halfA)
+	pool.Free(halfB)
+	pool.Free(small)
+	require.Equal(t, arrowBufferCacheBytes, pool.cachedBytes)
+	require.Zero(t, pool.buckets[0].count)
+
+	largeBuffer := pool.Allocate(largeSize)
+	require.Equal(t, arrowBufferCacheBytes-largeSize, pool.cachedBytes)
+	smallBuffer := pool.Allocate(1 << arrowBufferMinClass)
+	pool.Free(smallBuffer)
+	require.Equal(t, arrowBufferCacheBytes-largeSize+(1<<arrowBufferMinClass), pool.cachedBytes)
+	require.Equal(t, 1, pool.buckets[0].count)
+
+	pool.close()
+	pool.Free(largeBuffer)
+	require.Zero(t, pool.cachedBytes)
+	require.Zero(t, pool.buckets[0].count)
 }
 
 func TestArrowBufferPoolReallocateShrinkAndRegrow(t *testing.T) {
@@ -261,7 +311,8 @@ func TestArrowBufferPoolConcurrentFreeAndClose(t *testing.T) {
 	wg.Wait()
 	pool.close()
 
-	require.True(t, pool.closed.Load())
+	require.True(t, pool.closed)
+	require.Zero(t, pool.cachedBytes)
 	for i := range pool.buckets {
 		require.Zero(t, pool.buckets[i].count)
 	}
