@@ -273,7 +273,6 @@ func TestWriteRecordsUnsignedPartitionBounds(t *testing.T) {
 	}
 }
 
-
 func TestUnsignedPartitionOverflowAfterValidRows(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
