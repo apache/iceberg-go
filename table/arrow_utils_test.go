@@ -1380,6 +1380,61 @@ func TestToRequestedSchemaListLargeTypeCoercion(t *testing.T) {
 	})
 }
 
+// Widening the element requires rebuilding the list view type without changing
+// its offset width. Slicing also checks that projection preserves the array offset.
+func TestToRequestedSchemaListView(t *testing.T) {
+	ctx := context.Background()
+	mem := memory.NewCheckedAllocator(memory.NewGoAllocator())
+	defer mem.AssertSize(t, 0)
+
+	rows := []struct {
+		name   string
+		viewOf func(arrow.Field) arrow.DataType
+	}{
+		{"list_view", func(f arrow.Field) arrow.DataType { return arrow.ListViewOfField(f) }},
+		{"large_list_view", func(f arrow.Field) arrow.DataType { return arrow.LargeListViewOfField(f) }},
+	}
+
+	const data = `[{"nested": [9]}, {"nested": null}, {"nested": []}, {"nested": [1, 2]}]`
+
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			elem := arrow.Field{Name: "element", Type: arrow.PrimitiveTypes.Int32, Nullable: false, Metadata: fieldIDMeta("2")}
+			arrowSchema := arrow.NewSchema([]arrow.Field{{
+				Name: "nested", Type: row.viewOf(elem), Nullable: true, Metadata: fieldIDMeta("1"),
+			}}, nil)
+
+			rec, _, err := array.RecordFromJSON(mem, arrowSchema, strings.NewReader(data))
+			require.NoError(t, err)
+			defer rec.Release()
+
+			sliced := rec.NewSlice(1, 4)
+			defer sliced.Release()
+
+			fileSchema := iceberg.NewSchema(0, iceberg.NestedField{
+				ID: 1, Name: "nested", Type: iceberg.NewListType(2, iceberg.PrimitiveTypes.Int32, true), Required: false,
+			})
+			requested := iceberg.NewSchema(0, iceberg.NestedField{
+				ID: 1, Name: "nested", Type: iceberg.NewListType(2, iceberg.PrimitiveTypes.Int64, true), Required: false,
+			})
+
+			out, err := table.ToRequestedSchema(compute.WithAllocator(ctx, mem), requested, fileSchema, sliced, table.SchemaOptions{IncludeFieldIDs: true})
+			require.NoError(t, err)
+			defer out.Release()
+
+			got := out.Column(0)
+			require.NoError(t, array.ValidateFull(got))
+
+			wantType := row.viewOf(arrow.Field{Name: "element", Type: arrow.PrimitiveTypes.Int64, Nullable: false, Metadata: fieldIDMeta("2")})
+			want, _, err := array.FromJSON(mem, wantType, strings.NewReader(`[null, [], [1, 2]]`))
+			require.NoError(t, err)
+			defer want.Release()
+
+			assert.True(t, array.Equal(want, got), "want %s, got %s", want, got)
+		})
+	}
+}
+
 func TestToRequestedSchemaListOfStructNoLeak(t *testing.T) {
 	ctx := context.Background()
 	mem := memory.NewCheckedAllocator(memory.NewGoAllocator())
