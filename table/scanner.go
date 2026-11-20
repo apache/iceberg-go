@@ -32,6 +32,8 @@ import (
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/compute"
+	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/iceberg-go"
 	iceberginternal "github.com/apache/iceberg-go/internal"
 	"github.com/apache/iceberg-go/internal/scanmetrics"
@@ -570,7 +572,8 @@ type Scan struct {
 	// property. Set via WithArrowBatchSize; kept as a dedicated field
 	// (like limit and concurrency) so WithOptions replacing the options
 	// map cannot silently drop it.
-	arrowBatchSize int
+	arrowBatchSize    int
+	reuseArrowBuffers bool
 
 	// readRecords is a scan-local reader seam; nil uses (*arrowScan).GetRecords.
 	// Tests can wrap it to observe the task slice handed to the Arrow reader.
@@ -2239,7 +2242,25 @@ func bindReadTasksResiduals(
 // therefore still hold its whole decoded contents while it waits. The bound for
 // a compaction pipeline is stated on [WithCompactionArrowBatchSize].
 func (scan *Scan) ReadTasks(ctx context.Context, tasks []FileScanTask) (*arrow.Schema, iter.Seq2[arrow.RecordBatch, error], error) {
-	return scan.readFileTasks(ctx, tasks, nil)
+	if !scan.reuseArrowBuffers {
+		return scan.readFileTasks(ctx, tasks, nil)
+	}
+	backing, canPool := compute.GetAllocator(ctx).(*memory.GoAllocator)
+	if !canPool {
+		return scan.readFileTasks(ctx, tasks, nil)
+	}
+	pool := &arrowBufferPool{backing: backing}
+	schema, records, err := scan.readFileTasks(compute.WithAllocator(ctx, pool), tasks, nil)
+	if err != nil {
+		pool.close()
+
+		return nil, nil, err
+	}
+
+	return schema, func(yield func(arrow.RecordBatch, error) bool) {
+		defer pool.close()
+		records(yield)
+	}, nil
 }
 
 // readFileTasks reads tasks. addedDeletes, when non-nil, is paired with the

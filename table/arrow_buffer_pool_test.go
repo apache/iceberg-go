@@ -1,0 +1,309 @@
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
+//
+//    http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package table
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"iter"
+	"math/bits"
+	"strings"
+	"sync"
+	"testing"
+
+	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/compute"
+	"github.com/apache/arrow-go/v18/arrow/memory"
+	iceio "github.com/apache/iceberg-go/io"
+	"github.com/stretchr/testify/require"
+)
+
+func TestArrowBufferPoolReusesZeroedBuffers(t *testing.T) {
+	pool := &arrowBufferPool{backing: memory.NewGoAllocator()}
+	buf := pool.Allocate(80)
+	require.Equal(t, 128, cap(buf))
+	full := buf[:cap(buf)]
+	for i := range full {
+		full[i] = 17
+	}
+	pool.Free(buf)
+
+	reused := pool.Allocate(65)
+	require.Same(t, &buf[0], &reused[0])
+	require.Equal(t, make([]byte, cap(reused)), reused[:cap(reused)])
+	reused[0] = 42
+	grown := pool.Reallocate(100, reused)
+	require.Same(t, &reused[0], &grown[0])
+	require.Equal(t, byte(42), grown[0])
+	require.Equal(t, make([]byte, 99), grown[1:])
+	moved := pool.Reallocate(129, grown)
+	require.NotSame(t, &grown[0], &moved[0])
+	require.Equal(t, byte(42), moved[0])
+	require.Equal(t, make([]byte, 128), moved[1:])
+
+	pool.Free(moved)
+	pool.close()
+	pool.Free(pool.Allocate(129))
+	for i := range pool.buckets {
+		require.Zero(t, pool.buckets[i].count)
+	}
+}
+
+func TestReadTasksArrowBufferReuse(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		optIn     bool
+		allocator memory.Allocator
+		wantPool  bool
+	}{
+		{name: "default", allocator: memory.NewGoAllocator()},
+		{name: "opted in", optIn: true, allocator: memory.NewGoAllocator(), wantPool: true},
+		{name: "custom allocator", optIn: true, allocator: memory.NewCheckedAllocator(memory.NewGoAllocator())},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			scan, _ := residualBindingTestScan(t)
+			if tc.optIn {
+				WithArrowBufferReuse()(scan)
+			}
+			schema := arrow.NewSchema([]arrow.Field{{Name: "id", Type: arrow.PrimitiveTypes.Int64}}, nil)
+			var pool *arrowBufferPool
+			scan.readRecords = func(_ *arrowScan, ctx context.Context, _ []FileScanTask) (
+				*arrow.Schema, iter.Seq2[arrow.RecordBatch, error], error,
+			) {
+				allocator := compute.GetAllocator(ctx)
+				pool, _ = allocator.(*arrowBufferPool)
+				if tc.wantPool {
+					require.NotNil(t, pool)
+				} else {
+					require.Same(t, tc.allocator, allocator)
+				}
+
+				return schema, func(yield func(arrow.RecordBatch, error) bool) {
+					builder := array.NewInt64Builder(allocator)
+					defer builder.Release()
+					builder.Append(42)
+					data := builder.NewInt64Array()
+					defer data.Release()
+					yield(array.NewRecordBatch(schema, []arrow.Array{data}, 1), nil)
+				}, nil
+			}
+
+			_, records, err := scan.ReadTasks(compute.WithAllocator(t.Context(), tc.allocator), nil)
+			require.NoError(t, err)
+			var retained arrow.RecordBatch
+			for batch, err := range records {
+				require.NoError(t, err)
+				retained = batch
+
+				break
+			}
+			require.NotNil(t, retained)
+			require.Equal(t, int64(42), retained.Column(0).(*array.Int64).Value(0))
+			if tc.wantPool {
+				require.True(t, pool.closed)
+			}
+			retained.Release()
+			if checked, ok := tc.allocator.(*memory.CheckedAllocator); ok {
+				checked.AssertSize(t, 0)
+			}
+		})
+	}
+}
+
+func TestReadTasksClosesArrowBufferPoolOnSetupError(t *testing.T) {
+	scan, _ := residualBindingTestScan(t)
+	WithArrowBufferReuse()(scan)
+	setupErr := errors.New("scan setup failed")
+	var pool *arrowBufferPool
+	scan.readRecords = func(_ *arrowScan, ctx context.Context, _ []FileScanTask) (
+		*arrow.Schema, iter.Seq2[arrow.RecordBatch, error], error,
+	) {
+		pool = compute.GetAllocator(ctx).(*arrowBufferPool)
+		pool.Free(pool.Allocate(128))
+		require.Positive(t, pool.cachedBytes)
+
+		return nil, nil, setupErr
+	}
+
+	_, records, err := scan.ReadTasks(compute.WithAllocator(t.Context(), memory.NewGoAllocator()), nil)
+	require.ErrorIs(t, err, setupErr)
+	require.Nil(t, records)
+	require.NotNil(t, pool)
+	require.True(t, pool.closed)
+	require.Zero(t, pool.cachedBytes)
+	require.Zero(t, pool.buckets)
+}
+
+func TestReadTasksArrowBufferReuseKeepsRetainedParquetBatch(t *testing.T) {
+	const rowsPerFile = 32
+	tbl, tasks := newReorderScanFixture(t, t.TempDir(), 3, rowsPerFile, iceio.LocalFS{})
+	scan := tbl.Scan(WithArrowBufferReuse(), WithMaxConcurrency(2), WithArrowBatchSize(16))
+	t.Cleanup(func() { require.NoError(t, scan.Close()) })
+
+	_, records, err := scan.ReadTasks(t.Context(), tasks)
+	require.NoError(t, err)
+	var retained arrow.RecordBatch
+	var ids []int64
+	for batch, err := range records {
+		require.NoError(t, err)
+		ids = append(ids, batch.Column(0).(*array.Int64).Int64Values()...)
+		if retained == nil {
+			retained = batch
+			t.Cleanup(retained.Release)
+
+			continue
+		}
+		batch.Release()
+	}
+	require.Len(t, ids, len(tasks)*rowsPerFile)
+	for i, id := range ids {
+		require.Equal(t, int64(i), id)
+	}
+	require.NotNil(t, retained)
+	require.Equal(t, ids[:retained.NumRows()], retained.Column(0).(*array.Int64).Int64Values())
+	require.Equal(t, strings.Repeat("x", 256), retained.Column(1).(*array.String).Value(0))
+}
+
+func TestArrowBufferPoolBoundsEachSizeClass(t *testing.T) {
+	pool := &arrowBufferPool{backing: memory.NewGoAllocator()}
+	defer pool.close()
+
+	for _, size := range []int{1, 64, 65, 1025, 1 << arrowBufferMaxClass} {
+		class := max(arrowBufferMinClass, bits.Len(uint(size-1)))
+		bucket := &pool.buckets[class-arrowBufferMinClass]
+		held := make([][]byte, arrowBuffersPerClass+3)
+		for i := range held {
+			held[i] = pool.Allocate(size)
+			require.Len(t, held[i], size)
+			full := held[i][:cap(held[i])]
+			for j := range full {
+				full[j] = byte(i + 1)
+			}
+		}
+		for _, buf := range held {
+			pool.Free(buf)
+		}
+		wantCached := min(arrowBuffersPerClass, arrowBufferCacheBytes/(1<<class))
+		require.Equal(t, wantCached, bucket.count,
+			"size %d must not retain more than the configured buffer count", size)
+		require.Equal(t, wantCached<<class, pool.cachedBytes)
+
+		for range wantCached {
+			reused := pool.Allocate(size)
+			require.Equal(t, make([]byte, cap(reused)), reused[:cap(reused)],
+				"size %d must clear the full buffer, including its spare capacity", size)
+		}
+		require.Zero(t, bucket.count)
+		require.Zero(t, pool.cachedBytes)
+	}
+
+	oversized := pool.Allocate((1 << arrowBufferMaxClass) + 1)
+	pool.Free(oversized)
+	for i := range pool.buckets {
+		require.Zero(t, pool.buckets[i].count, "oversized allocations must bypass the cache")
+	}
+}
+
+func TestArrowBufferPoolSharesBudgetAcrossSizeClasses(t *testing.T) {
+	pool := &arrowBufferPool{backing: memory.NewGoAllocator()}
+	const largeSize = 1 << arrowBufferMaxClass
+	large := make([][]byte, arrowBufferCacheBytes/largeSize-1)
+	for i := range large {
+		large[i] = pool.Allocate(largeSize)
+	}
+	halfA := pool.Allocate(largeSize / 2)
+	halfB := pool.Allocate(largeSize / 2)
+	small := pool.Allocate(1 << arrowBufferMinClass)
+
+	for _, buffer := range large {
+		pool.Free(buffer)
+	}
+	pool.Free(halfA)
+	pool.Free(halfB)
+	pool.Free(small)
+	require.Equal(t, arrowBufferCacheBytes, pool.cachedBytes)
+	require.Zero(t, pool.buckets[0].count)
+
+	largeBuffer := pool.Allocate(largeSize)
+	require.Equal(t, arrowBufferCacheBytes-largeSize, pool.cachedBytes)
+	smallBuffer := pool.Allocate(1 << arrowBufferMinClass)
+	pool.Free(smallBuffer)
+	require.Equal(t, arrowBufferCacheBytes-largeSize+(1<<arrowBufferMinClass), pool.cachedBytes)
+	require.Equal(t, 1, pool.buckets[0].count)
+
+	pool.close()
+	pool.Free(largeBuffer)
+	require.Zero(t, pool.cachedBytes)
+	require.Zero(t, pool.buckets[0].count)
+}
+
+func TestArrowBufferPoolReallocateShrinkAndRegrow(t *testing.T) {
+	pool := &arrowBufferPool{backing: memory.NewGoAllocator()}
+	defer pool.close()
+
+	buf := pool.Allocate(100)
+	for i := range buf {
+		buf[i] = 7
+	}
+	shrunk := pool.Reallocate(64, buf)
+	require.Same(t, &buf[0], &shrunk[0])
+	require.Len(t, shrunk, 64)
+
+	grown := pool.Reallocate(100, shrunk)
+	require.Same(t, &buf[0], &grown[0])
+	require.Equal(t, bytes.Repeat([]byte{7}, 64), grown[:64])
+	require.Equal(t, make([]byte, 36), grown[64:])
+
+	pool.close()
+	pool.Free(grown)
+	require.Equal(t, byte(7), grown[0], "closing must not mutate live Arrow buffers")
+	for i := range pool.buckets {
+		require.Zero(t, pool.buckets[i].count)
+	}
+}
+
+func TestArrowBufferPoolConcurrentFreeAndClose(t *testing.T) {
+	pool := &arrowBufferPool{backing: memory.NewGoAllocator()}
+	const workers = 8
+	const rounds = 200
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for range workers {
+		go func() {
+			defer wg.Done()
+			<-start
+			for i := range rounds {
+				buf := pool.Allocate(65 + i%3)
+				buf[0] = byte(i)
+				pool.Free(buf)
+			}
+		}()
+	}
+	close(start)
+	pool.close()
+	wg.Wait()
+	pool.close()
+
+	require.True(t, pool.closed)
+	require.Zero(t, pool.cachedBytes)
+	for i := range pool.buckets {
+		require.Zero(t, pool.buckets[i].count)
+	}
+}

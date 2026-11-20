@@ -22,6 +22,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -33,6 +34,7 @@ import (
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
+	"github.com/stretchr/testify/require"
 )
 
 func benchmarkScanSchema(fieldCount int) *iceberg.Schema {
@@ -196,6 +198,70 @@ func BenchmarkArrowScanManyFilesAndBatches(b *testing.B) {
 	}
 }
 
+func BenchmarkReadTasksArrowBufferReuse(b *testing.B) {
+	benchmarkArrowBufferReuse(b, 1, []int{1, 4})
+}
+
+func BenchmarkReadTasksArrowBufferReuseWide(b *testing.B) {
+	benchmarkArrowBufferReuse(b, 6, []int{4})
+}
+
+func benchmarkArrowBufferReuse(b *testing.B, payloadColumns int, workerCounts []int) {
+	b.Helper()
+
+	meta, fs, _, tasks, wantRows := benchmarkSplitParquetScanWithPayloads(b, 16, 8192, payloadColumns)
+	table := New(Identifier{"benchmark"}, meta, "", func(context.Context) (iceio.IO, error) {
+		return fs, nil
+	}, nil)
+	for _, tc := range []struct {
+		name    string
+		workers int
+	}{
+		{name: "one_worker", workers: 1},
+		{name: "four_workers", workers: 4},
+	} {
+		if !slices.Contains(workerCounts, tc.workers) {
+			continue
+		}
+		for _, workload := range []struct {
+			name string
+			rows int64
+		}{
+			{name: "full", rows: wantRows},
+			{name: "filtered", rows: wantRows / 4},
+		} {
+			for _, mode := range []string{"default", "reuse"} {
+				b.Run(workload.name+"/"+tc.name+"/"+mode, func(b *testing.B) {
+					options := []ScanOption{WithMaxConcurrency(tc.workers), WithArrowBatchSize(8192)}
+					if workload.rows != wantRows {
+						options = append(options, WithRowFilter(iceberg.GreaterThanEqual(iceberg.Reference("id"), wantRows-workload.rows)))
+					}
+					if mode == "reuse" {
+						options = append(options, WithArrowBufferReuse())
+					}
+					benchmarkReadTasksBufferReuse(b, table.Scan(options...), tasks, workload.rows)
+				})
+			}
+		}
+	}
+}
+
+func benchmarkReadTasksBufferReuse(b *testing.B, scan *Scan, tasks []FileScanTask, wantRows int64) {
+	b.Helper()
+	b.ReportAllocs()
+	for b.Loop() {
+		_, records, err := scan.ReadTasks(b.Context(), tasks)
+		require.NoError(b, err)
+		var rows int64
+		for record, err := range records {
+			require.NoError(b, err)
+			rows += record.NumRows()
+			record.Release()
+		}
+		require.Equal(b, wantRows, rows)
+	}
+}
+
 func benchmarkSplitParquetScan(b *testing.B) (Metadata, iceio.IO, []FileScanTask, []FileScanTask, int64) {
 	return benchmarkSplitParquetScanWithRowGroups(b, 8, 32768)
 }
@@ -204,29 +270,54 @@ func benchmarkSplitParquetScanWithRowGroups(
 	b *testing.B, rowGroups, rowsPerGroup int,
 ) (Metadata, iceio.IO, []FileScanTask, []FileScanTask, int64) {
 	b.Helper()
+
+	return benchmarkSplitParquetScanWithPayloads(b, rowGroups, rowsPerGroup, 1)
+}
+
+func benchmarkSplitParquetScanWithPayloads(
+	b *testing.B, rowGroups, rowsPerGroup, payloadColumns int,
+) (Metadata, iceio.IO, []FileScanTask, []FileScanTask, int64) {
+	b.Helper()
 	rowCount := int64(rowGroups * rowsPerGroup)
-	schema := iceberg.NewSchema(0,
-		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
-		iceberg.NestedField{ID: 2, Name: "payload", Type: iceberg.PrimitiveTypes.String},
-	)
+	fields := []iceberg.NestedField{
+		{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		{ID: 2, Name: "payload", Type: iceberg.PrimitiveTypes.String},
+	}
+	for i := 1; i < payloadColumns; i++ {
+		fields = append(fields, iceberg.NestedField{
+			ID: i + 2, Name: fmt.Sprintf("payload_%d", i), Type: iceberg.PrimitiveTypes.String,
+		})
+	}
+	schema := iceberg.NewSchema(0, fields...)
 	arrowSchema, err := SchemaToArrowSchema(schema, nil, true, false)
 	if err != nil {
 		b.Fatal(err)
 	}
 
-	idBuilder := array.NewInt64Builder(memory.DefaultAllocator)
-	payloadBuilder := array.NewStringBuilder(memory.DefaultAllocator)
+	builder := array.NewRecordBuilder(memory.DefaultAllocator, arrowSchema)
+	defer builder.Release()
+	builder.Reserve(int(rowCount))
+	ids := builder.Field(0).(*array.Int64Builder)
 	for i := range rowCount {
-		idBuilder.Append(i)
-		payloadBuilder.Append(fmt.Sprintf("payload-%d", i%128))
+		ids.Append(i)
 	}
-	ids := idBuilder.NewArray()
-	payload := payloadBuilder.NewArray()
-	idBuilder.Release()
-	payloadBuilder.Release()
-	record := array.NewRecordBatch(arrowSchema, []arrow.Array{ids, payload}, rowCount)
-	ids.Release()
-	payload.Release()
+	for i := range payloadColumns {
+		payload := builder.Field(i + 1).(*array.StringBuilder)
+		var values [128]string
+		prefix := strings.Repeat("x", i*20)
+		for j := range values {
+			values[j] = fmt.Sprintf("%spayload-%d", prefix, j)
+		}
+		for row := range rowCount {
+			if i > 0 && (row+int64(i))%11 == 0 {
+				payload.AppendNull()
+
+				continue
+			}
+			payload.Append(values[row%int64(len(values))])
+		}
+	}
+	record := builder.NewRecordBatch()
 	table := array.NewTableFromRecords(arrowSchema, []arrow.RecordBatch{record})
 	record.Release()
 	defer table.Release()
