@@ -899,6 +899,13 @@ func TestCompactionResultUsesEffectiveTaskRowID(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, tasks[0].FirstRowID, result.SourceRowLineage[tasks[0].File.FilePath()].FirstRowID)
 	tx := tbl.NewTransaction()
+	// The coordinator must reject a worker result whose lineage was lost in transit.
+	withoutLineage := result
+	withoutLineage.SourceRowLineage = nil
+	err = tx.NewRewrite(nil).ApplyResult(withoutLineage).Commit(ctx)
+	require.ErrorIs(t, err, table.ErrInvalidOperation)
+	require.ErrorContains(t, err, "missing source row lineage")
+
 	require.NoError(t, tx.NewRewrite(nil).ApplyResult(result).Commit(ctx))
 	rewritten, err := tx.Commit(ctx)
 	require.NoError(t, err)
