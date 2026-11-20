@@ -115,7 +115,7 @@ func TestExecuteOrphanCleanupRejectsStalePlanWhenFileBecomesLive(t *testing.T) {
 	require.Empty(t, result.DeletedFiles)
 }
 
-func TestExecuteOrphanCleanupRejectsRefsOnlyHistoryAfterRefresh(t *testing.T) {
+func TestOrphanCleanupRejectsRefsOnlyHistoryAfterRefresh(t *testing.T) {
 	ctx := t.Context()
 	fs := iceio.NewMemFS()
 	const location = "mem://stale-plan/refs-only"
@@ -132,14 +132,38 @@ func TestExecuteOrphanCleanupRejectsRefsOnlyHistoryAfterRefresh(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []string{orphanPath}, plan.Files())
 
-	// A load can return refs-only metadata at the same metadata location.
-	catalog.refsOnly = true
-	_, err = ExecuteOrphanCleanup(ctx, tbl, plan)
-	require.ErrorIs(t, err, table.ErrInvalidOperation)
-	require.ErrorContains(t, err, "snapshot-loading-mode=refs")
-	file, err := fs.Open(ctx, orphanPath)
-	require.NoError(t, err)
-	require.NoError(t, file.Close())
+	for _, name := range []string{"saved plan", "before planning", "after planning"} {
+		t.Run(name, func(t *testing.T) {
+			catalog.refsOnly = false
+			switchCatalogToRefs := func() error {
+				// The metadata location stays the same when only the load mode changes.
+				catalog.refsOnly = true
+
+				return nil
+			}
+			catalog.beforeLoad = switchCatalogToRefs
+			if name == "after planning" {
+				catalog.beforeLoad = func() error {
+					catalog.beforeLoad = switchCatalogToRefs
+
+					return nil
+				}
+			}
+
+			var cleanupErr error
+			if name == "saved plan" {
+				_, cleanupErr = ExecuteOrphanCleanup(ctx, tbl, plan)
+			} else {
+				_, cleanupErr = DeleteOrphanFiles(ctx, tbl, WithCleanupFilesOlderThan(0))
+			}
+			require.ErrorIs(t, cleanupErr, table.ErrInvalidOperation)
+			require.ErrorContains(t, cleanupErr, "snapshot-loading-mode=refs")
+			file, err := fs.Open(ctx, orphanPath)
+			require.NoError(t, err)
+			require.NoError(t, file.Close())
+			require.False(t, tbl.SnapshotHistoryLimitedToRefs())
+		})
+	}
 }
 
 func TestDeleteOrphanFilesRefreshesAroundPlanning(t *testing.T) {
