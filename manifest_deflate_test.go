@@ -157,7 +157,7 @@ func TestManifestDeflateCodecAlternatingBlocksAndClose(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	for round := 0; round < 3; round++ {
+	for round := range 3 {
 		for i, block := range blocks {
 			decoded, err := codec.DecompressBounded(encoded[i], int64(len(block)))
 			require.NoError(t, err, "round %d, block %d", round, i)
@@ -183,7 +183,7 @@ func TestManifestDeflateCodecRepeatedLimitFailuresRecover(t *testing.T) {
 		encoded, err := codec.Compress(plain)
 		require.NoError(t, err)
 
-		for attempt := 0; attempt < 2; attempt++ {
+		for range 2 {
 			_, err = codec.DecompressBounded(encoded, int64(len(plain)-1))
 			require.ErrorContains(t, err, "decompressed block exceeds limit")
 			require.Zero(t, codec.output.Cap(), "an unsuccessful block must not retain a buffer")
