@@ -308,45 +308,6 @@ func (r *RewriteFiles) ApplyResult(gr CompactionGroupResult) *RewriteFiles {
 	return r.applyResult(gr)
 }
 
-func (t *Transaction) applyRewriteLocked(updates []Update, reqs []Requirement, rewritesData bool) error {
-	if !rewritesData || t.branch == "" || t.branch == MainBranch || t.baseRefSnapshotID(t.branch) != nil {
-		return t.applyLocked(updates, reqs)
-	}
-
-	if !t.rewriteNeedsMainRequirement() {
-		return t.applyLocked(updates, reqs)
-	}
-
-	// Pin both refs alongside the rewrite to keep the inherited parent stable.
-	reqs = append(reqs, AssertRefSnapshotID(MainBranch, t.baseRefSnapshotID(MainBranch)))
-
-	return t.applyPinnedLocked(updates, reqs, []string{t.branch, MainBranch})
-}
-
-// A new branch inherits main when a snapshot is staged before its ref is set.
-// An explicit ref assignment tells replay where to start the branch.
-func (t *Transaction) rewriteNeedsMainRequirement() bool {
-	var branchExists bool
-	for _, update := range t.meta.updates {
-		switch u := update.(type) {
-		case *addSnapshotUpdate:
-			if !branchExists {
-				return true
-			}
-		case *setSnapshotRefUpdate:
-			if u.RefName == t.branch {
-				branchExists = true
-			}
-		case *removeSnapshotRefUpdate:
-			if u.RefName == t.branch {
-				branchExists = false
-			}
-		}
-	}
-
-	return !branchExists
-}
-
 func (r *RewriteFiles) applyResult(gr CompactionGroupResult) *RewriteFiles {
 	for _, df := range gr.OldDataFiles {
 		r.DeleteFile(df)
