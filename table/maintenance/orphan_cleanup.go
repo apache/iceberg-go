@@ -378,6 +378,9 @@ func PlanOrphanFiles(ctx context.Context, tbl *table.Table, opts ...OrphanCleanu
 	if cfg.validationErr != nil {
 		return OrphanCleanupPlan{}, cfg.validationErr
 	}
+	if err := validateOrphanCleanupTable(tbl); err != nil {
+		return OrphanCleanupPlan{}, err
+	}
 
 	return planOrphanFiles(ctx, tbl, cfg)
 }
@@ -452,17 +455,9 @@ func refreshOrphanCleanupTable(ctx context.Context, tbl *table.Table) (*table.Ta
 	return &refreshed, nil
 }
 
-func validateOrphanCleanupGC(tbl *table.Table) error {
+func validateOrphanCleanupTable(tbl *table.Table) error {
 	if !table.IsGCEnabled(tbl.Properties()) {
 		return errors.New("cannot delete orphan files: GC is disabled (deleting files may corrupt other tables)")
-	}
-
-	return nil
-}
-
-func validateOrphanCleanupTable(tbl *table.Table) error {
-	if err := validateOrphanCleanupGC(tbl); err != nil {
-		return err
 	}
 	// Refs-only responses can omit still-live historical snapshots, making
 	// their data appear unreferenced.
@@ -484,10 +479,6 @@ type referencedFileIndex struct {
 }
 
 func planOrphanFiles(ctx context.Context, tbl *table.Table, cfg *orphanCleanupConfig) (OrphanCleanupPlan, error) {
-	if err := validateOrphanCleanupTable(tbl); err != nil {
-		return OrphanCleanupPlan{}, err
-	}
-
 	fs, err := tbl.FS(ctx)
 	if err != nil {
 		return OrphanCleanupPlan{}, fmt.Errorf("failed to get filesystem: %w", err)
