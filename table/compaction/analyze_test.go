@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -216,13 +217,19 @@ func (p *recordingPlanIO) Close() error {
 // closed, so Analyze must close the scan it plans with.
 func TestAnalyze_ClosesRemotePlan(t *testing.T) {
 	base := newAnalyzeTestTable(t)
+	const snapshotID = 1
+	meta, err := table.UpdateTableMetadata(base.Metadata(), []table.Update{
+		table.NewAddSnapshotUpdate(&table.Snapshot{SnapshotID: snapshotID, SequenceNumber: 1, TimestampMs: time.Now().UnixMilli()}),
+		table.NewSetSnapshotRefUpdate(table.MainBranch, snapshotID, table.BranchRef, 0, 0, 0),
+	}, "")
+	require.NoError(t, err)
 	planIO := &recordingPlanIO{}
-	cat := &remotePlanCatalog{analyzeCatalog: analyzeCatalog{metadata: base.Metadata()}, planIO: planIO}
-	tbl := table.New(base.Identifier(), base.Metadata(), base.MetadataLocation(),
+	cat := &remotePlanCatalog{analyzeCatalog: analyzeCatalog{metadata: meta}, planIO: planIO}
+	tbl := table.New(base.Identifier(), meta, base.MetadataLocation(),
 		func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil },
 		cat, table.WithScanPlanningDirective(string(table.ScanPlanningDirectiveServer), true))
 
-	_, err := compaction.Analyze(t.Context(), tbl, compaction.DefaultConfig())
+	_, err = compaction.Analyze(t.Context(), tbl, compaction.DefaultConfig())
 	require.NoError(t, err)
 
 	assert.Equal(t, 1, planIO.closed)

@@ -370,6 +370,20 @@ func (t *Transaction) planningSnapshot(meta *MetadataBuilder) *Snapshot {
 	return meta.currentSnapshotForRef(t.branch)
 }
 
+// checkRewriteParentLocked keeps the inspected parent stable through manifest
+// writing and staging. The caller holds t.mx.
+func (t *Transaction) checkRewriteParentLocked(expected *Snapshot) error {
+	if err := t.checkUsable(); err != nil {
+		return err
+	}
+	head := t.planningSnapshot(t.meta)
+	if head == nil || head.SnapshotID != expected.SnapshotID {
+		return fmt.Errorf("%w: transaction head changed while staging the rewrite; replan from the target branch", ErrCommitFailed)
+	}
+
+	return nil
+}
+
 // transactionRequirements returns the requirements a commit on branch must carry.
 // The result is always a fresh allocation, never aliasing reqs, so callers may append to it
 // while holding the transaction lock.
@@ -495,14 +509,21 @@ func (t *Transaction) applyPinned(updates []Update, reqs []Requirement, refs []s
 	if err := t.applyLocked(updates, reqs); err != nil {
 		return err
 	}
+	t.recordPinnedRefsLocked(refs)
+
+	return nil
+}
+
+func (t *Transaction) recordPinnedRefsLocked(refs []string) {
+	if len(refs) == 0 {
+		return
+	}
 	if t.pinnedRefs == nil {
 		t.pinnedRefs = make(map[string]struct{}, len(refs))
 	}
 	for _, ref := range refs {
 		t.pinnedRefs[ref] = struct{}{}
 	}
-
-	return nil
 }
 
 // AssertDefaultShape registers requirements pinning the table's default
@@ -851,7 +872,7 @@ func (t *Transaction) ExpireSnapshotsWithContext(ctx context.Context, opts ...Ex
 	}
 	base := t.tbl
 	if base.snapshotHistoryRefsOnly {
-		base, meta, err = loadExpirationHistory(ctx, base, meta)
+		base, meta, err = loadStagedSnapshotHistory(ctx, base, meta, errSnapshotHistoryIncompleteForExpiration)
 		if err != nil {
 			return err
 		}
@@ -1618,6 +1639,7 @@ type dataFileCfg struct {
 	skipAutoNameMapping          bool
 	skipDuplicateCheck           bool
 	rewriteSemantics             bool
+	rewriteFromSnapshotID        *int64
 	equalityDeleteToDVConversion bool
 	dataSequenceNumber           *int64
 }
@@ -1861,6 +1883,9 @@ func (t *Transaction) ReplaceDataFiles(ctx context.Context, filesToDelete, files
 	if s == nil {
 		return fmt.Errorf("%w: cannot replace files in a table without an existing snapshot", ErrInvalidOperation)
 	}
+	if err := t.validateRewriteFromSnapshot(ctx, meta, s, cfg.rewriteFromSnapshotID, filesToDelete); err != nil {
+		return err
+	}
 
 	fs, err := t.tbl.fsF(ctx)
 	if err != nil {
@@ -1910,6 +1935,12 @@ func (t *Transaction) ReplaceDataFiles(ctx context.Context, filesToDelete, files
 		op = OpReplace
 	}
 
+	t.mx.Lock()
+	defer t.mx.Unlock()
+	if err := t.checkRewriteParentLocked(s); err != nil {
+		return err
+	}
+
 	commitUUID := uuid.New()
 	updater := t.updateSnapshot(wfs, snapshotProps, op).mergeOverwrite(&commitUUID, nil)
 	if cfg.rewriteSemantics {
@@ -1927,18 +1958,15 @@ func (t *Transaction) ReplaceDataFiles(ctx context.Context, filesToDelete, files
 		updater.appendDataFile(df)
 	}
 
-	updates, reqs, err := updater.commit(ctx)
+	updates, reqs, pins, err := t.prepareRewriteCommit(ctx, updater, cfg.rewriteSemantics)
 	if err != nil {
 		return err
 	}
 
-	// Keep validator registration atomic with staging so Commit cannot run
-	// between the two.
-	t.mx.Lock()
-	defer t.mx.Unlock()
 	if err := t.applyLocked(updates, reqs); err != nil {
 		return err
 	}
+	t.recordPinnedRefsLocked(pins)
 	if len(filesToAdd) > 0 || cfg.rewriteSemantics {
 		// Replacing data files must preserve deletes committed after the
 		// replacement was planned. This is independent of overwrite isolation:
@@ -2077,6 +2105,9 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 	s := t.planningSnapshot(meta)
 	if s == nil {
 		return fmt.Errorf("%w: cannot replace files in a table without an existing snapshot", ErrInvalidOperation)
+	}
+	if err := t.validateRewriteFromSnapshot(ctx, meta, s, cfg.rewriteFromSnapshotID, dataFilesToDelete); err != nil {
+		return err
 	}
 
 	fs, err := t.tbl.fsF(ctx)
@@ -2319,6 +2350,12 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 		op = OpReplace
 	}
 
+	t.mx.Lock()
+	defer t.mx.Unlock()
+	if err := t.checkRewriteParentLocked(s); err != nil {
+		return err
+	}
+
 	commitUUID := uuid.New()
 	updater := t.updateSnapshot(wfs, snapshotProps, op).mergeOverwrite(&commitUUID, nil)
 	if cfg.rewriteSemantics {
@@ -2354,7 +2391,7 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 		updater.removeDeletionVector(df)
 	}
 
-	updates, reqs, err := updater.commit(ctx)
+	updates, reqs, pins, err := t.prepareRewriteCommit(ctx, updater, cfg.rewriteSemantics && len(markedDataForDeletion) > 0)
 	if err != nil {
 		return err
 	}
@@ -2366,13 +2403,10 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 		validator = rewriteValidator(markedDataForDeletion)
 	}
 
-	// Keep validator registration atomic with staging so Commit cannot run
-	// between the two.
-	t.mx.Lock()
-	defer t.mx.Unlock()
 	if err := t.applyLocked(updates, reqs); err != nil {
 		return err
 	}
+	t.recordPinnedRefsLocked(pins)
 	if validator != nil {
 		t.validators = append(t.validators, validator)
 	}

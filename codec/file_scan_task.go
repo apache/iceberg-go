@@ -32,8 +32,9 @@ import (
 
 // EncodeFileScanTask encodes a FileScanTask for cross-process transport.
 // Each carried DataFile is encoded with [EncodeDataFile] and wrapped in
-// a small record that also carries the scan range and v3 row lineage. A task
-// residual, when present, is appended as a framed JSON extension.
+// a small record that also carries the scan range and v3 row lineage. The
+// planning snapshot ID and task residual are appended when present.
+// Tasks carrying a planning snapshot ID require a decoder that supports it.
 // The (spec, schema, version) triple must match what [DecodeFileScanTask]
 // is given on the receiver.
 //
@@ -94,6 +95,10 @@ func EncodeFileScanTask(task table.FileScanTask, spec iceberg.PartitionSpec, sch
 	if err != nil {
 		return nil, err
 	}
+	if task.PlanningSnapshotID != nil {
+		encodedTask = append(encodedTask, fileScanTaskSnapshotMagic...)
+		encodedTask = binary.AppendVarint(encodedTask, *task.PlanningSnapshotID)
+	}
 	if task.Residual == nil {
 		return encodedTask, nil
 	}
@@ -153,6 +158,14 @@ func DecodeFileScanTask(data []byte, spec iceberg.PartitionSpec, schema *iceberg
 	if err != nil {
 		return table.FileScanTask{}, fmt.Errorf("codec: DecodeFileScanTask: deletion vector files: %w", err)
 	}
+	var snapshotID *int64
+	if afterMagic, ok := bytes.CutPrefix(rest, fileScanTaskSnapshotMagic); ok {
+		id, n := binary.Varint(afterMagic)
+		if n <= 0 {
+			return table.FileScanTask{}, errors.New("codec: DecodeFileScanTask: invalid planning snapshot ID")
+		}
+		snapshotID, rest = &id, afterMagic[n:]
+	}
 	residual, err := decodeFileScanTaskResidual(rest, schema)
 	if err != nil {
 		return table.FileScanTask{}, fmt.Errorf("codec: DecodeFileScanTask: residual: %w", err)
@@ -168,6 +181,7 @@ func DecodeFileScanTask(data []byte, spec iceberg.PartitionSpec, schema *iceberg
 		Residual:            residual,
 		FirstRowID:          envelope.FirstRowID,
 		DataSequenceNumber:  envelope.DataSequenceNumber,
+		PlanningSnapshotID:  snapshotID,
 	}, nil
 }
 
@@ -201,6 +215,7 @@ type fileScanTaskShape struct {
 	Residual            iceberg.BooleanExpression
 	FirstRowID          *int64
 	DataSequenceNumber  *int64
+	PlanningSnapshotID  *int64
 }
 
 var _ = table.FileScanTask(fileScanTaskShape{})
@@ -237,10 +252,10 @@ const fileScanTaskSchemaJSON = `{
 
 var fileScanTaskSchema *avro.Schema
 
-// Residuals are framed as an optional extension after the original Avro
-// envelope. Keeping the envelope schema byte-for-byte stable lets the new
-// decoder read legacy payloads and lets legacy decoders continue reading the
-// known prefix (they already ignored the bytes returned by Schema.Decode).
+// The optional snapshot ID precedes the optional residual. The Avro
+// envelope and residual framing stay stable for tasks without a snapshot ID.
+var fileScanTaskSnapshotMagic = []byte{0xf5, 's', 'n', 'p', 1}
+
 var fileScanTaskResidualMagic = []byte{0xf5, 'r', 'e', 's', 1}
 
 func init() {

@@ -32,6 +32,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/arrow-go/v18/parquet/file"
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/codec"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
 	"github.com/apache/iceberg-go/table/compaction"
@@ -877,6 +878,529 @@ func TestRewriteDataFiles_PartialProgressRejectedBatchesCountTowardMaxFailedComm
 	require.Len(t, result.CompletedGroups, 1)
 	assert.Equal(t, "absorbed-group-0", result.CompletedGroups[0].PartitionKey)
 	require.Len(t, result.FailedGroups, 2)
+}
+
+func TestCompactionRejectsDeletesCommittedBeforeTransaction(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		kind absorbedDeleteKind
+	}{
+		{"position-delete", absorbedPositionDelete},
+		{"deletion-vector", absorbedDeletionVector},
+	} {
+		for _, mode := range []string{"atomic", "partial", "distributed", "explicit", "replanned"} {
+			t.Run(tc.name+"/"+mode, func(t *testing.T) {
+				ctx := t.Context()
+				planned, cat, groups, _ := newAbsorbedDeleteFixture(t, tc.kind, 2, 0)
+				commitDelete := cat.beforeCommit
+				cat.beforeCommit = nil
+				commitDelete()
+				latest, err := cat.LoadTable(ctx, planned.Identifier())
+				require.NoError(t, err)
+				require.NotEqual(t, planned.CurrentSnapshot().SnapshotID, latest.CurrentSnapshot().SnapshotID)
+				require.ElementsMatch(t, []int64{2, 3, 4}, scanIDs(t, latest))
+				before := parquetFiles(t, latest.Location())
+
+				switch mode {
+				case "atomic":
+					_, err := latest.RewriteDataFiles(ctx, groups, table.RewriteDataFilesOptions{})
+					require.ErrorIs(t, err, table.ErrConflictingDeleteFiles)
+					require.ElementsMatch(t, before, parquetFiles(t, latest.Location()))
+				case "partial":
+					result, err := latest.RewriteDataFiles(ctx, groups[:1], table.RewriteDataFilesOptions{PartialProgress: true})
+					require.NoError(t, err)
+					require.Empty(t, result.CompletedGroups)
+					require.Len(t, result.FailedGroups, 1)
+					require.ErrorIs(t, result.FailedGroups[0].Err, table.ErrConflictingDeleteFiles)
+					require.ElementsMatch(t, before, parquetFiles(t, latest.Location()))
+				case "distributed", "explicit", "replanned":
+					group := groups[0]
+					switch mode {
+					case "replanned":
+						tasks, err := latest.Scan().PlanFiles(ctx)
+						require.NoError(t, err)
+						group.Tasks = tasks
+						group.TotalSizeBytes += groups[1].TotalSizeBytes
+					case "distributed":
+						version := latest.Metadata().FormatVersion()
+						encoded, err := codec.EncodeFileScanTask(group.Tasks[0], latest.Spec(), latest.Schema(), version)
+						require.NoError(t, err)
+						task, err := codec.DecodeFileScanTask(encoded, latest.Spec(), latest.Schema(), version)
+						require.NoError(t, err)
+						group.Tasks = []table.FileScanTask{task}
+					}
+					worker, err := table.ExecuteCompactionGroup(ctx, latest, group)
+					require.NoError(t, err)
+					wantID := planned.CurrentSnapshot().SnapshotID
+					if mode == "replanned" {
+						wantID = latest.CurrentSnapshot().SnapshotID
+					}
+					require.NotNil(t, worker.PlanningSnapshotID)
+					require.Equal(t, wantID, *worker.PlanningSnapshotID)
+
+					tx := latest.NewTransaction()
+					rewrite := tx.NewRewrite(nil)
+					if mode == "explicit" {
+						worker.PlanningSnapshotID = nil
+						rewrite.ValidateFromSnapshot(wantID)
+					}
+					err = rewrite.ApplyResult(worker).Commit(ctx)
+					if mode == "replanned" {
+						require.NoError(t, err)
+						committed, err := tx.Commit(ctx)
+						require.NoError(t, err)
+						require.Equal(t, table.OpReplace, committed.CurrentSnapshot().Summary.Operation)
+						require.ElementsMatch(t, []int64{2, 3, 4}, scanIDs(t, committed))
+
+						return
+					}
+					require.ErrorIs(t, err, table.ErrConflictingDeleteFiles)
+				}
+
+				current, err := cat.LoadTable(ctx, latest.Identifier())
+				require.NoError(t, err)
+				require.Equal(t, latest.CurrentSnapshot().SnapshotID, current.CurrentSnapshot().SnapshotID)
+				require.ElementsMatch(t, []int64{2, 3, 4}, scanIDs(t, current))
+			})
+		}
+	}
+}
+
+func TestAtomicCompactionCanRewriteAfterUnrelatedAppend(t *testing.T) {
+	ctx := t.Context()
+	tbl, _ := newConcurrentRewriteTestTable(t)
+	tbl = appendRows(t, tbl, `[{"id":1},{"id":2}]`)
+	plannedSnapshotID := tbl.CurrentSnapshot().SnapshotID
+	scan := tbl.Scan()
+	t.Cleanup(func() { require.NoError(t, scan.Close()) })
+	tasks, err := scan.PlanFiles(ctx)
+	require.NoError(t, err)
+	require.NotEmpty(t, tasks)
+	for _, task := range tasks {
+		require.NotNil(t, task.PlanningSnapshotID)
+		require.Equal(t, plannedSnapshotID, *task.PlanningSnapshotID)
+	}
+
+	tbl = appendRows(t, tbl, `[{"id":3}]`)
+	require.NotEqual(t, plannedSnapshotID, tbl.CurrentSnapshot().SnapshotID)
+	result, err := tbl.RewriteDataFiles(ctx, []table.CompactionTaskGroup{{Tasks: tasks}}, table.RewriteDataFilesOptions{})
+	require.NoError(t, err)
+	require.Equal(t, 1, result.RewrittenGroups)
+	require.ElementsMatch(t, []int64{1, 2, 3}, scanIDs(t, result.Table))
+}
+
+func TestCompactionRejectsMixedPlanningSnapshots(t *testing.T) {
+	ctx := t.Context()
+	tbl, _ := newConcurrentRewriteTestTable(t)
+	tbl = appendRows(t, tbl, `[{"id":1}]`)
+	scan := tbl.Scan()
+	defer scan.Close()
+	older, err := scan.PlanFiles(ctx)
+	require.NoError(t, err)
+	require.Len(t, older, 1)
+
+	tbl = appendRows(t, tbl, `[{"id":2}]`)
+	newerScan := tbl.Scan(table.WithRowFilter(iceberg.EqualTo(iceberg.Reference("id"), int64(2))))
+	defer newerScan.Close()
+	newer, err := newerScan.PlanFiles(ctx)
+	require.NoError(t, err)
+	require.Len(t, newer, 1)
+	require.NotEqual(t, older[0].File.FilePath(), newer[0].File.FilePath())
+	require.NotNil(t, older[0].PlanningSnapshotID)
+	require.NotNil(t, newer[0].PlanningSnapshotID)
+	require.NotEqual(t, *older[0].PlanningSnapshotID, *newer[0].PlanningSnapshotID)
+
+	before := parquetFiles(t, tbl.Location())
+	_, err = table.ExecuteCompactionGroup(ctx, tbl,
+		table.CompactionTaskGroup{Tasks: []table.FileScanTask{older[0], newer[0]}})
+	require.ErrorIs(t, err, table.ErrInvalidOperation)
+	require.ErrorContains(t, err, "mixes planning snapshots")
+
+	_, err = tbl.RewriteDataFiles(ctx, []table.CompactionTaskGroup{{Tasks: older}, {Tasks: newer}},
+		table.RewriteDataFilesOptions{})
+	require.ErrorIs(t, err, table.ErrInvalidOperation)
+	require.ErrorContains(t, err, "mixes planning snapshots")
+	require.ElementsMatch(t, before, parquetFiles(t, tbl.Location()))
+
+	first, err := table.ExecuteCompactionGroup(ctx, tbl, table.CompactionTaskGroup{Tasks: older})
+	require.NoError(t, err)
+	second, err := table.ExecuteCompactionGroup(ctx, tbl, table.CompactionTaskGroup{Tasks: newer})
+	require.NoError(t, err)
+	tx := tbl.NewTransaction()
+	err = tx.NewRewrite(nil).ApplyResult(first).ApplyResult(second).Commit(ctx)
+	require.ErrorIs(t, err, table.ErrInvalidOperation)
+	require.ErrorContains(t, err, "mixes planning snapshots")
+
+	err = tx.NewRewrite(nil).ValidateFromSnapshot(*newer[0].PlanningSnapshotID).ApplyResult(first).Commit(ctx)
+	require.ErrorIs(t, err, table.ErrInvalidOperation)
+	require.ErrorContains(t, err, "differs from validation snapshot")
+}
+
+type compactionSourceOpenHook struct {
+	iceio.LocalFS
+	path   string
+	onOpen func()
+}
+
+func (f *compactionSourceOpenHook) Open(ctx context.Context, name string) (iceio.File, error) {
+	if name == f.path && f.onOpen != nil {
+		fn := f.onOpen
+		f.onOpen = nil
+		fn()
+	}
+
+	return f.LocalFS.Open(ctx, name)
+}
+
+func TestAtomicCompactionRejectsDeleteStagedWhileReading(t *testing.T) {
+	ctx := t.Context()
+	tbl, cat := newConcurrentRewriteTestTable(t)
+	tbl = appendRows(t, tbl, `[{"id":1},{"id":2}]`)
+	scan := tbl.Scan()
+	defer scan.Close()
+	tasks, err := scan.PlanFiles(ctx)
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+
+	path := tasks[0].File.FilePath()
+	posDelPath := tbl.Location() + "/data/staged-pos-del.parquet"
+	writeParquetFile(t, posDelPath, table.PositionalDeleteArrowSchema,
+		fmt.Sprintf(`[{"file_path": "%s", "pos": 0}]`, path))
+	builder, err := iceberg.NewDataFileBuilder(*iceberg.UnpartitionedSpec, iceberg.EntryContentPosDeletes,
+		posDelPath, iceberg.ParquetFile, nil, nil, nil, 1, 128)
+	require.NoError(t, err)
+	bounds := map[int][]byte{iceberg.DeleteFilePathFieldID: []byte(path)}
+	del := builder.LowerBoundValues(bounds).UpperBoundValues(bounds).Build()
+
+	hook := &compactionSourceOpenHook{path: path}
+	wrapped := table.New(tbl.Identifier(), tbl.Metadata(), tbl.MetadataLocation(),
+		func(context.Context) (iceio.IO, error) { return hook, nil }, cat)
+	tx := wrapped.NewTransaction()
+	var stageErr error
+	var ran bool
+	hook.onOpen = func() {
+		ran = true
+		stageErr = tx.NewRowDelta(nil).AddDeletes(del).Commit(ctx)
+	}
+
+	before := parquetFiles(t, tbl.Location())
+	_, err = tx.RewriteDataFiles(ctx, []table.CompactionTaskGroup{{Tasks: tasks}}, table.RewriteDataFilesOptions{})
+	require.True(t, ran, "stage the delete after early validation")
+	require.NoError(t, stageErr)
+	require.ErrorIs(t, err, table.ErrConflictingDeleteFiles)
+	require.ElementsMatch(t, before, parquetFiles(t, tbl.Location()))
+	committed, err := tx.Commit(ctx)
+	require.NoError(t, err)
+	require.ElementsMatch(t, []int64{2}, scanIDs(t, committed))
+}
+
+func TestCompactionRejectsStagedDeleteWithoutPlanningSnapshot(t *testing.T) {
+	for _, mode := range []string{"atomic", "distributed"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx := t.Context()
+			tbl, _ := newConcurrentRewriteTestTable(t)
+			tbl = appendRows(t, tbl, `[{"id":1},{"id":2}]`)
+			tasks, err := tbl.Scan().PlanFiles(ctx)
+			require.NoError(t, err)
+			require.Len(t, tasks, 1)
+			tasks[0].PlanningSnapshotID = nil
+			group := table.CompactionTaskGroup{Tasks: tasks}
+
+			tx := tbl.NewTransaction()
+			del := writeRowDeltaPositionDelete(t, tbl.Location(), "staged", tasks[0].File.FilePath(), []int64{0})
+			require.NoError(t, tx.NewRowDelta(nil).AddDeletes(del).Commit(ctx))
+
+			if mode == "atomic" {
+				_, err = tx.RewriteDataFiles(ctx, []table.CompactionTaskGroup{group}, table.RewriteDataFilesOptions{})
+			} else {
+				worker, workerErr := table.ExecuteCompactionGroup(ctx, tbl, group)
+				require.NoError(t, workerErr)
+				require.Nil(t, worker.PlanningSnapshotID)
+
+				err = tx.NewRewrite(nil).ApplyResult(worker).Commit(ctx)
+			}
+			require.ErrorIs(t, err, table.ErrConflictingDeleteFiles)
+
+			committed, err := tx.Commit(ctx)
+			require.NoError(t, err)
+			require.Equal(t, []int64{2}, scanIDs(t, committed))
+		})
+	}
+}
+
+func TestCompactionRejectsReaddedSourcePath(t *testing.T) {
+	for _, mode := range []string{"atomic", "partial", "distributed", "retry"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx := t.Context()
+			tbl, cat := newConcurrentRewriteTestTable(t)
+			tbl = appendRows(t, tbl, `[{"id":1},{"id":2}]`)
+			tbl = appendEqualityDelete(t, tbl, []int{1}, `[{"id":1}]`)
+			require.Equal(t, []int64{2}, scanIDs(t, tbl))
+			tasks, err := tbl.Scan().PlanFiles(ctx)
+			require.NoError(t, err)
+			require.Len(t, tasks, 1)
+			require.Len(t, tasks[0].EqualityDeleteFiles, 1)
+			path := tasks[0].File.FilePath()
+
+			replaceSource := func() *table.Table {
+				remove := tbl.NewTransaction()
+				require.NoError(t, remove.NewRewrite(nil).DeleteFile(tasks[0].File).Commit(ctx))
+				removed, err := remove.Commit(ctx)
+				require.NoError(t, err)
+
+				readd := removed.NewTransaction()
+				require.NoError(t, readd.AddDataFilesByPath(ctx, []string{path}, nil, false))
+				readded, err := readd.Commit(ctx)
+				require.NoError(t, err)
+				require.ElementsMatch(t, []int64{1, 2}, scanIDs(t, readded))
+
+				return readded
+			}
+
+			group := table.CompactionTaskGroup{Tasks: tasks}
+			var current *table.Table
+			if mode == "retry" {
+				cat.beforeCommit = func() { current = replaceSource() }
+				_, err = tbl.RewriteDataFiles(ctx, []table.CompactionTaskGroup{group}, table.RewriteDataFilesOptions{})
+				require.ErrorIs(t, err, table.ErrTransactionUnusable)
+			} else {
+				current = replaceSource()
+				switch mode {
+				case "atomic":
+					_, err = current.RewriteDataFiles(ctx, []table.CompactionTaskGroup{group}, table.RewriteDataFilesOptions{})
+				case "partial":
+					result, partialErr := current.RewriteDataFiles(ctx, []table.CompactionTaskGroup{group},
+						table.RewriteDataFilesOptions{PartialProgress: true})
+					require.NoError(t, partialErr)
+					require.Empty(t, result.CompletedGroups)
+					require.Len(t, result.FailedGroups, 1)
+					err = result.FailedGroups[0].Err
+				case "distributed":
+					worker, workerErr := table.ExecuteCompactionGroup(ctx, tbl, group)
+					require.NoError(t, workerErr)
+					err = current.NewTransaction().NewRewrite(nil).ApplyResult(worker).Commit(ctx)
+				}
+			}
+			require.ErrorIs(t, err, table.ErrCommitFailed)
+			require.ErrorContains(t, err, "rewrite source file removed")
+			require.ErrorContains(t, err, path)
+
+			latest, err := cat.LoadTable(ctx, tbl.Identifier())
+			require.NoError(t, err)
+			require.Equal(t, current.CurrentSnapshot().SnapshotID, latest.CurrentSnapshot().SnapshotID)
+			require.ElementsMatch(t, []int64{1, 2}, scanIDs(t, latest))
+		})
+	}
+}
+
+func TestPartialCompactionCanCreateBranchFromPlanningSnapshot(t *testing.T) {
+	planned, cat, groups, _ := newAbsorbedDeleteFixture(t, absorbedPositionDelete, 2)
+	cat.beforeCommit = nil
+
+	tx, err := planned.NewTransactionOnBranch("compaction")
+	require.NoError(t, err)
+	result, err := tx.RewriteDataFiles(t.Context(), groups, table.RewriteDataFilesOptions{
+		PartialProgress: true,
+		MaxCommits:      2,
+	})
+	require.NoError(t, err)
+	require.Len(t, result.CompletedGroups, 2)
+	require.Empty(t, result.FailedGroups)
+	require.Equal(t, table.OpReplace, result.Table.SnapshotByName("compaction").Summary.Operation)
+	require.Equal(t, planned.CurrentSnapshot().SnapshotID, result.Table.CurrentSnapshot().SnapshotID)
+	require.ElementsMatch(t, []int64{1, 2, 3, 4}, idsOnRef(t, result.Table, "compaction"))
+}
+
+func TestCompactionRejectsConcurrentChangeToNewBranchParent(t *testing.T) {
+	planned, cat, groups, _ := newAbsorbedDeleteFixture(t, absorbedPositionDelete, 2, 0)
+	const branch = "compaction"
+	tx, err := planned.NewTransactionOnBranch(branch)
+	require.NoError(t, err)
+	_, err = tx.RewriteDataFiles(t.Context(), groups, table.RewriteDataFilesOptions{})
+	require.NoError(t, err)
+	_, err = tx.Commit(t.Context())
+	require.ErrorIs(t, err, table.ErrTransactionUnusable)
+	require.Nil(t, cat.beforeCommit)
+
+	latest, err := cat.LoadTable(t.Context(), planned.Identifier())
+	require.NoError(t, err)
+	require.Nil(t, latest.SnapshotByName(branch))
+	require.ElementsMatch(t, []int64{2, 3, 4}, scanIDs(t, latest))
+}
+
+func TestCompactionOnExplicitNewBranchAllowsMainAppend(t *testing.T) {
+	ctx := t.Context()
+	tbl, cat := newConcurrentRewriteTestTable(t)
+	tbl = appendRows(t, tbl, `[{"id":1}]`)
+	tbl = appendRowsOnRef(t, tbl, "source", 2, 3)
+
+	scan, err := tbl.Scan().UseRef("source")
+	require.NoError(t, err)
+	defer scan.Close()
+	tasks, err := scan.PlanFiles(ctx)
+	require.NoError(t, err)
+
+	tx, err := tbl.NewTransactionOnBranch("compacted")
+	require.NoError(t, err)
+	require.NoError(t, tx.ReplaceBranchFromRef("compacted", "source"))
+	_, err = tx.RewriteDataFiles(ctx, []table.CompactionTaskGroup{{Tasks: tasks}}, table.RewriteDataFilesOptions{})
+	require.NoError(t, err)
+
+	cat.beforeCommit = func() { appendRows(t, tbl, `[{"id":4}]`) }
+	committed, err := tx.Commit(ctx)
+	require.NoError(t, err)
+	require.ElementsMatch(t, []int64{1, 4}, scanIDs(t, committed))
+	require.ElementsMatch(t, []int64{1, 2, 3}, idsOnRef(t, committed, "compacted"))
+	require.Equal(t, committed.SnapshotByName("source").SnapshotID, *committed.SnapshotByName("compacted").ParentSnapshotID)
+}
+
+func TestRejectedCompactionDoesNotPinNewBranch(t *testing.T) {
+	tbl, cat := newConcurrentRewriteTestTable(t)
+	tbl = appendRows(t, tbl, `[{"id":1}]`)
+	tasks, err := tbl.Scan().PlanFiles(t.Context())
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	tx, err := tbl.NewTransactionOnBranch("compaction")
+	require.NoError(t, err)
+	file := tasks[0].File
+	err = tx.NewRewrite(nil).DeleteFile(file).AddFile(file).Commit(t.Context())
+	require.ErrorContains(t, err, "already referenced by table")
+	require.NoError(t, tx.SetProperties(iceberg.Properties{"test.property": "updated"}))
+	cat.beforeCommit = func() {
+		appendRows(t, tbl, `[{"id":2}]`)
+	}
+	committed, err := tx.Commit(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, "updated", committed.Properties()["test.property"])
+	require.ElementsMatch(t, []int64{1, 2}, scanIDs(t, committed))
+}
+
+type compactionHistoryCatalog struct {
+	*concurrentTestCatalog
+	fullLoads int
+}
+
+func (c *compactionHistoryCatalog) LoadTable(ctx context.Context, ident table.Identifier) (*table.Table, error) {
+	full, err := c.concurrentTestCatalog.LoadTable(ctx, ident)
+	if err != nil {
+		return nil, err
+	}
+	var remove []int64
+	for _, snap := range full.Metadata().Snapshots() {
+		if snap.SnapshotID != full.CurrentSnapshot().SnapshotID {
+			remove = append(remove, snap.SnapshotID)
+		}
+	}
+	limited, err := table.UpdateTableMetadata(full.Metadata(), []table.Update{table.NewRemoveSnapshotsUpdate(remove, false)}, "")
+	if err != nil {
+		return nil, err
+	}
+
+	return table.New(ident, limited, full.MetadataLocation(), c.fsF, c, table.WithSnapshotHistoryLimitedToRefs(true)), nil
+}
+
+func (c *compactionHistoryCatalog) LoadTableWithFullSnapshotHistory(ctx context.Context, ident table.Identifier) (*table.Table, error) {
+	c.fullLoads++
+
+	return c.concurrentTestCatalog.LoadTable(ctx, ident)
+}
+
+func TestCompactionValidatesAgainstFullHistoryFromRefsOnlyTable(t *testing.T) {
+	for _, mode := range []string{"atomic", "partial", "distributed"} {
+		for _, withDelete := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/delete=%t", mode, withDelete), func(t *testing.T) {
+				planned, cat, groups, _ := newAbsorbedDeleteFixture(t, absorbedPositionDelete, 2, 0)
+				peerDelete := cat.beforeCommit
+				cat.beforeCommit = nil
+				if withDelete {
+					peerDelete()
+				} else {
+					appendRows(t, planned, `[{"id":7}]`)
+				}
+				latest, err := cat.LoadTable(t.Context(), planned.Identifier())
+				require.NoError(t, err)
+				appendRows(t, latest, `[{"id":8}]`)
+
+				catalog := &compactionHistoryCatalog{concurrentTestCatalog: cat}
+				limited, err := catalog.LoadTable(t.Context(), planned.Identifier())
+				require.NoError(t, err)
+				require.Len(t, limited.Metadata().Snapshots(), 1)
+				tx := limited.NewTransaction()
+				switch mode {
+				case "partial":
+					result, err := tx.RewriteDataFiles(t.Context(), groups[:1],
+						table.RewriteDataFilesOptions{PartialProgress: true})
+					require.NoError(t, err)
+					if withDelete {
+						require.Len(t, result.FailedGroups, 1)
+						require.ErrorIs(t, result.FailedGroups[0].Err, table.ErrConflictingDeleteFiles)
+					} else {
+						require.Len(t, result.CompletedGroups, 1)
+					}
+				default:
+					if mode == "distributed" {
+						result, workerErr := table.ExecuteCompactionGroup(t.Context(), limited, groups[0])
+						require.NoError(t, workerErr)
+						err = tx.NewRewrite(nil).ApplyResult(result).Commit(t.Context())
+					} else {
+						_, err = tx.RewriteDataFiles(t.Context(), groups[:1], table.RewriteDataFilesOptions{})
+					}
+					if withDelete {
+						require.ErrorIs(t, err, table.ErrConflictingDeleteFiles)
+					} else {
+						require.NoError(t, err)
+						_, err = tx.Commit(t.Context())
+						require.NoError(t, err)
+					}
+				}
+				require.Equal(t, 1, catalog.fullLoads)
+			})
+		}
+	}
+}
+
+func TestCompactionRetryLoadsFullHistoryFromRefsOnlyTable(t *testing.T) {
+	planned, cat, groups, _ := newAbsorbedDeleteFixture(t, absorbedPositionDelete, 2)
+	cat.beforeCommit = func() {
+		latest := appendRows(t, planned, `[{"id":5}]`)
+		appendRows(t, latest, `[{"id":6}]`)
+	}
+	catalog := &compactionHistoryCatalog{concurrentTestCatalog: cat}
+	limited, err := catalog.LoadTable(t.Context(), planned.Identifier())
+	require.NoError(t, err)
+	result, err := limited.RewriteDataFiles(t.Context(), groups, table.RewriteDataFilesOptions{})
+	require.NoError(t, err)
+	require.Equal(t, 1, catalog.fullLoads)
+	require.ElementsMatch(t, []int64{1, 2, 3, 4, 5, 6}, scanIDs(t, result.Table))
+}
+
+func TestCompactionPlanningSnapshotOnTargetBranch(t *testing.T) {
+	planned, cat, groups, _ := newAbsorbedDeleteFixture(t, absorbedPositionDelete, 2)
+	cat.beforeCommit = nil
+	branch := appendRowsOnRef(t, planned, "compaction", 5, 6)
+	latest := appendRowsOnRef(t, branch, table.MainBranch, 7, 8)
+	branchID := latest.SnapshotByName("compaction").SnapshotID
+
+	tx, err := latest.NewTransactionOnBranch("compaction")
+	require.NoError(t, err)
+	_, err = tx.RewriteDataFiles(t.Context(), groups, table.RewriteDataFilesOptions{})
+	require.NoError(t, err)
+	compacted, err := tx.Commit(t.Context())
+	require.NoError(t, err)
+	snapshot := compacted.SnapshotByName("compaction")
+	require.Equal(t, table.OpReplace, snapshot.Summary.Operation)
+	require.Equal(t, &branchID, snapshot.ParentSnapshotID)
+	require.Equal(t, []int64{1, 2, 3, 4, 5, 6}, idsOnRef(t, compacted, "compaction"))
+	require.Equal(t, []int64{1, 2, 3, 4, 7, 8}, idsOnRef(t, compacted, table.MainBranch))
+
+	// Main's head is a sibling of the target branch despite sharing the data file.
+	scan := compacted.Scan()
+	tasks, err := scan.PlanFiles(t.Context())
+	require.NoError(t, err)
+	tx, err = compacted.NewTransactionOnBranch("compaction")
+	require.NoError(t, err)
+	_, err = tx.RewriteDataFiles(t.Context(), []table.CompactionTaskGroup{{Tasks: tasks}}, table.RewriteDataFilesOptions{})
+	require.ErrorIs(t, err, table.ErrCommitDiverged)
 }
 
 type absorbedDeleteKind int

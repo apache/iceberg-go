@@ -32,6 +32,8 @@ func TestEncodeDecodeFileScanTaskRoundTrip(t *testing.T) {
 	for _, version := range []int{1, 2, 3} {
 		t.Run("v"+strconv.Itoa(version), func(t *testing.T) {
 			spec, schema, original := fullyPopulatedFileScanTask(t, version)
+			snapshotID := int64(9192388479229)
+			original.PlanningSnapshotID = &snapshotID
 
 			bytes, err := codec.EncodeFileScanTask(original, spec, schema, version)
 			require.NoError(t, err)
@@ -70,6 +72,7 @@ func TestEncodeDecodeFileScanTaskRoundTrip(t *testing.T) {
 			require.Equal(t, original.Length, decoded.Length)
 			require.Equal(t, original.FirstRowID, decoded.FirstRowID)
 			require.Equal(t, original.DataSequenceNumber, decoded.DataSequenceNumber)
+			require.Equal(t, original.PlanningSnapshotID, decoded.PlanningSnapshotID)
 			require.NotNil(t, decoded.Residual)
 			require.True(t, decoded.Residual.Equals(original.Residual))
 		})
@@ -217,6 +220,24 @@ func TestEncodeFileScanTaskEmptyDeleteLists(t *testing.T) {
 	require.Empty(t, decoded.EqualityDeleteFiles)
 	require.Empty(t, decoded.DeletionVectorFiles)
 	require.Nil(t, decoded.Residual)
+	require.Nil(t, decoded.PlanningSnapshotID)
+}
+
+func TestDecodeFileScanTaskRejectsTruncatedPlanningSnapshot(t *testing.T) {
+	spec, schema, task := fullyPopulatedFileScanTask(t, 2)
+	task.Residual = nil
+	snapshotID := int64(123456)
+	task.PlanningSnapshotID = &snapshotID
+
+	encoded, err := codec.EncodeFileScanTask(task, spec, schema, 2)
+	require.NoError(t, err)
+	decoded, err := codec.DecodeFileScanTask(encoded, spec, schema, 2)
+	require.NoError(t, err)
+	require.Equal(t, task.PlanningSnapshotID, decoded.PlanningSnapshotID)
+	require.Nil(t, decoded.Residual)
+
+	_, err = codec.DecodeFileScanTask(encoded[:len(encoded)-1], spec, schema, 2)
+	require.ErrorContains(t, err, "invalid planning snapshot ID")
 }
 
 func TestEncodeFileScanTaskTimestampResidualUsesSchema(t *testing.T) {
