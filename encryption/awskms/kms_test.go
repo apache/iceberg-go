@@ -25,8 +25,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/apache/iceberg-go/awsconfig"
 	"github.com/apache/iceberg-go/encryption"
-	"github.com/apache/iceberg-go/utils"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/kms"
@@ -185,7 +185,7 @@ func TestClientCancellation(t *testing.T) {
 
 func TestRegistryUsesContextConfig(t *testing.T) {
 	supplied := aws.Config{Region: "us-west-2", Credentials: credentials.NewStaticCredentialsProvider("test", "test", "")}
-	loaded, err := encryption.LoadKeyManagementClient(utils.WithAWSConfig(t.Context(), &supplied), map[string]string{
+	loaded, err := encryption.LoadKeyManagementClient(awsconfig.NewContext(t.Context(), &supplied), map[string]string{
 		encryption.KMSTypeKey: "aws", "client.region": "eu-west-1",
 	})
 	require.NoError(t, err)
@@ -227,7 +227,7 @@ func TestRegistryUsesKMSEndpoint(t *testing.T) {
 		Credentials:      credentials.NewStaticCredentialsProvider("test", "test", ""),
 		RetryMaxAttempts: 1,
 	}
-	loaded, err := encryption.LoadKeyManagementClient(utils.WithAWSConfig(t.Context(), &supplied), map[string]string{
+	loaded, err := encryption.LoadKeyManagementClient(awsconfig.NewContext(t.Context(), &supplied), map[string]string{
 		encryption.KMSTypeKey: "aws",
 		"client.region":       "eu-west-1",
 		"kms.endpoint":        server.URL,
