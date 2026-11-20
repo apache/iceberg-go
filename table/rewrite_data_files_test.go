@@ -966,6 +966,71 @@ func TestCompactionRejectsDeletesCommittedBeforeTransaction(t *testing.T) {
 	}
 }
 
+func TestCompactionRejectsReaddedSourcePath(t *testing.T) {
+	for _, mode := range []string{"atomic", "partial", "distributed", "retry"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx := t.Context()
+			tbl, cat := newConcurrentRewriteTestTable(t)
+			tbl = appendRows(t, tbl, `[{"id":1},{"id":2}]`)
+			tbl = appendEqualityDelete(t, tbl, []int{1}, `[{"id":1}]`)
+			require.Equal(t, []int64{2}, scanIDs(t, tbl))
+			tasks, err := tbl.Scan().PlanFiles(ctx)
+			require.NoError(t, err)
+			require.Len(t, tasks, 1)
+			require.Len(t, tasks[0].EqualityDeleteFiles, 1)
+			path := tasks[0].File.FilePath()
+
+			replaceSource := func() *table.Table {
+				remove := tbl.NewTransaction()
+				require.NoError(t, remove.NewRewrite(nil).DeleteFile(tasks[0].File).Commit(ctx))
+				removed, err := remove.Commit(ctx)
+				require.NoError(t, err)
+
+				readd := removed.NewTransaction()
+				require.NoError(t, readd.AddDataFilesByPath(ctx, []string{path}, nil, false))
+				readded, err := readd.Commit(ctx)
+				require.NoError(t, err)
+				require.ElementsMatch(t, []int64{1, 2}, scanIDs(t, readded))
+
+				return readded
+			}
+
+			group := table.CompactionTaskGroup{Tasks: tasks}
+			var current *table.Table
+			if mode == "retry" {
+				cat.beforeCommit = func() { current = replaceSource() }
+				_, err = tbl.RewriteDataFiles(ctx, []table.CompactionTaskGroup{group}, table.RewriteDataFilesOptions{})
+				require.ErrorIs(t, err, table.ErrTransactionUnusable)
+			} else {
+				current = replaceSource()
+				switch mode {
+				case "atomic":
+					_, err = current.RewriteDataFiles(ctx, []table.CompactionTaskGroup{group}, table.RewriteDataFilesOptions{})
+				case "partial":
+					result, partialErr := current.RewriteDataFiles(ctx, []table.CompactionTaskGroup{group},
+						table.RewriteDataFilesOptions{PartialProgress: true})
+					require.NoError(t, partialErr)
+					require.Empty(t, result.CompletedGroups)
+					require.Len(t, result.FailedGroups, 1)
+					err = result.FailedGroups[0].Err
+				case "distributed":
+					worker, workerErr := table.ExecuteCompactionGroup(ctx, tbl, group)
+					require.NoError(t, workerErr)
+					err = current.NewTransaction().NewRewrite(nil).ApplyResult(worker).Commit(ctx)
+				}
+			}
+			require.ErrorIs(t, err, table.ErrCommitFailed)
+			require.ErrorContains(t, err, "rewrite source file removed")
+			require.ErrorContains(t, err, path)
+
+			latest, err := cat.LoadTable(ctx, tbl.Identifier())
+			require.NoError(t, err)
+			require.Equal(t, current.CurrentSnapshot().SnapshotID, latest.CurrentSnapshot().SnapshotID)
+			require.ElementsMatch(t, []int64{1, 2}, scanIDs(t, latest))
+		})
+	}
+}
+
 func TestPartialCompactionCanCreateBranchFromPlanningSnapshot(t *testing.T) {
 	planned, cat, groups, _ := newAbsorbedDeleteFixture(t, absorbedPositionDelete, 2)
 	cat.beforeCommit = nil

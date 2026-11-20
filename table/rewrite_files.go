@@ -93,9 +93,10 @@ func (t *Transaction) NewRewrite(snapshotProps iceberg.Properties) *RewriteFiles
 }
 
 // ValidateFromSnapshot sets the snapshot used to read the files being
-// rewritten. A rewrite rejects conflicting deletes committed after this
-// snapshot. Worker results supplied through [RewriteFiles.ApplyResult] must
-// agree with the snapshot when they carry their own planning snapshot ID.
+// rewritten. A rewrite rejects conflicting deletes and source-file removals
+// committed after this snapshot. Worker results supplied through
+// [RewriteFiles.ApplyResult] must agree with the snapshot when they carry
+// their own planning snapshot ID.
 // Without an explicit ID or any worker snapshot IDs, validation starts at
 // the transaction's base. Supply the original planning snapshot explicitly
 // when using legacy worker results planned before the transaction began.

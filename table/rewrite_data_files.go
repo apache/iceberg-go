@@ -889,7 +889,15 @@ func (t *Transaction) rewriteDataFilesPartial(ctx context.Context, groups []Comp
 			snapshotID = &head.SnapshotID
 		}
 	}
-	sincePlanning := deletesSincePlanning{checkedSnapshotID: snapshotID, branch: t.branch}
+	sources, err := compactionSourceFiles(pendingGroups)
+	if err != nil {
+		return result, err
+	}
+	sincePlanning := rewriteConflictsSincePlanning{
+		checkedSnapshotID: snapshotID,
+		branch:            t.branch,
+		sourcePaths:       rewriteSourcePaths(sources),
+	}
 	failedCommits := 0
 
 	for batchStart := 0; batchStart < len(pendingGroups); batchStart += groupsPerCommit {
@@ -912,7 +920,7 @@ func (t *Transaction) rewriteDataFilesPartial(ctx context.Context, groups []Comp
 		// history before that point as well, including changes absorbed by an
 		// earlier batch's retry.
 		if err := sincePlanning.validate(ctx, current, fs, batchGroups); err != nil {
-			if !errors.Is(err, ErrConflictingDeleteFiles) {
+			if !errors.Is(err, ErrConflictingDeleteFiles) && !errors.Is(err, errRewriteSourceRemoved) {
 				return result, fmt.Errorf("validate partial rewrite batch %d against its planning snapshot: %w", batchNum, err)
 			}
 
@@ -1139,8 +1147,41 @@ func rewriteValidatorWithReferencedDataFiles(
 			return err
 		}
 
-		return validateNoNewDeletesForRewrittenFiles(cc, rewrittenFiles)
+		return validateRewriteConflicts(cc, rewrittenFiles)
 	}
+}
+
+var errRewriteSourceRemoved = fmt.Errorf("%w: rewrite source file removed", ErrCommitFailed)
+
+func rewriteSourceRemoved(snapshotID int64, path string) error {
+	return fmt.Errorf("%w: snapshot %d removed %q after planning", errRewriteSourceRemoved, snapshotID, path)
+}
+
+func rewriteSourcePaths(files []iceberg.DataFile) map[string]struct{} {
+	paths := make(map[string]struct{}, len(files))
+	for _, df := range files {
+		paths[df.FilePath()] = struct{}{}
+	}
+
+	return paths
+}
+
+func validateRewriteConflicts(cc *conflictContext, files []iceberg.DataFile) error {
+	if len(files) == 0 || len(cc.concurrent) == 0 {
+		return nil
+	}
+	paths := rewriteSourcePaths(files)
+	if err := cc.forEachRemovedDataFile(func(snapshotID int64, path string) error {
+		if _, ok := paths[path]; ok {
+			return rewriteSourceRemoved(snapshotID, path)
+		}
+
+		return nil
+	}); err != nil {
+		return err
+	}
+
+	return validateNoNewDeletesForRewrittenFiles(cc, files)
 }
 
 var errSnapshotHistoryIncompleteForRewrite = errors.New(
@@ -1179,24 +1220,21 @@ func (t *Transaction) validateRewriteFromSnapshot(ctx context.Context, meta *Met
 		return err
 	}
 
-	return validateNoNewDeletesForRewrittenFiles(cc, rewrittenFiles)
+	return validateRewriteConflicts(cc, rewrittenFiles)
 }
 
-// deletesSincePlanning collects the delete files committed on a branch since
-// the groups were planned. Each validate call reads only the snapshots
-// committed since the previous call, so a partial rewrite reads every
-// snapshot's manifests once rather than once per batch.
-type deletesSincePlanning struct {
-	// checkedSnapshotID starts at the plan's snapshot and advances as deletes
-	// are collected, so each snapshot is read at most once across batches.
+// rewriteConflictsSincePlanning records added deletes and removed data paths
+// since planning. Each validation checks only the snapshots committed since
+// the previous check, then applies accumulated changes to the current batch.
+type rewriteConflictsSincePlanning struct {
 	checkedSnapshotID *int64
 	branch            string
 	deletes           []addedDelete
+	sourcePaths       map[string]struct{}
+	removedPaths      map[string]int64
 }
 
-// validate collects deletes from newly checked snapshots and returns
-// ErrConflictingDeleteFiles if any delete since planning applies to groups.
-func (d *deletesSincePlanning) validate(ctx context.Context, current *Table, fs iceio.IO, groups []CompactionTaskGroup) error {
+func (d *rewriteConflictsSincePlanning) validate(ctx context.Context, current *Table, fs iceio.IO, groups []CompactionTaskGroup) error {
 	// The rewrite validator binds no filters, so case sensitivity is moot.
 	head := latestSnapshotForBranch(current.metadata, d.branch)
 	cc, err := newConflictContextAt(ctx, current.metadata, d.branch, head, d.checkedSnapshotID, fs, true)
@@ -1223,15 +1261,35 @@ func (d *deletesSincePlanning) validate(ctx context.Context, current *Table, fs 
 	if err != nil {
 		return err
 	}
+	if err := cc.forEachRemovedDataFile(func(snapshotID int64, path string) error {
+		if _, ok := d.sourcePaths[path]; ok {
+			if d.removedPaths == nil {
+				d.removedPaths = make(map[string]int64)
+			}
+			d.removedPaths[path] = snapshotID
+		}
+
+		return nil
+	}); err != nil {
+		return err
+	}
 	d.checkedSnapshotID, d.deletes = &head.SnapshotID, deletes
 
-	if len(d.deletes) == 0 {
+	if len(d.deletes) == 0 && len(d.removedPaths) == 0 {
 		return nil
 	}
 
 	files, err := compactionSourceFiles(groups)
 	if err != nil {
 		return err
+	}
+	for _, file := range files {
+		if snapshotID, ok := d.removedPaths[file.FilePath()]; ok {
+			return rewriteSourceRemoved(snapshotID, file.FilePath())
+		}
+	}
+	if len(d.deletes) == 0 {
+		return nil
 	}
 	rewritten, err := newRewrittenFileSet(files)
 	if err != nil {
