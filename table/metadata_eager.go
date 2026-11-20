@@ -454,36 +454,33 @@ func readEagerLogEntry(c *metadataJSONCursor, field string, read func(*metadataJ
 	if !c.take('{') {
 		return false
 	}
-	seen := 0
-	for range 2 {
+	var seenValue, seenTimestamp bool
+	for i := range 2 {
+		if i > 0 && !c.take(',') {
+			return false
+		}
 		key, ok := c.objectField()
 		if !ok {
 			return false
 		}
 		switch string(key) {
 		case field:
-			if seen&1 != 0 || !read(c) {
+			if seenValue || !read(c) {
 				return false
 			}
-			seen |= 1
+			seenValue = true
 		case "timestamp-ms":
-			if seen&2 != 0 {
+			if seenTimestamp {
 				return false
 			}
 			if *timestamp, ok = c.integer(); !ok {
 				return false
 			}
-			seen |= 2
+			seenTimestamp = true
 		default:
-			return false
-		}
-		if seen == 3 {
-			return c.take('}')
-		}
-		if !c.take(',') {
 			return false
 		}
 	}
 
-	return false
+	return c.take('}')
 }
