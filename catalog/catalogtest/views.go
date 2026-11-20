@@ -19,8 +19,10 @@ package catalogtest
 
 import (
 	"context"
+	"errors"
 	"testing"
 
+	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
 	"github.com/apache/iceberg-go/table"
 	"github.com/apache/iceberg-go/view"
@@ -73,13 +75,22 @@ func listViews(t *testing.T, views catalog.ViewCatalog, namespace table.Identifi
 	return out
 }
 
-// newViewCatalog returns a fresh catalog from cfg and its view capability.
+// newViewCatalog returns a fresh catalog from cfg and its view capability. It
+// skips the test when the catalog has no view support, such as a REST server
+// that does not advertise the view endpoints.
 func newViewCatalog(t *testing.T, cfg Config) (catalog.Catalog, catalog.ViewCatalog) {
 	t.Helper()
 
 	cat := cfg.NewCatalog(t)
 	views, ok := catalog.As[catalog.ViewCatalog](cat)
-	require.True(t, ok, "catalog should implement catalog.ViewCatalog")
+	if !ok {
+		t.Skip("catalog does not implement catalog.ViewCatalog")
+	}
+
+	_, ident := newIdentifiers()
+	if _, err := views.CheckViewExists(context.Background(), ident); errors.Is(err, iceberg.ErrNotImplemented) {
+		t.Skipf("catalog does not support views: %v", err)
+	}
 
 	return cat, views
 }
