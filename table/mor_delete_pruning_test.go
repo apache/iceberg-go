@@ -418,6 +418,15 @@ func TestV3MergeOnReadUpgradePreservesPositionDeletes(t *testing.T) {
 			wantV3:      []int64{3},
 		},
 		{
+			name: "older position delete follows the new DV position",
+			batches: []string{
+				`[{"id":2,"data":"b"},{"id":3,"data":"c"},{"id":1,"data":"a"}]`,
+			},
+			firstFilter: iceberg.EqualTo(iceberg.Reference("id"), int64(1)),
+			wantV2:      []int64{2, 3},
+			wantV3:      []int64{3},
+		},
+		{
 			name: "shared position delete file",
 			batches: []string{
 				`[{"id":1,"data":"a"},{"id":2,"data":"b"}]`,
