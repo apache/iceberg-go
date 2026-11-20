@@ -622,14 +622,17 @@ func validateDataFilesExist(cc *conflictContext, referencedPaths []string) error
 	return dataFilesMissingError(missing, "missing")
 }
 
-// validateReplayDataPaths checks the live files in the parent a replay will
+type replayDataPathCheck struct {
+	paths          map[string]struct{}
+	includeDeletes bool
+}
+
+// validate checks the live files in the parent a replay will
 // inherit. Staging already checked the original parent's immutable manifests,
 // so only manifests newly referenced by the replay parent need to be opened.
-func validateReplayDataPaths(
-	ctx context.Context, fs iceio.IO, original, parent *Snapshot,
-	paths map[string]struct{}, includeDeletes bool,
-) error {
-	if parent == nil || (original != nil && original.ManifestList != "" && original.ManifestList == parent.ManifestList) {
+func (check replayDataPathCheck) validate(ctx context.Context, fs iceio.IO, original, parent *Snapshot) error {
+	if len(check.paths) == 0 || parent == nil ||
+		(original != nil && original.ManifestList != "" && original.ManifestList == parent.ManifestList) {
 		return nil
 	}
 
@@ -649,8 +652,12 @@ func validateReplayDataPaths(
 	if err != nil {
 		return fmt.Errorf("read manifests for replay parent %d: %w", parent.SnapshotID, err)
 	}
+	conflict := ErrDuplicateDataFiles
+	if check.includeDeletes {
+		conflict = ErrConflictingDataFiles
+	}
 	for _, manifest := range manifests {
-		if !includeDeletes && manifest.ManifestContent() != iceberg.ManifestContentData {
+		if !check.includeDeletes && manifest.ManifestContent() != iceberg.ManifestContentData {
 			continue
 		}
 		if _, ok := checked[manifest.FilePath()]; ok {
@@ -661,12 +668,8 @@ func validateReplayDataPaths(
 				return fmt.Errorf("read entries for replay parent %d: %w", parent.SnapshotID, err)
 			}
 			path := entry.DataFile().FilePath()
-			if _, exists := paths[path]; !exists {
+			if _, exists := check.paths[path]; !exists {
 				continue
-			}
-			conflict := ErrDuplicateDataFiles
-			if includeDeletes {
-				conflict = ErrConflictingDataFiles
 			}
 
 			return fmt.Errorf("%w: %w: replay parent %d already references file %q",

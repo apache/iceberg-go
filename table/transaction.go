@@ -1150,7 +1150,7 @@ func (t *Transaction) ReplaceDataFilesByPath(ctx context.Context, filesToDelete,
 
 	commitUUID := uuid.New()
 	updater := t.updateSnapshot(wfs, snapshotProps, OpOverwrite).mergeOverwrite(&commitUUID, nil)
-	updater.retryDataPaths = setToAdd
+	updater.retryDataPathCheck.paths = setToAdd
 
 	for _, df := range markedForDeletion {
 		dvs.removeDataFile(updater, df)
@@ -1784,7 +1784,7 @@ func (t *Transaction) AddDataFiles(ctx context.Context, dataFiles []iceberg.Data
 
 	appendFiles := t.appendSnapshotProducer(meta, wfs, snapshotProps)
 	if !cfg.skipDuplicateCheck {
-		appendFiles.retryDataPaths = setToAdd
+		appendFiles.retryDataPathCheck.paths = setToAdd
 	}
 	for _, df := range dataFiles {
 		appendFiles.appendDataFile(df)
@@ -1917,8 +1917,7 @@ func (t *Transaction) ReplaceDataFiles(ctx context.Context, filesToDelete, files
 
 	commitUUID := uuid.New()
 	updater := t.updateSnapshot(wfs, snapshotProps, op).mergeOverwrite(&commitUUID, nil)
-	updater.retryDataPaths = setToAdd
-	updater.retryPathCheckIncludesDeletes = cfg.replacementPathValidator != nil
+	updater.retryDataPathCheck = replayDataPathCheck{paths: setToAdd, includeDeletes: cfg.replacementPathValidator != nil}
 	if cfg.rewriteSemantics {
 		updater.setSkipDefaultValidator(true)
 	}
@@ -2331,8 +2330,7 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 
 	commitUUID := uuid.New()
 	updater := t.updateSnapshot(wfs, snapshotProps, op).mergeOverwrite(&commitUUID, nil)
-	updater.retryDataPaths = setToAdd
-	updater.retryPathCheckIncludesDeletes = cfg.replacementPathValidator != nil
+	updater.retryDataPathCheck = replayDataPathCheck{paths: setToAdd, includeDeletes: cfg.replacementPathValidator != nil}
 	if cfg.rewriteSemantics {
 		updater.setSkipDefaultValidator(true)
 	}
@@ -2512,7 +2510,7 @@ func (t *Transaction) AddDataFilesByPath(ctx context.Context, filePaths []string
 	}
 	updater := t.appendSnapshotProducer(meta, wfs, snapshotProps)
 	if !ignoreDuplicates {
-		updater.retryDataPaths = set
+		updater.retryDataPathCheck.paths = set
 	}
 
 	dataFiles, err := filesToDataFiles(ctx, fs, meta, filePaths, addFilesOp.concurrency, partitionValues)

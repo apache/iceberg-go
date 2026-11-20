@@ -822,8 +822,7 @@ type snapshotProducer struct {
 	written                 writtenManifests
 
 	// The staging operation checked these paths against the original parent.
-	retryDataPaths                map[string]struct{}
-	retryPathCheckIncludesDeletes bool
+	retryDataPathCheck replayDataPathCheck
 }
 
 // deleteFileAddition carries the data sequence number of a rewritten delete
@@ -1654,10 +1653,9 @@ func writeManifestListFile(
 // before anything is written (RewriteManifests detecting a no-op) can build the
 // manifests themselves and only then decide to write the manifest list.
 func (sp *snapshotProducer) commitManifests(ctx context.Context, newManifests, addedContent []iceberg.ManifestFile) (_ []Update, _ []Requirement, err error) {
-	retryDataPaths := sp.retryDataPaths
-	retryPathCheckIncludesDeletes := sp.retryPathCheckIncludesDeletes
+	pathCheck := sp.retryDataPathCheck
 	var originalParent *Snapshot
-	if len(retryDataPaths) > 0 {
+	if len(pathCheck.paths) > 0 {
 		originalParent, err = sp.parentSnapshot()
 		if err != nil {
 			return nil, nil, err
@@ -1763,10 +1761,8 @@ func (sp *snapshotProducer) commitManifests(ctx context.Context, newManifests, a
 	capturedSnapshot := snapshot // copy the value so the closure is self-contained
 
 	rebuildFn := func(rebuildCtx context.Context, freshMeta Metadata, freshParent *Snapshot, fio iceio.WriteFileIO, attempt int) (*Snapshot, error) {
-		if len(retryDataPaths) > 0 {
-			if err := validateReplayDataPaths(rebuildCtx, fio, originalParent, freshParent, retryDataPaths, retryPathCheckIncludesDeletes); err != nil {
-				return nil, err
-			}
+		if err := pathCheck.validate(rebuildCtx, fio, originalParent, freshParent); err != nil {
+			return nil, err
 		}
 
 		// A concurrent writer may have already removed the files this producer
