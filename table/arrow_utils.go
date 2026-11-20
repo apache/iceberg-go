@@ -2484,7 +2484,6 @@ func positionDeleteRecordsToDataFilesDV(ctx context.Context, rootLocation string
 		// DV rewrite. The scan does not apply existing DVs, so skip positions
 		// already present in the seed before deciding that a replacement is
 		// needed.
-		hasEntries := false
 		seededPaths := make(map[string]struct{}, len(args.existingDeletes))
 
 		for batch, err := range args.itr {
@@ -2494,31 +2493,50 @@ func positionDeleteRecordsToDataFilesDV(ctx context.Context, rootLocation string
 				return
 			}
 
-			filePaths := batch.Column(0).(*array.String)
+			pathColumn := batch.Column(0)
+			filePaths, err := tblutils.FilePathValues(pathColumn)
+			if err != nil {
+				yield(nil, err)
+
+				return
+			}
 			positions := batch.Column(1).(*array.Int64)
 
-			for i := range batch.NumRows() {
-				filePath := filePaths.Value(int(i))
+			for i := range int(batch.NumRows()) {
+				if i%positionalDeleteCancellationCheckInterval == 0 {
+					if err := ctx.Err(); err != nil {
+						yield(nil, err)
+
+						return
+					}
+				}
+				filePath, err := positionDeletePathAt(filePaths, pathColumn, i)
+				if err != nil {
+					yield(nil, err)
+
+					return
+				}
 				pCtx, ok := partitionContextByFilePath[filePath]
 				if !ok {
 					yield(nil, fmt.Errorf("unexpected missing partition context for path %s", filePath))
 
 					return
 				}
-				position := positions.Value(int(i))
+				position := positions.Value(i)
 				if position < 0 {
 					yield(nil, fmt.Errorf("%w: invalid deletion position %d for %q: positions must be >= 0",
 						iceberg.ErrInvalidArgument, position, filePath))
 
 					return
 				}
-				if bitmap := args.existingDeletes[filePath]; bitmap != nil && bitmap.Contains(uint64(position)) {
+				bitmap := args.existingDeletes[filePath]
+				if bitmap != nil && bitmap.Contains(uint64(position)) {
 					continue
 				}
 				if _, ok := seededPaths[filePath]; !ok {
 					// The writer and seededPaths outlive the batch's string buffer.
 					filePath = strings.Clone(filePath)
-					if bitmap := args.existingDeletes[filePath]; bitmap != nil {
+					if bitmap != nil {
 						writer.Load(filePath, bitmap, pCtx.specID, pCtx.partitionData)
 					}
 					seededPaths[filePath] = struct{}{}
@@ -2528,11 +2546,10 @@ func positionDeleteRecordsToDataFilesDV(ctx context.Context, rootLocation string
 
 					return
 				}
-				hasEntries = true
 			}
 		}
 
-		if !hasEntries {
+		if len(seededPaths) == 0 {
 			return
 		}
 

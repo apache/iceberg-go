@@ -92,6 +92,35 @@ func TestDVWritePathProducesReadableOutput(t *testing.T) {
 	assert.True(t, bm2.Contains(10))
 }
 
+func TestDVWritePathRejectsMissingFilePaths(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		json string
+	}{
+		{name: "null", json: `[{"file_path":null,"pos":0}]`},
+		{name: "empty", json: `[{"file_path":"","pos":0}]`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			batch := mustLoadRecordBatchFromJSON(PositionalDeleteArrowSchema, tc.json)
+			defer batch.Release()
+			records := func(yield func(arrow.RecordBatch, error) bool) { yield(batch, nil) }
+			metadata := newPositionDeleteUnpartitionedMetadata(t, 3)
+			var results int
+			for file, err := range positionDeleteRecordsToDataFiles(t.Context(), "mem://test", metadata, nil, recordWritingArgs{
+				sc:  PositionalDeleteArrowSchema,
+				itr: records,
+				fs:  iceio.NewMemFS(),
+			}) {
+				require.Nil(t, file)
+				require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+				require.ErrorContains(t, err, "empty file_path")
+				results++
+			}
+			require.Equal(t, 1, results)
+		})
+	}
+}
+
 type clearingDeleteBatchAllocator struct {
 	memory.Allocator
 }

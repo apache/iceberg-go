@@ -886,6 +886,67 @@ func (t *Transaction) rewriteSingleFile(ctx context.Context, args rewriteSingleF
 	return result, nil
 }
 
+// positionDeleteWriterRecords releases each scan-owned batch after the writer
+// consumes it. The v2 feeder completes before the caller reads observed paths.
+func positionDeleteWriterRecords(records iter.Seq2[arrow.RecordBatch, error], observe func(arrow.RecordBatch) error) iter.Seq2[arrow.RecordBatch, error] {
+	return func(yield func(arrow.RecordBatch, error) bool) {
+		for batch, err := range records {
+			if err == nil && observe != nil {
+				err = observe(batch)
+			}
+			if err != nil {
+				if batch != nil {
+					batch.Release()
+				}
+				yield(nil, err)
+
+				return
+			}
+			more := yield(batch, nil)
+			batch.Release()
+			if !more {
+				return
+			}
+		}
+	}
+}
+
+func collectPositionDeletePaths(ctx context.Context, batch arrow.RecordBatch, seen map[string]struct{}, paths []string) ([]string, error) {
+	column := batch.Column(0)
+	values, err := tblutils.FilePathValues(column)
+	if err != nil {
+		return nil, err
+	}
+	for i := range values.Len() {
+		if i%positionalDeleteCancellationCheckInterval == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
+		path, err := positionDeletePathAt(values, column, i)
+		if err != nil {
+			return nil, err
+		}
+		if _, ok := seen[path]; !ok {
+			path = strings.Clone(path)
+			seen[path] = struct{}{}
+			paths = append(paths, path)
+		}
+	}
+
+	return paths, nil
+}
+
+func positionDeletePathAt(values arrow.TypedArray[string], column arrow.Array, i int) (string, error) {
+	if !isNullPositionDeletePath(values, column, i) {
+		if path := values.Value(i); path != "" {
+			return path, nil
+		}
+	}
+
+	return "", fmt.Errorf("%w: empty file_path in position delete", iceberg.ErrInvalidSchema)
+}
+
 func isNullPositionDeletePath(values arrow.TypedArray[string], column arrow.Array, i int) bool {
 	if values.IsNull(i) {
 		return true
@@ -945,63 +1006,23 @@ func (t *Transaction) writePositionDeletesForFiles(ctx context.Context, fs io.Wr
 		}
 	}
 
-	// A v2 output file can contain deletes for multiple data files and then
-	// has no referenced_data_file. Collect the paths while writing its rows.
-	// The writer consumes this iterator in one feeder and joins it before the
-	// output iterator completes, so the map is read only after that join.
-	streamedPaths := make(map[string]struct{})
-	streamedPathOrder := make([]string, 0)
-	recordsWithPaths := func(yield func(arrow.RecordBatch, error) bool) {
-		for record, err := range posDeleteRecIter {
-			if err != nil {
-				if record != nil {
-					record.Release()
-				}
-				yield(nil, err)
+	// A v2 output can cover multiple files and omit referenced_data_file.
+	// Collect its paths as the writer consumes the records.
+	var streamedPathOrder []string
+	var observe func(arrow.RecordBatch) error
+	if meta.formatVersion < 3 {
+		seenPaths := make(map[string]struct{})
+		observe = func(batch arrow.RecordBatch) error {
+			var err error
+			streamedPathOrder, err = collectPositionDeletePaths(ctx, batch, seenPaths, streamedPathOrder)
 
-				return
-			}
-			column := record.Column(0)
-			values, err := tblutils.FilePathValues(column)
-			if err != nil {
-				record.Release()
-				yield(nil, err)
-
-				return
-			}
-			for i := range values.Len() {
-				if i%positionalDeleteCancellationCheckInterval == 0 {
-					if err := ctx.Err(); err != nil {
-						record.Release()
-						yield(nil, err)
-
-						return
-					}
-				}
-				if isNullPositionDeletePath(values, column, i) || values.Value(i) == "" {
-					record.Release()
-					yield(nil, fmt.Errorf("%w: empty file_path in position delete", iceberg.ErrInvalidSchema))
-
-					return
-				}
-				path := values.Value(i)
-				if _, ok := streamedPaths[path]; !ok {
-					ownedPath := strings.Clone(path)
-					streamedPaths[ownedPath] = struct{}{}
-					streamedPathOrder = append(streamedPathOrder, ownedPath)
-				}
-			}
-			more := yield(record, nil)
-			record.Release()
-			if !more {
-				return
-			}
+			return err
 		}
 	}
 
 	posDeleteFiles := positionDeleteRecordsToDataFiles(ctx, meta.loc, meta, partitionContextByFilePath, recordWritingArgs{
 		sc:              PositionalDeleteArrowSchema,
-		itr:             recordsWithPaths,
+		itr:             positionDeleteWriterRecords(posDeleteRecIter, observe),
 		writeUUID:       &commitUUID,
 		fs:              fs,
 		existingDeletes: existingDeletes,
@@ -1028,10 +1049,9 @@ func (t *Transaction) writePositionDeletesForFiles(ctx context.Context, fs io.Wr
 				referenced = append(referenced, ref)
 			}
 		}
+	} else {
+		supersedeDeletesForWrittenDVs(updater, seen, oldPositionDeletes, dvs)
 	}
-
-	// Only replace old deletes for data files that actually received a DV.
-	supersedeDeletesForWrittenDVs(updater, seen, oldPositionDeletes, dvs)
 
 	return referenced, nil
 }
