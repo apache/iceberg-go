@@ -680,6 +680,75 @@ func TestCompactionCannotReplayAfterFirstRowIDsAreAssigned(t *testing.T) {
 	require.Equal(t, assigned, readRowIDsByID(t, t.Context(), current))
 }
 
+type rowLineageManifestHook struct {
+	iceio.LocalFS
+	path   string
+	onOpen func()
+}
+
+func (f *rowLineageManifestHook) Open(ctx context.Context, name string) (iceio.File, error) {
+	if name == f.path && f.onOpen != nil {
+		hook := f.onOpen
+		f.onOpen = nil
+		hook()
+	}
+
+	return f.LocalFS.Open(ctx, name)
+}
+
+func TestCompactionRejectsRowIDsAssignedDuringStaging(t *testing.T) {
+	for _, mode := range []string{"data-files", "with-position-delete"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx := t.Context()
+			tbl, cat := newConcurrentRewriteTestTable(t)
+			tbl = appendRows(t, tbl, `[{"id":1},{"id":2}]`)
+			if mode == "with-position-delete" {
+				tasks, err := tbl.Scan().PlanFiles(ctx)
+				require.NoError(t, err)
+				require.Len(t, tasks, 1)
+				del := writeRowDeltaPositionDelete(t, tbl.Location(), "old", tasks[0].File.FilePath(), []int64{0})
+				tx := tbl.NewTransaction()
+				require.NoError(t, tx.NewRowDelta(nil).AddDeletes(del).Commit(ctx))
+				tbl, err = tx.Commit(ctx)
+				require.NoError(t, err)
+			}
+
+			upgrade := tbl.NewTransaction()
+			require.NoError(t, upgrade.UpgradeFormatVersion(3))
+			tbl, err := upgrade.Commit(ctx)
+			require.NoError(t, err)
+			require.Nil(t, tbl.CurrentSnapshot().FirstRowID)
+			tasks, err := tbl.Scan().PlanFiles(ctx)
+			require.NoError(t, err)
+			worker, err := table.ExecuteCompactionGroup(ctx, tbl, table.CompactionTaskGroup{Tasks: tasks})
+			require.NoError(t, err)
+			require.Len(t, worker.NewDataFiles, 1)
+
+			hook := &rowLineageManifestHook{path: tbl.CurrentSnapshot().ManifestList}
+			wrapped := table.New(tbl.Identifier(), tbl.Metadata(), tbl.MetadataLocation(),
+				func(context.Context) (iceio.IO, error) { return hook, nil }, cat)
+			tx := wrapped.NewTransaction()
+			var assigned map[int64]int64
+			hook.onOpen = func() {
+				rdr := rowsReader(t, tbl, `[{"id":3},{"id":4}]`)
+				defer rdr.Release()
+				require.NoError(t, tx.Append(ctx, rdr, nil))
+				staged, err := tx.StagedTable()
+				require.NoError(t, err)
+				assigned = readRowIDsByID(t, ctx, staged.Table)
+			}
+
+			err = tx.NewRewrite(nil).ApplyResult(worker).Commit(ctx)
+			require.NotEmpty(t, assigned, "append must stage while the rewrite reads the old parent")
+			require.ErrorIs(t, err, table.ErrCommitFailed)
+			require.ErrorContains(t, err, "replan")
+			committed, err := tx.Commit(ctx)
+			require.NoError(t, err)
+			require.Equal(t, assigned, readRowIDsByID(t, ctx, committed))
+		})
+	}
+}
+
 func TestPartialCompactionPreservesFirstRowIDsAssignedByEarlierBatch(t *testing.T) {
 	tbl := appendRows(t, newV2RowLineageTestTable(t), `[{"id":1},{"id":2}]`)
 	tbl = appendRows(t, tbl, `[{"id":3},{"id":4}]`)
