@@ -805,8 +805,18 @@ func TestCompactionRejectsWorkerResultAfterFirstRowIDsAreAssigned(t *testing.T) 
 }
 
 func TestCompactionRejectsStaleSourceRowLineage(t *testing.T) {
-	for _, mode := range []string{"atomic", "partial", "distributed", "retry", "changed sequence only"} {
-		t.Run(mode, func(t *testing.T) {
+	for _, tc := range []struct {
+		name, mode          string
+		changedSequenceOnly bool
+	}{
+		{name: "atomic", mode: "atomic"},
+		{name: "partial", mode: "partial"},
+		{name: "distributed", mode: "distributed"},
+		{name: "retry", mode: "retry"},
+		{name: "changed sequence only", mode: "atomic", changedSequenceOnly: true},
+		{name: "distributed changed sequence only", mode: "distributed", changedSequenceOnly: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			ctx := t.Context()
 			tbl, cat := newConcurrentRewriteTestTableVersion(t, 3)
 			tbl = appendRows(t, tbl, `[{"id":1},{"id":2}]`)
@@ -823,7 +833,7 @@ func TestCompactionRejectsStaleSourceRowLineage(t *testing.T) {
 				require.NoError(t, err)
 
 				readd := removed.NewTransaction()
-				if mode == "changed sequence only" {
+				if tc.changedSequenceOnly {
 					require.NoError(t, readd.AddDataFiles(ctx, []iceberg.DataFile{source}, nil))
 				} else {
 					require.NoError(t, readd.AddDataFilesByPath(ctx, []string{source.FilePath()}, nil, false))
@@ -846,25 +856,25 @@ func TestCompactionRejectsStaleSourceRowLineage(t *testing.T) {
 				DataSequenceNumber: tasks[0].DataSequenceNumber,
 			}}}
 			var current *table.Table
-			if mode == "retry" {
+			if tc.mode == "retry" {
 				cat.beforeCommit = func() { current = replaceSource() }
 				_, err = tbl.RewriteDataFiles(ctx, []table.CompactionTaskGroup{group}, table.RewriteDataFilesOptions{})
 				require.ErrorIs(t, err, table.ErrTransactionUnusable)
 			} else {
 				current = replaceSource()
-				if mode == "distributed" {
+				if tc.mode == "distributed" {
 					worker, workerErr := table.ExecuteCompactionGroup(ctx, tbl, group)
 					require.NoError(t, workerErr)
 					err = current.NewTransaction().NewRewrite(nil).ApplyResult(worker).Commit(ctx)
 				} else {
 					before := parquetFiles(t, current.Location())
 					_, err = current.RewriteDataFiles(ctx, []table.CompactionTaskGroup{group},
-						table.RewriteDataFilesOptions{PartialProgress: mode == "partial"})
+						table.RewriteDataFilesOptions{PartialProgress: tc.mode == "partial"})
 					require.ElementsMatch(t, before, parquetFiles(t, current.Location()), "rejected rewrite must leave no outputs")
 				}
 			}
 			require.ErrorIs(t, err, table.ErrInvalidOperation)
-			if mode == "changed sequence only" {
+			if tc.changedSequenceOnly {
 				require.Equal(t, readRowIDsByID(t, ctx, tbl), wantIDs)
 				require.ErrorContains(t, err, "data sequence number")
 			} else {
