@@ -21,11 +21,14 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 )
 
 func TestEagerMetadataV2Parity(t *testing.T) {
 	fixture := benchmarkMetadataJSON(1, 1, 64, 16, 0)
+	largeSummary := `"summary":{"operation":"append","note":"first","payload":"` +
+		strings.Repeat("é", 512) + `","note":"last","other":"preserved"}`
 	const metadataLog = `"metadata-log":[{"metadata-file":"s3://bucket/metadata/v1.json","timestamp-ms":0}]`
 	const mixedMetadataLog = `"metadata-log":[{"metadata-file":"s3://bucket/metadata/v1.json","timestamp-ms":0},` +
 		`{"timestamp-ms":1,"metadata-file":"s3://bucket/metadata/v\u0032.json"},` +
@@ -46,6 +49,7 @@ func TestEagerMetadataV2Parity(t *testing.T) {
 		{name: "null summary", old: `"summary":{"operation":"append"}`, new: `"summary":null`, fast: true},
 		{name: "duplicate summary", old: `"summary":{"operation":"append"}`, new: `"summary":{"a":"b"},"summary":{"operation":"append"}`, fast: true},
 		{name: "duplicate operation", old: `"summary":{"operation":"append"}`, new: `"summary":{"operation":"","operation":"append"}`, fast: true},
+		{name: "summary growth and repeated property", old: `"summary":{"operation":"append"}`, new: largeSummary, fast: true},
 		{name: "empty operation", old: `"summary":{"operation":"append"}`, new: `"summary":{"operation":""}`},
 		{name: "empty summary", old: `"summary":{"operation":"append"}`, new: `"summary":{}`, fast: true},
 		{name: "integer overflow", old: `"sequence-number":1,`, new: `"sequence-number":9223372036854775808,`},
