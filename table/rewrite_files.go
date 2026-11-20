@@ -356,21 +356,8 @@ func (r *RewriteFiles) Commit(ctx context.Context) error {
 	if len(r.dataFilesToDelete) == 0 && len(r.dataFilesToAdd) > 0 {
 		return fmt.Errorf("%w: rewrite must delete at least one data file when adding data files", ErrInvalidOperation)
 	}
-	if r.workerLineageUnverified || r.workerSourceWithoutLineage != "" {
-		meta, err := r.txn.txnMeta()
-		if err != nil {
-			return err
-		}
-		if meta.formatVersion >= 3 {
-			if r.workerLineageUnverified {
-				return fmt.Errorf("%w: worker result did not confirm v3 row lineage preservation; replan and rerun compaction with a v3 worker",
-					ErrInvalidOperation)
-			}
-			if r.workerSourceWithoutLineage != "" {
-				return fmt.Errorf("%w: worker result for %q is missing source row lineage; replan from the target branch",
-					ErrInvalidOperation, r.workerSourceWithoutLineage)
-			}
-		}
+	if err := r.validateWorkerLineage(); err != nil {
+		return err
 	}
 
 	opts := []WriteOption{withRewriteSemantics()}
