@@ -188,3 +188,53 @@ func TestDirectDataFileWritesAllowConcurrentlyRemovedPath(t *testing.T) {
 			branchFiles(t, fs, committed.Metadata(), MainBranch))
 	})
 }
+
+
+func TestDirectDataFileWritesRejectDuplicateOnFirstConcurrentSnapshot(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		fs, cat, tbl := newExpireReplayTable(t, nil)
+		tx := tbl.NewTransaction()
+		require.NoError(t, tx.AddDataFiles(t.Context(),
+			[]iceberg.DataFile{retryCleanupFile(t, "duplicate")}, nil))
+
+		// The writer has no base snapshot. The peer creates the first one.
+		peerHead := peerAppend(t, fs, cat, MainBranch, "duplicate")
+		attemptsBefore := cat.attempts.Load()
+
+		_, err := tx.Commit(t.Context())
+		require.ErrorIs(t, err, ErrDuplicateDataFiles)
+		require.ErrorIs(t, err, ErrTransactionUnusable)
+		require.NotErrorIs(t, err, ErrCommitFailed)
+		require.Equal(t, attemptsBefore+1, cat.attempts.Load())
+		require.Equal(t, peerHead, refHead(t, cat.metadata, MainBranch))
+	})
+}
+
+func TestDirectDataFileWritesRejectConcurrentlyReaddedPath(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		fs, cat, tbl := newExpireReplayTable(t, nil)
+		tbl, _ = appendOnBranch(t, tbl, MainBranch, "base")
+		tx := tbl.NewTransaction()
+		reused := retryCleanupFile(t, "reused")
+		require.NoError(t, tx.AddDataFiles(t.Context(), []iceberg.DataFile{reused}, nil))
+
+		// An intermediate removal does not make the path available if the
+		// latest snapshot has added it again.
+		peerAppend(t, fs, cat, MainBranch, "reused")
+		peerTx := newOCCTable(t, cat.metadata, fs, cat).NewTransaction()
+		require.NoError(t, peerTx.ReplaceDataFilesByPath(t.Context(),
+			[]string{reused.FilePath()}, nil, nil))
+		_, err := peerTx.Commit(t.Context())
+		require.NoError(t, err)
+		peerHead := peerAppend(t, fs, cat, MainBranch, "reused")
+
+		attemptsBefore := cat.attempts.Load()
+		_, err = tx.Commit(t.Context())
+		require.ErrorIs(t, err, ErrDuplicateDataFiles)
+		require.ErrorIs(t, err, ErrTransactionUnusable)
+		require.NotErrorIs(t, err, ErrCommitFailed)
+		require.Equal(t, attemptsBefore+1, cat.attempts.Load())
+		require.Equal(t, peerHead, refHead(t, cat.metadata, MainBranch))
+		require.Equal(t, []string{"base", "reused"}, branchFiles(t, fs, cat.metadata, MainBranch))
+	})
+}
