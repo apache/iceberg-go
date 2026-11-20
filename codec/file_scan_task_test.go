@@ -223,6 +223,23 @@ func TestEncodeFileScanTaskEmptyDeleteLists(t *testing.T) {
 	require.Nil(t, decoded.PlanningSnapshotID)
 }
 
+func TestDecodeFileScanTaskRejectsTruncatedPlanningSnapshot(t *testing.T) {
+	spec, schema, task := fullyPopulatedFileScanTask(t, 2)
+	task.Residual = nil
+	snapshotID := int64(123456)
+	task.PlanningSnapshotID = &snapshotID
+
+	encoded, err := codec.EncodeFileScanTask(task, spec, schema, 2)
+	require.NoError(t, err)
+	decoded, err := codec.DecodeFileScanTask(encoded, spec, schema, 2)
+	require.NoError(t, err)
+	require.Equal(t, task.PlanningSnapshotID, decoded.PlanningSnapshotID)
+	require.Nil(t, decoded.Residual)
+
+	_, err = codec.DecodeFileScanTask(encoded[:len(encoded)-1], spec, schema, 2)
+	require.ErrorContains(t, err, "invalid planning snapshot ID")
+}
+
 func TestEncodeFileScanTaskTimestampResidualUsesSchema(t *testing.T) {
 	schema := iceberg.NewSchema(1,
 		iceberg.NestedField{ID: 1, Name: "event_time", Type: iceberg.PrimitiveTypes.TimestampTz, Required: true},
