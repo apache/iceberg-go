@@ -19,6 +19,8 @@ package table_test
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"path/filepath"
 	"slices"
 	"testing"
@@ -508,6 +510,42 @@ func TestV3MergeOnReadUpgradePreservesPositionDeletes(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestV3MergeOnReadUpgradeKeepsLegacyDeleteWithoutPathMetadata(t *testing.T) {
+	ctx := t.Context()
+	tbl := appendRows(t, newMergeOnReadTestTable(t), `[{"id":1},{"id":2},{"id":3}]`)
+	scan := tbl.Scan()
+	defer scan.Close()
+	tasks, err := scan.PlanFiles(ctx)
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	dataPath := tasks[0].File.FilePath()
+	deletePath := tbl.Location() + "/data/legacy-delete.parquet"
+	writeParquetFile(t, deletePath, table.PositionalDeleteArrowSchema,
+		fmt.Sprintf(`[{"file_path":%q,"pos":0}]`, dataPath))
+	info, err := os.Stat(deletePath)
+	require.NoError(t, err)
+
+	// The manifest entry omits both referenced_data_file and file_path bounds.
+	builder, err := iceberg.NewDataFileBuilder(*iceberg.UnpartitionedSpec, iceberg.EntryContentPosDeletes,
+		deletePath, iceberg.ParquetFile, nil, nil, nil, 1, info.Size())
+	require.NoError(t, err)
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.NewRowDelta(nil).AddDeletes(builder.Build()).Commit(ctx))
+	tbl, err = tx.Commit(ctx)
+	require.NoError(t, err)
+	require.Equal(t, []int64{2, 3}, idsInTable(t, tbl))
+
+	tx = tbl.NewTransaction()
+	require.NoError(t, tx.UpgradeFormatVersion(3))
+	tbl, err = tx.Commit(ctx)
+	require.NoError(t, err)
+	tbl, err = tbl.Delete(ctx, iceberg.EqualTo(iceberg.Reference("id"), int64(2)), nil)
+	require.NoError(t, err)
+	require.Equal(t, []int64{3}, idsInTable(t, tbl))
+	require.Equal(t, 1, liveDVCount(t, tbl))
+	require.Equal(t, 1, liveDeleteFileCount(t, tbl, iceberg.EntryContentPosDeletes))
 }
 
 func TestV3MergeOnReadUpgradeReplansLegacyDeleteReplacementAfterConflict(t *testing.T) {
