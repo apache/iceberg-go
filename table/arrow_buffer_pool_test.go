@@ -19,6 +19,7 @@ package table
 import (
 	"bytes"
 	"context"
+	"errors"
 	"iter"
 	"math/bits"
 	"slices"
@@ -124,6 +125,30 @@ func TestReadTasksArrowBufferReuse(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestReadTasksClosesArrowBufferPoolOnSetupError(t *testing.T) {
+	scan, _ := residualBindingTestScan(t)
+	WithArrowBufferReuse()(scan)
+	setupErr := errors.New("scan setup failed")
+	var pool *arrowBufferPool
+	scan.readRecords = func(_ *arrowScan, ctx context.Context, _ []FileScanTask) (
+		*arrow.Schema, iter.Seq2[arrow.RecordBatch, error], error,
+	) {
+		pool = compute.GetAllocator(ctx).(*arrowBufferPool)
+		pool.Free(pool.Allocate(128))
+		require.Positive(t, pool.cachedBytes)
+
+		return nil, nil, setupErr
+	}
+
+	_, records, err := scan.ReadTasks(compute.WithAllocator(t.Context(), memory.NewGoAllocator()), nil)
+	require.ErrorIs(t, err, setupErr)
+	require.Nil(t, records)
+	require.NotNil(t, pool)
+	require.True(t, pool.closed)
+	require.Zero(t, pool.cachedBytes)
+	require.Zero(t, pool.buckets)
 }
 
 func BenchmarkReadTasksArrowBufferReuse(b *testing.B) {
