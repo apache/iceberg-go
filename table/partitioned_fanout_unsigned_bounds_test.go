@@ -45,6 +45,31 @@ func TestUnsignedArrowPartitionBounds(t *testing.T) {
 		wantError  bool
 	}{
 		{
+			name:       "uint32 zero as int",
+			value:      0,
+			sourceType: iceberg.PrimitiveTypes.Int32,
+			want:       int32(0),
+		},
+		{
+			name:       "uint32 zero as long",
+			value:      0,
+			sourceType: iceberg.PrimitiveTypes.Int64,
+			want:       int64(0),
+		},
+		{
+			name:       "uint32 just above int maximum promoted to long",
+			value:      uint64(math.MaxInt32) + 1,
+			sourceType: iceberg.PrimitiveTypes.Int64,
+			want:       int64(math.MaxInt32) + 1,
+		},
+		{
+			name:       "uint64 zero as long",
+			wideArrow:  true,
+			value:      0,
+			sourceType: iceberg.PrimitiveTypes.Int64,
+			want:       int64(0),
+		},
+		{
 			name:       "uint32 signed maximum",
 			value:      math.MaxInt32,
 			sourceType: iceberg.PrimitiveTypes.Int32,
@@ -243,6 +268,59 @@ func TestWriteRecordsUnsignedPartitionBounds(t *testing.T) {
 					require.EqualValues(t, 1, scanned.NumRows())
 					require.EqualValues(t, math.MaxUint32, scanned.Column(0).Data().Chunk(0).(*array.Int64).Value(0))
 				})
+			}
+		})
+	}
+}
+
+
+func TestUnsignedPartitionOverflowAfterValidRows(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		wideArrow  bool
+		sourceType iceberg.Type
+	}{
+		{name: "uint32 exceeds int", sourceType: iceberg.PrimitiveTypes.Int32},
+		{name: "uint64 exceeds long", wideArrow: true, sourceType: iceberg.PrimitiveTypes.Int64},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var column arrow.Array
+			var dataType arrow.DataType
+			if tc.wideArrow {
+				builder := array.NewUint64Builder(memory.NewGoAllocator())
+				builder.AppendValues([]uint64{0, math.MaxInt64, uint64(math.MaxInt64) + 1}, nil)
+				column = builder.NewArray()
+				builder.Release()
+				dataType = arrow.PrimitiveTypes.Uint64
+			} else {
+				builder := array.NewUint32Builder(memory.NewGoAllocator())
+				builder.AppendValues([]uint32{0, math.MaxInt32, uint32(math.MaxInt32) + 1}, nil)
+				column = builder.NewArray()
+				builder.Release()
+				dataType = arrow.PrimitiveTypes.Uint32
+			}
+			defer column.Release()
+
+			record := array.NewRecordBatch(
+				arrow.NewSchema([]arrow.Field{{Name: "id", Type: dataType}}, nil),
+				[]arrow.Array{column}, int64(column.Len()),
+			)
+			defer record.Release()
+
+			schema := iceberg.NewSchema(0, iceberg.NestedField{
+				ID: 1, Name: "id", Type: tc.sourceType,
+			})
+			for _, transform := range []iceberg.Transform{
+				iceberg.IdentityTransform{},
+				iceberg.BucketTransform{NumBuckets: 16},
+			} {
+				spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+					SourceIDs: []int{1}, FieldID: 1000,
+					Name: "id", Transform: transform,
+				})
+				partitions, err := getRecordPartitions(spec, schema, record)
+				require.ErrorIs(t, err, iceberg.ErrInvalidArgument, "%s must reject a later overflowing row", transform)
+				require.Empty(t, partitions, "%s must not return partial partitions", transform)
 			}
 		})
 	}
