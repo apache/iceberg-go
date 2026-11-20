@@ -49,14 +49,12 @@ package table
 import (
 	"bytes"
 	"context"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io/fs"
 	"math"
 	"slices"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -64,7 +62,6 @@ import (
 	iceberginternal "github.com/apache/iceberg-go/internal"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table/internal"
-	"github.com/google/uuid"
 )
 
 // IsolationLevel controls how strictly a commit rejects concurrent
@@ -1375,107 +1372,6 @@ func isNaNPartitionLiteral(lit iceberg.Literal, fieldType iceberg.Type) bool {
 	return false
 }
 
-// canonicalPartitionKey returns a deterministic, injective string key for a
-// (specID, partition) tuple. Partition values are compared post-transform
-// (direct equality), matching Java's DeleteFileIndex — no transform-aware
-// logic is needed because both sides store the same post-transform
-// representation.
-//
-// Values are encoded type-normalized across the known Avro-decode and
-// write-side representations (see appendCanonicalPartitionValue):
-// integer-backed types are unified per field, so e.g. an int32 and an
-// iceberg.Date carrying the same day match. An unknown value type fails the
-// key build rather than falling back to lossy formatting that could silently
-// mismatch.
-//
-// Different spec IDs never match, even with identical-looking tuples:
-// Java's DeleteFileIndex keys its PartitionMap by specId, and field IDs
-// are only meaningful within a single spec.
 func canonicalPartitionKey(specID int32, partition map[int]any) (string, error) {
-	var idStorage [8]int
-	ids := idStorage[:0]
-	if len(partition) > len(idStorage) {
-		ids = make([]int, 0, len(partition))
-	}
-	for id := range partition {
-		ids = append(ids, id)
-	}
-	slices.Sort(ids)
-
-	var bufStorage [256]byte
-	buf := strconv.AppendInt(bufStorage[:0], int64(specID), 10)
-	buf = append(buf, '|')
-	for _, id := range ids {
-		buf = strconv.AppendInt(buf, int64(id), 10)
-		buf = append(buf, ':')
-		var err error
-		buf, err = appendCanonicalPartitionValue(buf, partition[id])
-		if err != nil {
-			return "", fmt.Errorf("partition field %d: %w", id, err)
-		}
-		buf = append(buf, ';')
-	}
-
-	return string(buf), nil
-}
-
-// appendCanonicalPartitionValue encodes one partition value into dst by
-// semantic class, so different Go representations of the same logical
-// value produce the same bytes:
-//
-//   - integer-backed types (int/int32/int64, Date, Time, Timestamp,
-//     TimestampNano) collapse into one class — within a single
-//     (specID, fieldID) the logical type is fixed, so this only
-//     tolerates decoder representation drift, never conflates two
-//     logical values of one field;
-//   - uuid.UUID and []byte collapse into raw-bytes hex;
-//   - Decimal and DecimalLiteral collapse into (scale, unscaled).
-//
-// String values are length-prefixed so keys stay injective for inputs
-// containing the field separators. Unknown types return an error.
-func appendCanonicalPartitionValue(dst []byte, v any) ([]byte, error) {
-	switch v := v.(type) {
-	case nil:
-		return append(dst, 'z'), nil
-	case bool:
-		return strconv.AppendBool(append(dst, 'b', ':'), v), nil
-	case int:
-		return strconv.AppendInt(append(dst, 'i', ':'), int64(v), 10), nil
-	case int32:
-		return strconv.AppendInt(append(dst, 'i', ':'), int64(v), 10), nil
-	case int64:
-		return strconv.AppendInt(append(dst, 'i', ':'), v, 10), nil
-	case iceberg.Date:
-		return strconv.AppendInt(append(dst, 'i', ':'), int64(v), 10), nil
-	case iceberg.Time:
-		return strconv.AppendInt(append(dst, 'i', ':'), int64(v), 10), nil
-	case iceberg.Timestamp:
-		return strconv.AppendInt(append(dst, 'i', ':'), int64(v), 10), nil
-	case iceberg.TimestampNano:
-		return strconv.AppendInt(append(dst, 'i', ':'), int64(v), 10), nil
-	case float32:
-		return strconv.AppendFloat(append(dst, 'f', ':'), float64(v), 'x', -1, 64), nil
-	case float64:
-		return strconv.AppendFloat(append(dst, 'f', ':'), v, 'x', -1, 64), nil
-	case string:
-		dst = strconv.AppendInt(append(dst, 's', ':'), int64(len(v)), 10)
-
-		return append(append(dst, ':'), v...), nil
-	case []byte:
-		return hex.AppendEncode(append(dst, 'B', ':'), v), nil
-	case uuid.UUID:
-		return hex.AppendEncode(append(dst, 'B', ':'), v[:]), nil
-	case iceberg.Decimal:
-		return appendCanonicalPartitionDecimal(dst, v), nil
-	case iceberg.DecimalLiteral:
-		return appendCanonicalPartitionDecimal(dst, iceberg.Decimal(v)), nil
-	default:
-		return nil, fmt.Errorf("unsupported partition value type %T in canonical key", v)
-	}
-}
-
-func appendCanonicalPartitionDecimal(dst []byte, v iceberg.Decimal) []byte {
-	dst = strconv.AppendInt(append(dst, 'd', ':'), int64(v.Scale), 10)
-
-	return append(append(dst, ':'), v.Val.BigInt().String()...)
+	return internal.CanonicalPartitionKey(specID, partition)
 }

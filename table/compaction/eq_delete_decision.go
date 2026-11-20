@@ -20,11 +20,10 @@ package compaction
 import (
 	"fmt"
 	"math"
-	"slices"
-	"strconv"
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/internal"
+	tblutils "github.com/apache/iceberg-go/table/internal"
 )
 
 // SurvivorSurvey describes the surviving data files in a snapshot after a
@@ -41,7 +40,13 @@ type SurvivorSurvey struct {
 	PartMinSeq      map[string]int64
 
 	minSeq         int64
-	specPartMinSeq map[string]int64
+	specPartMinSeq map[survivorPartition]int64
+	partitionErr   error
+}
+
+type survivorPartition struct {
+	specID int32
+	tuple  string
 }
 
 // PartitionSpecLookup resolves the partition spec used to write a data file.
@@ -57,7 +62,7 @@ func NewSurvivorSurvey() *SurvivorSurvey {
 		EmptyPartMinSeq: math.MaxInt64,
 		PartMinSeq:      make(map[string]int64),
 		minSeq:          math.MaxInt64,
-		specPartMinSeq:  make(map[string]int64),
+		specPartMinSeq:  make(map[survivorPartition]int64),
 	}
 }
 
@@ -69,39 +74,42 @@ func NewSurvivorSurvey() *SurvivorSurvey {
 // against every eq-delete. Better to preserve uncertain state than to
 // drop deletes that may still apply.
 func (s *SurvivorSurvey) AddSurvivor(partition map[int]any, seq int64) {
-	if seq < 0 {
-		seq = 0
-	}
+	seq = max(seq, 0)
 	if len(partition) == 0 {
 		s.EmptyPartMinSeq = min(seq, s.EmptyPartMinSeq)
 
 		return
 	}
 
-	updatePartitionMinSeq(s.PartMinSeq, partitionMatchKey(partition), seq)
+	// An unsupported tuple uses the empty key. This API takes the minimum
+	// across all buckets, so the survivor still protects older data.
+	tuple, _ := survivorPartitionTuple(partition)
+	updatePartitionMinSeq(s.PartMinSeq, tuple, seq)
 }
 
 // AddSurvivorWithSpec records a surviving data file's spec ID, partition, and
 // sequence number for exact equality-delete matching. It also maintains the
-// conservative survey used by [DecideDeadEqualityDeletes].
+// conservative survey used by [DecideDeadEqualityDeletes]. If a partition
+// cannot be encoded, [DecideDeadEqualityDeletesWithSpecs] returns an error.
 func (s *SurvivorSurvey) AddSurvivorWithSpec(specID int32, partition map[int]any, seq int64) {
-	if seq < 0 {
-		seq = 0
-	}
-
-	var specKey string
-	if len(partition) == 0 {
-		s.EmptyPartMinSeq = min(seq, s.EmptyPartMinSeq)
-		specKey = partitionBucketKey(specID, partition)
-	} else {
-		tuple := appendPartitionTuple(nil, partition)
-		updatePartitionMinSeq(s.PartMinSeq, string(tuple), seq)
-		specKey = partitionBucketKeyFromTuple(specID, tuple)
-	}
-
+	seq = max(seq, 0)
 	s.minSeq = min(seq, s.minSeq)
 
-	updatePartitionMinSeq(s.specPartMinSeq, specKey, seq)
+	tuple, err := survivorPartitionTuple(partition)
+	if err != nil {
+		if s.partitionErr == nil {
+			s.partitionErr = fmt.Errorf("encoding survivor partition for spec %d: %w", specID, err)
+		}
+		updatePartitionMinSeq(s.PartMinSeq, "", seq)
+
+		return
+	}
+	if len(partition) == 0 {
+		s.EmptyPartMinSeq = min(seq, s.EmptyPartMinSeq)
+	} else {
+		updatePartitionMinSeq(s.PartMinSeq, tuple, seq)
+	}
+	updatePartitionMinSeq(s.specPartMinSeq, survivorPartition{specID: specID, tuple: tuple}, seq)
 }
 
 func (s *SurvivorSurvey) conservativeMinSeq() int64 {
@@ -117,15 +125,19 @@ func (s *SurvivorSurvey) specAwareApplicableMinSeq(
 	eqSpecID int32,
 	eqPartition map[int]any,
 	isUnpartitioned bool,
-) int64 {
+) (int64, error) {
 	if isUnpartitioned {
-		return s.minSeq
+		return s.minSeq, nil
 	}
-	if v, ok := s.specPartMinSeq[partitionBucketKey(eqSpecID, eqPartition)]; ok {
-		return v
+	tuple, err := survivorPartitionTuple(eqPartition)
+	if err != nil {
+		return 0, err
+	}
+	if v, ok := s.specPartMinSeq[survivorPartition{specID: eqSpecID, tuple: tuple}]; ok {
+		return v, nil
 	}
 
-	return math.MaxInt64
+	return math.MaxInt64, nil
 }
 
 // DecideDeadEqualityDeletes conservatively returns equality-delete files that
@@ -189,6 +201,9 @@ func DecideDeadEqualityDeletesWithSpecs(
 	if survey == nil || len(candidates) == 0 {
 		return nil, nil
 	}
+	if survey.partitionErr != nil {
+		return nil, survey.partitionErr
+	}
 
 	dead := make([]iceberg.DataFile, 0, len(candidates))
 	seen := make(map[string]struct{}, len(candidates))
@@ -212,9 +227,13 @@ func DecideDeadEqualityDeletesWithSpecs(
 			isUnpartitioned = spec.IsUnpartitioned()
 			unpartitionedBySpecID[df.SpecID()] = isUnpartitioned
 		}
-		if survey.specAwareApplicableMinSeq(
+		minSeq, err := survey.specAwareApplicableMinSeq(
 			df.SpecID(), internal.BorrowedDataFilePartition(df), isUnpartitioned,
-		) >= e.DataSequenceNumber() {
+		)
+		if err != nil {
+			return nil, fmt.Errorf("deciding equality delete file %q: %w", path, err)
+		}
+		if minSeq >= e.DataSequenceNumber() {
 			seen[path] = struct{}{}
 			dead = append(dead, df)
 		}
@@ -223,79 +242,14 @@ func DecideDeadEqualityDeletesWithSpecs(
 	return dead, nil
 }
 
-// partitionMatchKey returns a deterministic key for a partition tuple without
-// a spec ID. It is used only by the conservative compatibility API.
-func partitionMatchKey(part map[int]any) string {
-	if len(part) == 0 {
-		return ""
-	}
+func survivorPartitionTuple(partition map[int]any) (string, error) {
+	var storage [256]byte
+	tuple, err := tblutils.AppendPartitionTuple(storage[:0], partition)
 
-	return string(appendPartitionTuple(nil, part))
+	return string(tuple), err
 }
 
-// partitionBucketKey returns a deterministic string key for a
-// (specID, partition) tuple. Used by the planner to group tasks for
-// bin-packing — different specs must NOT mix because a compacted
-// output file inherits a single spec.
-func partitionBucketKey(specID int32, part map[int]any) string {
-	if len(part) == 0 {
-		return fmt.Sprintf("%d:_", specID)
-	}
-
-	return partitionBucketKeyFromTuple(specID, appendPartitionTuple(nil, part))
-}
-
-func partitionBucketKeyFromTuple(specID int32, tuple []byte) string {
-	key := make([]byte, 0, len(tuple)+12)
-	key = strconv.AppendInt(key, int64(specID), 10)
-	key = append(key, ':')
-
-	return string(append(key, tuple...))
-}
-
-// appendPartitionTuple emits the sorted "id=value;" tuple into dst.
-// Caller is responsible for any leading prefix (e.g. specID).
-func appendPartitionTuple(dst []byte, part map[int]any) []byte {
-	var inlineIDs [8]int
-	ids := inlineIDs[:0]
-	if len(part) > len(inlineIDs) {
-		ids = make([]int, 0, len(part))
-	}
-	for id := range part {
-		ids = append(ids, id)
-	}
-	slices.Sort(ids)
-
-	if cap(dst) == 0 && len(part) != 0 {
-		dst = make([]byte, 0, len(part)*16)
-	}
-	for _, id := range ids {
-		dst = strconv.AppendInt(dst, int64(id), 10)
-		dst = append(dst, '=')
-		// Match fmt's %v output exactly; these partition keys are externally visible.
-		switch value := part[id].(type) {
-		case nil:
-			dst = append(dst, "<nil>"...)
-		case string:
-			dst = append(dst, value...)
-		case int32:
-			dst = strconv.AppendInt(dst, int64(value), 10)
-		case iceberg.Date:
-			dst = strconv.AppendInt(dst, int64(value), 10)
-		case int64:
-			dst = strconv.AppendInt(dst, value, 10)
-		case bool:
-			dst = strconv.AppendBool(dst, value)
-		default:
-			dst = fmt.Append(dst, value)
-		}
-		dst = append(dst, ';')
-	}
-
-	return dst
-}
-
-func updatePartitionMinSeq(partitions map[string]int64, key string, seq int64) {
+func updatePartitionMinSeq[K comparable](partitions map[K]int64, key K, seq int64) {
 	if cur, ok := partitions[key]; ok {
 		seq = min(seq, cur)
 	}

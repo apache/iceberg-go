@@ -567,9 +567,8 @@ func (t *Transaction) RewriteDataFiles(ctx context.Context, groups []CompactionT
 // In-process callers should prefer [Transaction.RewriteDataFiles],
 // which drives this and the commit step in one call.
 //
-// Tunables are exposed via [CompactionGroupOption]. The clustered
-// write path is always used (a compaction group is single-partition
-// by construction so its read stream is trivially clustered).
+// Tunables are exposed via [CompactionGroupOption]. Bin-pack groups from
+// older specs use the fanout writer to split rows by the current spec.
 func ExecuteCompactionGroup(ctx context.Context, tbl *Table, group CompactionTaskGroup, opts ...CompactionGroupOption) (CompactionGroupResult, error) {
 	if len(group.Tasks) == 0 {
 		return CompactionGroupResult{PartitionKey: group.PartitionKey}, nil
@@ -603,6 +602,12 @@ func ExecuteCompactionGroup(ctx context.Context, tbl *Table, group CompactionTas
 	strategy, err := cfg.rewriteStrategy(tbl)
 	if err != nil {
 		return CompactionGroupResult{}, fmt.Errorf("compaction group %q: %w", group.PartitionKey, err)
+	}
+	binPack, isBinPack := strategy.(binPackStrategy)
+	if isBinPack {
+		if err := binPack.validatePartition(group.Tasks); err != nil {
+			return CompactionGroupResult{}, err
+		}
 	}
 
 	var scanOpts []ScanOption
@@ -650,9 +655,13 @@ func ExecuteCompactionGroup(ctx context.Context, tbl *Table, group CompactionTas
 		return CompactionGroupResult{}, fmt.Errorf("read tasks for compaction group %q: %w", group.PartitionKey, err)
 	}
 
-	// Each compaction group is single-partition by construction, so the
-	// read stream is trivially clustered and we can use the clustered writer.
-	writeOpts := []WriteRecordOption{WithClusteredWrite()}
+	// A prior spec's partition can split into several current partitions.
+	// Sort and Hilbert cluster by the current spec before writing.
+	var writeOpts []WriteRecordOption
+	currentSpec := tbl.Spec()
+	if !isBinPack || int(group.Tasks[0].File.SpecID()) == currentSpec.ID() {
+		writeOpts = append(writeOpts, WithClusteredWrite())
+	}
 	if cfg.targetFileSize > 0 {
 		writeOpts = append(writeOpts, WithTargetFileSize(cfg.targetFileSize))
 	}

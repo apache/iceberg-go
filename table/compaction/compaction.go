@@ -27,6 +27,7 @@ import (
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/internal"
 	"github.com/apache/iceberg-go/table"
+	tblutils "github.com/apache/iceberg-go/table/internal"
 )
 
 // Config holds tunable thresholds for bin-pack compaction.
@@ -289,7 +290,11 @@ func (cfg Config) PlanCompaction(tasks []table.FileScanTask) (Plan, error) {
 			continue
 		}
 
-		key := partitionBucketKey(t.File.SpecID(), internal.BorrowedDataFilePartition(t.File))
+		key, err := tblutils.CanonicalPartitionKey(t.File.SpecID(), internal.BorrowedDataFilePartition(t.File))
+		if err != nil {
+			return Plan{}, fmt.Errorf("%w: invalid partition for compaction data file %q: %v",
+				table.ErrInvalidOperation, t.File.FilePath(), err)
+		}
 		index, ok := partitionIndices[key]
 		if !ok {
 			index = len(partitionBuckets)
