@@ -189,7 +189,6 @@ func TestDirectDataFileWritesAllowConcurrentlyRemovedPath(t *testing.T) {
 	})
 }
 
-
 func TestDirectDataFileWritesRejectDuplicateOnFirstConcurrentSnapshot(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		fs, cat, tbl := newExpireReplayTable(t, nil)
