@@ -102,6 +102,40 @@ func TestRunCleanOrphanFilesPreviewsPlanBeforeDeletion(t *testing.T) {
 	assert.ErrorIs(t, err, fs.ErrNotExist)
 }
 
+func TestRunCleanOrphanFilesRejectsRefsOnlyHistory(t *testing.T) {
+	const location = "mem://refs-only/table"
+	for _, dryRun := range []bool{false, true} {
+		name := "delete"
+		if dryRun {
+			name = "dry run"
+		}
+		t.Run(name, func(t *testing.T) {
+			meta, err := table.NewMetadata(iceberg.NewSchema(0), nil, table.UnsortedSortOrder, location, nil)
+			require.NoError(t, err)
+			testCatalog := &cleanOrphanCatalog{}
+			testCatalog.table = table.New(
+				table.Identifier{"db", "refs_only"}, meta, location+"/metadata/v1.metadata.json",
+				func(context.Context) (icebergio.IO, error) {
+					t.Fatal("orphan cleanup must reject refs-only history before opening the filesystem")
+
+					return nil, nil
+				},
+				testCatalog, table.WithSnapshotHistoryLimitedToRefs(true),
+			)
+			output := &cleanOrphanOutput{}
+			exitCode := captureBranchTagExit(func() {
+				runCleanOrphanFiles(t.Context(), output, testCatalog, &CleanOrphanFilesCmd{
+					TableID: "db.refs_only", OlderThan: "1h", Yes: true, DryRun: dryRun,
+				})
+			})
+			require.Equal(t, 1, exitCode)
+			require.Empty(t, output.results)
+			require.Len(t, output.errors, 1)
+			require.ErrorIs(t, output.errors[0], table.ErrInvalidOperation)
+		})
+	}
+}
+
 func TestBuildCleanOrphanFilesResultDryRun(t *testing.T) {
 	const metadata = `{
         "format-version": 2,

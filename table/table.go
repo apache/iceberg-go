@@ -215,6 +215,12 @@ func (t Table) Location() string                     { return t.metadata.Locatio
 func (t Table) CurrentSnapshot() *Snapshot           { return t.metadata.CurrentSnapshot() }
 func (t Table) SnapshotByID(id int64) *Snapshot      { return t.metadata.SnapshotByID(id) }
 func (t Table) SnapshotByName(name string) *Snapshot { return t.metadata.SnapshotByName(name) }
+
+// SnapshotHistoryLimitedToRefs reports whether this table was loaded with only
+// snapshots directly referenced by branches and tags. Operations that depend
+// on complete snapshot history must not use a table when this returns true.
+func (t Table) SnapshotHistoryLimitedToRefs() bool { return t.snapshotHistoryRefsOnly }
+
 func (t Table) Schemas() map[int]*iceberg.Schema {
 	m := make(map[int]*iceberg.Schema)
 	for _, s := range t.metadata.Schemas() {
