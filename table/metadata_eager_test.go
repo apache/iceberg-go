@@ -189,3 +189,50 @@ func TestEagerMetadataV2LargeSnapshotFallback(t *testing.T) {
 	clear(input)
 	checkEagerMetadataEqual(t, got, want)
 }
+
+func TestMetadataJSONCursorIntegerBoundaries(t *testing.T) {
+	for _, tc := range []struct {
+		input string
+		want  int64
+		ok    bool
+	}{
+		{input: "0", want: 0, ok: true},
+		{input: "-0", want: 0, ok: true},
+		{input: "1", want: 1, ok: true},
+		{input: " \t -42", want: -42, ok: true},
+		{input: "9223372036854775807", want: 9223372036854775807, ok: true},
+		{input: "-9223372036854775808", want: -9223372036854775808, ok: true},
+		{input: "9223372036854775808"},
+		{input: "-9223372036854775809"},
+		{input: "18446744073709551616"},
+		{input: "01"},
+		{input: "-01"},
+		{input: ""},
+	} {
+		cursor := metadataJSONCursor{data: []byte(tc.input)}
+		got, ok := cursor.integer()
+		if ok != tc.ok || (ok && got != tc.want) {
+			t.Errorf("integer(%q) = (%d, %v), want (%d, %v)", tc.input, got, ok, tc.want, tc.ok)
+		}
+	}
+}
+
+func TestPlainMetadataStringChecksEachByteLane(t *testing.T) {
+	for length := 0; length <= 64; length++ {
+		plain := bytes.Repeat([]byte{'a'}, length)
+		if !plainMetadataString(plain) {
+			t.Fatalf("plain ASCII of length %d rejected", length)
+		}
+		for offset := range plain {
+			for _, invalid := range []byte{'\\', 0, 0x1f} {
+				mutated := bytes.Clone(plain)
+				mutated[offset] = invalid
+				if plainMetadataString(mutated) {
+					t.Fatalf("string scanner accepted %x at offset %d of length %d",
+						invalid, offset, length)
+				}
+			}
+		}
+	}
+}
+
