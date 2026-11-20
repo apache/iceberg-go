@@ -26,6 +26,10 @@ import (
 
 func TestEagerMetadataV2Parity(t *testing.T) {
 	fixture := benchmarkMetadataJSON(1, 1, 64, 16, 0)
+	const metadataLog = `"metadata-log":[{"metadata-file":"s3://bucket/metadata/v1.json","timestamp-ms":0}]`
+	const mixedMetadataLog = `"metadata-log":[{"metadata-file":"s3://bucket/metadata/v1.json","timestamp-ms":0},` +
+		`{"timestamp-ms":1,"metadata-file":"s3://bucket/metadata/v\u0032.json"},` +
+		`{"timestamp-ms":2,"metadata-file":"s3://bucket/metadata/v3.json"}]`
 	for _, test := range []struct {
 		name string
 		old  string
@@ -51,6 +55,7 @@ func TestEagerMetadataV2Parity(t *testing.T) {
 		{name: "escaped metadata log filename", old: `"metadata-file":"s3://bucket/metadata/v1.json"`, new: `"metadata-file":"s3://bucket/metadata/v\u0031.json"`, fast: true},
 		{name: "null metadata log", old: `"metadata-log":[{"metadata-file":"s3://bucket/metadata/v1.json","timestamp-ms":0}]`, new: `"metadata-log":null`, fast: true},
 		{name: "empty metadata log", old: `"metadata-log":[{"metadata-file":"s3://bucket/metadata/v1.json","timestamp-ms":0}]`, new: `"metadata-log":[]`, fast: true},
+		{name: "mixed metadata log entries", old: metadataLog, new: mixedMetadataLog, fast: true},
 		{name: "invalid metadata log literal", old: `"metadata-log":[{"metadata-file":"s3://bucket/metadata/v1.json","timestamp-ms":0}]`, new: `"metadata-log":nullx`},
 		{name: "unknown snapshot log field", old: `"snapshot-log":[{`, new: `"snapshot-log":[{"unknown":"value",`, fast: true},
 		{name: "missing metadata log timestamp", old: `"metadata-log":[{"metadata-file":"s3://bucket/metadata/v1.json","timestamp-ms":0}]`, new: `"metadata-log":[{"metadata-file":"s3://bucket/metadata/v1.json"}]`},
