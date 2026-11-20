@@ -124,8 +124,20 @@ func checkTypesFixtureCase(c typesFixtureCase) error {
 		return fmt.Errorf("input %s decoded as %s, want %s", c.Input, gotJSON, c.Decoded)
 	}
 
-	if c.Canonical != nil && field.Type.String() != *c.Canonical {
-		return fmt.Errorf("input %s re-serialized as %q, want %q", c.Input, field.Type.String(), *c.Canonical)
+	if c.Canonical != nil {
+		written, err := json.Marshal(field)
+		if err != nil {
+			return err
+		}
+		var out struct {
+			Type any `json:"type"`
+		}
+		if err := json.Unmarshal(written, &out); err != nil {
+			return err
+		}
+		if out.Type != *c.Canonical {
+			return fmt.Errorf("input %s re-serialized as %v, want %q", c.Input, out.Type, *c.Canonical)
+		}
 	}
 
 	return nil
