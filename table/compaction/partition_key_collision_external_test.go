@@ -127,3 +127,22 @@ func TestEqualityDeleteCleanupRejectsUnsupportedSurvivorPartition(t *testing.T) 
 	require.Empty(t, removed)
 	require.Empty(t, compaction.DecideDeadEqualityDeletes(survey, candidates))
 }
+
+func TestEqualityDeleteCleanupKeepsDeleteForPromotedFloatPartition(t *testing.T) {
+	specs := compactionTestSpecs()
+	value := float32(0.1)
+	survey := compaction.NewSurvivorSurvey()
+	survey.AddSurvivorWithSpec(1, map[int]any{1000: value}, 1)
+
+	removed, err := compaction.DecideDeadEqualityDeletesWithSpecs(
+		survey,
+		[]iceberg.ManifestEntry{
+			makeEqDeleteEntry(t, specs[1], map[int]any{1000: float64(value)}, 5, "/widened.parquet"),
+			makeEqDeleteEntry(t, specs[1], map[int]any{1000: float64(0.1)}, 5, "/different.parquet"),
+		},
+		specs,
+	)
+	require.NoError(t, err)
+	require.Len(t, removed, 1)
+	require.Equal(t, "/different.parquet", removed[0].FilePath())
+}
