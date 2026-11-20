@@ -966,6 +966,63 @@ func TestCompactionRejectsDeletesCommittedBeforeTransaction(t *testing.T) {
 	}
 }
 
+type compactionSourceOpenHook struct {
+	iceio.LocalFS
+	path   string
+	onOpen func()
+}
+
+func (f *compactionSourceOpenHook) Open(ctx context.Context, name string) (iceio.File, error) {
+	if name == f.path && f.onOpen != nil {
+		fn := f.onOpen
+		f.onOpen = nil
+		fn()
+	}
+	return f.LocalFS.Open(ctx, name)
+}
+
+func TestAtomicCompactionRejectsDeleteStagedWhileReading(t *testing.T) {
+	ctx := t.Context()
+	tbl, cat := newConcurrentRewriteTestTable(t)
+	tbl = appendRows(t, tbl, `[{"id":1},{"id":2}]`)
+	scan := tbl.Scan()
+	defer scan.Close()
+	tasks, err := scan.PlanFiles(ctx)
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+
+	path := tasks[0].File.FilePath()
+	posDelPath := tbl.Location() + "/data/staged-pos-del.parquet"
+	writeParquetFile(t, posDelPath, table.PositionalDeleteArrowSchema,
+		fmt.Sprintf(`[{"file_path": "%s", "pos": 0}]`, path))
+	builder, err := iceberg.NewDataFileBuilder(*iceberg.UnpartitionedSpec, iceberg.EntryContentPosDeletes,
+		posDelPath, iceberg.ParquetFile, nil, nil, nil, 1, 128)
+	require.NoError(t, err)
+	bounds := map[int][]byte{iceberg.DeleteFilePathFieldID: []byte(path)}
+	del := builder.LowerBoundValues(bounds).UpperBoundValues(bounds).Build()
+
+	hook := &compactionSourceOpenHook{path: path}
+	wrapped := table.New(tbl.Identifier(), tbl.Metadata(), tbl.MetadataLocation(),
+		func(context.Context) (iceio.IO, error) { return hook, nil }, cat)
+	tx := wrapped.NewTransaction()
+	var stageErr error
+	var ran bool
+	hook.onOpen = func() {
+		ran = true
+		stageErr = tx.NewRowDelta(nil).AddDeletes(del).Commit(ctx)
+	}
+
+	before := parquetFiles(t, tbl.Location())
+	_, err = tx.RewriteDataFiles(ctx, []table.CompactionTaskGroup{{Tasks: tasks}}, table.RewriteDataFilesOptions{})
+	require.True(t, ran, "stage the delete after early validation")
+	require.NoError(t, stageErr)
+	require.ErrorIs(t, err, table.ErrConflictingDeleteFiles)
+	require.ElementsMatch(t, before, parquetFiles(t, tbl.Location()))
+	committed, err := tx.Commit(ctx)
+	require.NoError(t, err)
+	require.ElementsMatch(t, []int64{2}, scanIDs(t, committed))
+}
+
 func TestCompactionRejectsReaddedSourcePath(t *testing.T) {
 	for _, mode := range []string{"atomic", "partial", "distributed", "retry"} {
 		t.Run(mode, func(t *testing.T) {

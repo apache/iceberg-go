@@ -1967,9 +1967,8 @@ func (scan *Scan) planFilesRemote(ctx context.Context, recordPlanningSnapshot bo
 	}
 
 	snapshotID := scan.snapshotID
-	if recordPlanningSnapshot && snapshotID == nil && scan.metadata != nil {
-		// Pin the request to the loaded snapshot so its tasks identify the
-		// snapshot they read even if the server's table has advanced.
+	if snapshotID == nil && scan.metadata != nil {
+		// Pin both plan-only and projected reads to the loaded snapshot.
 		snap := scan.metadata.CurrentSnapshot()
 		if snap == nil {
 			return nil, scan.closePlanIO()

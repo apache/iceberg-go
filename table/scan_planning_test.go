@@ -63,14 +63,27 @@ func TestScanPlanningRemoteKeepsLoadedEmptyTableEmpty(t *testing.T) {
 	metadata, err := createTestMetadata(nil, nil)
 	require.NoError(t, err)
 	planner := &fakeScanPlanner{
-		result:   ScanPlanningResult{Tasks: []FileScanTask{{}}},
+		err:      errors.New("loaded empty table should not call the server"),
 		supports: true,
 	}
-	scan := (&Table{metadata: metadata, planner: planner}).Scan(WithScanPlanningMode(ScanPlanningRemote))
+	tbl := &Table{
+		metadata: metadata,
+		planner:  planner,
+		fsF:      func(context.Context) (icebergio.IO, error) { return icebergio.LocalFS{}, nil },
+	}
+	scan := tbl.Scan(WithScanPlanningMode(ScanPlanningRemote))
+	defer scan.Close()
 
 	tasks, err := scan.PlanFiles(t.Context())
 	require.NoError(t, err)
 	assert.Empty(t, tasks)
+	assert.False(t, planner.called)
+
+	_, records, err := scan.ToArrowRecords(t.Context())
+	require.NoError(t, err)
+	for range records {
+		t.Fatal("loaded empty table returned records")
+	}
 	assert.False(t, planner.called)
 }
 

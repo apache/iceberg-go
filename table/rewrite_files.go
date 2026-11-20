@@ -376,16 +376,7 @@ func (r *RewriteFiles) Commit(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if snapshotID != nil {
-		meta, err := r.txn.txnMeta()
-		if err != nil {
-			return err
-		}
-		if err := r.txn.validateRewriteFromSnapshot(ctx, meta, snapshotID, r.dataFilesToDelete); err != nil {
-			return err
-		}
-	}
-	opts := []WriteOption{withRewriteSemantics()}
+	opts := []WriteOption{withRewriteSemantics(), func(cfg *dataFileCfg) { cfg.rewriteFromSnapshotID = snapshotID }}
 	if r.dataSequenceNumber != nil {
 		opts = append(opts, withDataSequenceNumber(*r.dataSequenceNumber))
 	}

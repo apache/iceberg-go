@@ -477,7 +477,7 @@ func (binPackStrategy) writeOptions() []WriteRecordOption { return nil }
 // Plan all groups from the same snapshot. Tasks from [Scan.PlanFiles] carry
 // this ID so the rewrite can detect deletes committed before the transaction
 // began. If supplying tasks without an ID, plan from the transaction's table.
-func (t *Transaction) RewriteDataFiles(ctx context.Context, groups []CompactionTaskGroup, opts RewriteDataFilesOptions) (*RewriteResult, error) {
+func (t *Transaction) RewriteDataFiles(ctx context.Context, groups []CompactionTaskGroup, opts RewriteDataFilesOptions) (_ *RewriteResult, err error) {
 	meta, err := t.txnMeta()
 	if err != nil {
 		return nil, err
@@ -493,12 +493,13 @@ func (t *Transaction) RewriteDataFiles(ctx context.Context, groups []CompactionT
 	if err != nil {
 		return nil, err
 	}
+	checkedHead := t.planningSnapshot(meta)
 	if snapshotID != nil {
 		files, err := compactionSourceFiles(groups)
 		if err != nil {
 			return nil, err
 		}
-		if err := t.validateRewriteFromSnapshot(ctx, meta, snapshotID, files); err != nil {
+		if err := t.validateRewriteFromSnapshot(ctx, meta, checkedHead, snapshotID, files); err != nil {
 			return nil, fmt.Errorf("validate compaction from planning snapshot: %w", err)
 		}
 	}
@@ -510,7 +511,26 @@ func (t *Transaction) RewriteDataFiles(ctx context.Context, groups []CompactionT
 
 	result := &RewriteResult{}
 	rewrite := t.NewRewrite(opts.SnapshotProps)
+	if checkedHead != nil {
+		// The earlier interval is already validated. Check for any staged
+		// changes between that head and the parent used to replace the files.
+		rewrite.ValidateFromSnapshot(checkedHead.SnapshotID)
+	}
 	stagedDeleteFiles := make(map[string]struct{})
+	var outputs []CompactionGroupResult
+	defer func() {
+		if err == nil || len(outputs) == 0 {
+			return
+		}
+		cleanupCtx := context.WithoutCancel(ctx)
+		fs, cleanupErr := staged.fsF(cleanupCtx)
+		if cleanupErr == nil {
+			cleanupErr = cleanupCompactionOutputs(fs, outputs)
+		}
+		if cleanupErr != nil {
+			err = errors.Join(err, fmt.Errorf("clean up atomic rewrite outputs: %w", cleanupErr))
+		}
+	}()
 
 	for _, group := range groups {
 		if err := ctx.Err(); err != nil {
@@ -523,11 +543,17 @@ func (t *Transaction) RewriteDataFiles(ctx context.Context, groups []CompactionT
 
 		gr, err := ExecuteCompactionGroup(ctx, staged.Table, group, opts.GroupOptions...)
 		if err != nil {
+			if len(gr.NewDataFiles) > 0 {
+				outputs = append(outputs, gr)
+			}
 			return result, err
 		}
 
 		if len(gr.OldDataFiles) == 0 && len(gr.NewDataFiles) == 0 {
 			continue
+		}
+		if len(gr.NewDataFiles) > 0 {
+			outputs = append(outputs, gr)
 		}
 
 		// The whole plan was checked above, before writing any outputs.
@@ -1191,9 +1217,8 @@ var errSnapshotHistoryIncompleteForRewrite = errors.New(
 // validateRewriteFromSnapshot covers changes already visible when the rewrite
 // is staged. The transaction's existing validators cover subsequent changes
 // discovered during commit retries.
-func (t *Transaction) validateRewriteFromSnapshot(ctx context.Context, meta *MetadataBuilder, snapshotID *int64, rewrittenFiles []iceberg.DataFile) error {
-	head := t.planningSnapshot(meta)
-	if head != nil && head.SnapshotID == *snapshotID {
+func (t *Transaction) validateRewriteFromSnapshot(ctx context.Context, meta *MetadataBuilder, head *Snapshot, snapshotID *int64, rewrittenFiles []iceberg.DataFile) error {
+	if snapshotID == nil || (head != nil && head.SnapshotID == *snapshotID) {
 		return nil
 	}
 	current, err := meta.Build()
@@ -1214,7 +1239,7 @@ func (t *Transaction) validateRewriteFromSnapshot(ctx context.Context, meta *Met
 		if err != nil {
 			return err
 		}
-		cc, err = newConflictContextAt(ctx, current, t.branch, t.planningSnapshot(full), snapshotID, fs, true)
+		cc, err = newConflictContextAt(ctx, current, t.branch, current.SnapshotByID(head.SnapshotID), snapshotID, fs, true)
 	}
 	if err != nil {
 		return err
