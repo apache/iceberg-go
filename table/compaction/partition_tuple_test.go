@@ -143,3 +143,53 @@ func TestCanonicalPartitionKeyKeepsSpecPrefix(t *testing.T) {
 		}
 	}
 }
+
+func TestCanonicalPartitionKeySeparatesEmptyAndDifferentFieldIDs(t *testing.T) {
+	cases := []struct {
+		name string
+		a, b map[int]any
+	}{
+		{name: "empty versus null field", a: nil, b: map[int]any{1000: nil}},
+		{name: "empty versus empty string", a: nil, b: map[int]any{1000: ""}},
+		{name: "empty versus empty binary", a: nil, b: map[int]any{1000: []byte{}}},
+		{name: "field id matters", a: map[int]any{1000: "x"}, b: map[int]any{1001: "x"}},
+		{name: "field ordering matters", a: map[int]any{1000: "x", 1001: "y"}, b: map[int]any{1000: "y", 1001: "x"}},
+		{name: "binary length matters", a: map[int]any{1000: []byte{0}}, b: map[int]any{1000: []byte{0, 0}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			first, err := tblutils.CanonicalPartitionKey(3, tc.a)
+			require.NoError(t, err)
+			second, err := tblutils.CanonicalPartitionKey(3, tc.b)
+			require.NoError(t, err)
+			require.NotEqual(t, first, second)
+		})
+	}
+
+	partition := map[int]any{1000: "same"}
+	first, err := tblutils.CanonicalPartitionKey(1, partition)
+	require.NoError(t, err)
+	second, err := tblutils.CanonicalPartitionKey(2, partition)
+	require.NoError(t, err)
+	require.NotEqual(t, first, second, "the partition spec is part of the key")
+}
+
+func TestCanonicalPartitionKeyNormalizesTemporalRepresentations(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		a, b any
+	}{
+		{name: "time and integer", a: iceberg.Time(1234), b: int64(1234)},
+		{name: "timestamp and integer", a: iceberg.Timestamp(-1234), b: int64(-1234)},
+		{name: "timestamp nanos and integer", a: iceberg.TimestampNano(1234), b: int64(1234)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			first, err := tblutils.CanonicalPartitionKey(1, map[int]any{1000: tc.a})
+			require.NoError(t, err)
+			second, err := tblutils.CanonicalPartitionKey(1, map[int]any{1000: tc.b})
+			require.NoError(t, err)
+			require.Equal(t, first, second)
+		})
+	}
+}
+
