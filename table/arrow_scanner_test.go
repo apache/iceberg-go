@@ -615,9 +615,9 @@ func TestRecordFilterStreamingAlternatesAllPassAndPartialBatches(t *testing.T) {
 	defer mem.AssertSize(t, 0)
 	process := plan.recordProcessor(compute.WithAllocator(t.Context(), mem))
 	for _, tc := range []struct {
-		name string
-		keep []bool
-		want []int64
+		name  string
+		keep  []bool
+		want  []int64
 		reuse bool
 	}{
 		{name: "first all pass", keep: []bool{true, true, true}, want: []int64{0, 1, 2}, reuse: true},
@@ -647,4 +647,3 @@ func TestRecordFilterStreamingAlternatesAllPassAndPartialBatches(t *testing.T) {
 		})
 	}
 }
-
