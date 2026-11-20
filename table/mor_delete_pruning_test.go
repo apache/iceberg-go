@@ -629,9 +629,20 @@ func TestV3MergeOnReadUpgradeKeepsUntouchedFileScopedDeletes(t *testing.T) {
 	tbl, err = tx.Commit(ctx)
 	require.NoError(t, err)
 
-	// Only the first data file gets a new DV. The sibling's old delete file
-	// must still hide id=4, and must not be removed from the manifest.
-	tbl, err = tbl.Delete(ctx, iceberg.EqualTo(iceberg.Reference("id"), int64(2)), nil)
+	// Both files match the filter, but the sibling's only matching row is
+	// already deleted. Only the first file should receive a DV.
+	filter := iceberg.IsIn(iceberg.Reference("id"), int64(2), int64(4))
+	scan := tbl.Scan(table.WithRowFilter(filter))
+	defer scan.Close()
+	candidates, err := scan.PlanFiles(ctx)
+	require.NoError(t, err)
+	require.Len(t, candidates, 2)
+	for _, candidate := range candidates {
+		require.Len(t, candidate.DeleteFiles, 1)
+		require.Empty(t, candidate.DeletionVectorFiles)
+	}
+
+	tbl, err = tbl.Delete(ctx, filter, nil)
 	require.NoError(t, err)
 	require.Equal(t, []int64{3, 5, 6}, idsInTable(t, tbl))
 	require.Equal(t, 1, liveDVCount(t, tbl))
