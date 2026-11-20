@@ -301,6 +301,34 @@ func TestDirectDataFileWritesRetryWithRefsOnlyHistory(t *testing.T) {
 	}
 }
 
+func TestDirectDataFileRetryUsesLiveManifestsWithoutOriginalList(t *testing.T) {
+	for _, peerPath := range []string{"duplicate", "unrelated"} {
+		t.Run(peerPath, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				fs, cat, tbl := newExpireReplayTable(t, nil)
+				tbl, _ = appendOnBranch(t, tbl, MainBranch, "base")
+				originalList := tbl.CurrentSnapshot().ManifestList
+				txn := tbl.NewTransaction()
+				stageFiles(t, txn, "duplicate")
+				peerHead := peerAppend(t, fs, cat, MainBranch, peerPath)
+				require.NoError(t, fs.Remove(t.Context(), originalList))
+
+				committed, err := txn.Commit(t.Context())
+				if peerPath == "duplicate" {
+					require.ErrorIs(t, err, ErrDuplicateDataFiles)
+					require.Equal(t, peerHead, refHead(t, cat.metadata, MainBranch))
+
+					return
+				}
+
+				require.NoError(t, err)
+				require.Equal(t, []string{"base", "duplicate", "unrelated"},
+					branchFiles(t, fs, committed.Metadata(), MainBranch))
+			})
+		})
+	}
+}
+
 func TestDirectDataFileRetrySkipsInheritedManifests(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		fs, cat, tbl := newExpireReplayTable(t, nil)
