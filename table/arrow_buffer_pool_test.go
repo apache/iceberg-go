@@ -22,7 +22,6 @@ import (
 	"errors"
 	"iter"
 	"math/bits"
-	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -31,7 +30,6 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/compute"
 	"github.com/apache/arrow-go/v18/arrow/memory"
-	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/stretchr/testify/require"
 )
@@ -180,70 +178,6 @@ func TestReadTasksArrowBufferReuseKeepsRetainedParquetBatch(t *testing.T) {
 	require.NotNil(t, retained)
 	require.Equal(t, ids[:retained.NumRows()], retained.Column(0).(*array.Int64).Int64Values())
 	require.Equal(t, strings.Repeat("x", 256), retained.Column(1).(*array.String).Value(0))
-}
-
-func BenchmarkReadTasksArrowBufferReuse(b *testing.B) {
-	benchmarkArrowBufferReuse(b, 1, []int{1, 4})
-}
-
-func BenchmarkReadTasksArrowBufferReuseWide(b *testing.B) {
-	benchmarkArrowBufferReuse(b, 6, []int{4})
-}
-
-func benchmarkArrowBufferReuse(b *testing.B, payloadColumns int, workerCounts []int) {
-	b.Helper()
-
-	meta, fs, _, tasks, wantRows := benchmarkSplitParquetScanWithPayloads(b, 16, 8192, payloadColumns)
-	table := New(Identifier{"benchmark"}, meta, "", func(context.Context) (iceio.IO, error) {
-		return fs, nil
-	}, nil)
-	for _, tc := range []struct {
-		name    string
-		workers int
-	}{
-		{name: "one_worker", workers: 1},
-		{name: "four_workers", workers: 4},
-	} {
-		if !slices.Contains(workerCounts, tc.workers) {
-			continue
-		}
-		for _, workload := range []struct {
-			name string
-			rows int64
-		}{
-			{name: "full", rows: wantRows},
-			{name: "filtered", rows: wantRows / 4},
-		} {
-			for _, mode := range []string{"default", "reuse"} {
-				b.Run(workload.name+"/"+tc.name+"/"+mode, func(b *testing.B) {
-					options := []ScanOption{WithMaxConcurrency(tc.workers), WithArrowBatchSize(8192)}
-					if workload.rows != wantRows {
-						options = append(options, WithRowFilter(iceberg.GreaterThanEqual(iceberg.Reference("id"), wantRows-workload.rows)))
-					}
-					if mode == "reuse" {
-						options = append(options, WithArrowBufferReuse())
-					}
-					benchmarkReadTasksBufferReuse(b, table.Scan(options...), tasks, workload.rows)
-				})
-			}
-		}
-	}
-}
-
-func benchmarkReadTasksBufferReuse(b *testing.B, scan *Scan, tasks []FileScanTask, wantRows int64) {
-	b.Helper()
-	b.ReportAllocs()
-	for b.Loop() {
-		_, records, err := scan.ReadTasks(b.Context(), tasks)
-		require.NoError(b, err)
-		var rows int64
-		for record, err := range records {
-			require.NoError(b, err)
-			rows += record.NumRows()
-			record.Release()
-		}
-		require.Equal(b, wantRows, rows)
-	}
 }
 
 func TestArrowBufferPoolBoundsEachSizeClass(t *testing.T) {
