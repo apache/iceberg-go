@@ -399,7 +399,8 @@ type suppressHeadersKey struct{}
 type reqConfig struct {
 	headers           map[string]string
 	suppressHeaders   []string
-	idempotencyKey    bool
+	idempotency       *idempotencyPolicy
+	commit            bool
 	errorTypeOverride map[string]error
 	allowNoContent    bool
 	requireBody       bool
@@ -414,7 +415,7 @@ type reqConfig struct {
 type reqOption func(*reqConfig)
 
 func (r *Catalog) mutationHeaders() reqOption {
-	return func(c *reqConfig) { c.idempotencyKey = r.idempotencyKeyLifetime != nil }
+	return withIdempotency(r.idempotencyKeyLifetime, nil, nil)
 }
 
 // withHeaders sets per-request headers, merging with any already set so options
@@ -523,10 +524,12 @@ func suppressedHeadersFrom(ctx context.Context) map[string]struct{} {
 func do[T any](ctx context.Context, method string, baseURI *url.URL, path []string, cl *http.Client, override map[int]error, opts ...reqOption) (ret T, err error) {
 	cfg := newReqConfig(opts)
 
-	var (
-		req *http.Request
-		rsp *http.Response
-	)
+	var rsp *http.Response
+
+	kc, err := newKeyedCall(&cfg)
+	if err != nil {
+		return ret, err
+	}
 
 	u := baseURI.JoinPath(path...)
 	if len(cfg.queryParams) > 0 {
@@ -540,14 +543,15 @@ func do[T any](ctx context.Context, method string, baseURI *url.URL, path []stri
 	}
 	uri := u.String()
 	ctx = withSuppressedHeadersCtx(ctx, cfg.suppressHeaders)
-	if req, err = http.NewRequestWithContext(ctx, method, uri, nil); err != nil {
-		return ret, err
-	}
-	if err = setRequestHeaders(req, cfg); err != nil {
-		return ret, err
-	}
+	rsp, err = send(ctx, cl, kc, &cfg, override, func() (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, method, uri, nil)
+		if err == nil {
+			setRequestHeaders(req, cfg.headers)
+		}
 
-	if rsp, err = cl.Do(req); err != nil {
+		return req, err
+	})
+	if err != nil {
 		return ret, err
 	}
 	defer func() {
@@ -600,10 +604,14 @@ func doPost[Payload, Result any](ctx context.Context, baseURI *url.URL, path []s
 	cfg := newReqConfig(opts)
 
 	var (
-		req  *http.Request
 		rsp  *http.Response
 		data []byte
 	)
+
+	kc, err := newKeyedCall(&cfg)
+	if err != nil {
+		return ret, err
+	}
 
 	uri := baseURI.JoinPath(path...).String()
 	data, err = json.Marshal(payload)
@@ -612,15 +620,14 @@ func doPost[Payload, Result any](ctx context.Context, baseURI *url.URL, path []s
 	}
 
 	ctx = withSuppressedHeadersCtx(ctx, cfg.suppressHeaders)
-	req, err = http.NewRequestWithContext(ctx, http.MethodPost, uri, bytes.NewReader(data))
-	if err != nil {
-		return ret, err
-	}
-	if err = setRequestHeaders(req, cfg); err != nil {
-		return ret, err
-	}
+	rsp, err = send(ctx, cl, kc, &cfg, override, func() (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, uri, bytes.NewReader(data))
+		if err == nil {
+			setRequestHeaders(req, cfg.headers)
+		}
 
-	rsp, err = cl.Do(req)
+		return req, err
+	})
 	if err != nil {
 		return ret, err
 	}
@@ -639,7 +646,7 @@ func doPost[Payload, Result any](ctx context.Context, baseURI *url.URL, path []s
 
 	if rsp.ContentLength == 0 {
 		if cfg.requireBody {
-			return ret, fmt.Errorf("%w: empty response body on %s %s", ErrRESTError, req.Method, req.URL.Path)
+			return ret, fmt.Errorf("%w: empty response body on %s %s", ErrRESTError, rsp.Request.Method, rsp.Request.URL.Path)
 		}
 
 		return ret, err
@@ -678,19 +685,10 @@ func rejectTrailingJSON(decoder *json.Decoder) error {
 	return nil
 }
 
-func setRequestHeaders(req *http.Request, cfg reqConfig) error {
-	for k, v := range cfg.headers {
+func setRequestHeaders(req *http.Request, headers map[string]string) {
+	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
-	if cfg.idempotencyKey {
-		key, err := idempotencyHeaderValue(nil)
-		if err != nil {
-			return err
-		}
-		req.Header.Set(headerIdempotencyKey, key)
-	}
-
-	return nil
 }
 
 func handleNon200(rsp *http.Response, override map[int]error, typeOverride map[string]error) error {
@@ -1900,7 +1898,7 @@ func (r *Catalog) CommitTable(ctx context.Context, ident table.Identifier, requi
 			http.StatusBadGateway:          ErrCommitStateUnknown,
 			http.StatusServiceUnavailable:  ErrCommitStateUnknown,
 			http.StatusGatewayTimeout:      ErrCommitStateUnknown,
-		}, r.mutationHeaders())
+		}, r.mutationHeaders(), withCommitState())
 	if err != nil {
 		return nil, "", err
 	}
@@ -1990,7 +1988,7 @@ func (r *Catalog) CommitTransaction(ctx context.Context, commits []table.TableCo
 			http.StatusGatewayTimeout:      ErrCommitStateUnknown,
 		},
 		allowNoContent(),
-		r.mutationHeaders())
+		r.mutationHeaders(), withCommitState())
 
 	return err
 }
@@ -2144,7 +2142,7 @@ func (r *Catalog) UpdateTable(ctx context.Context, ident table.Identifier, requi
 			http.StatusBadGateway:          ErrCommitStateUnknown,
 			http.StatusServiceUnavailable:  ErrCommitStateUnknown,
 			http.StatusGatewayTimeout:      ErrCommitStateUnknown,
-		}, r.mutationHeaders())
+		}, r.mutationHeaders(), withCommitState())
 	if err != nil {
 		return nil, err
 	}

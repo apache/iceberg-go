@@ -69,15 +69,34 @@ Each catalog package exposes its own functional `Option` set. The lists below re
 The most option-rich surface. Source: [`catalog/rest/options.go`](https://github.com/apache/iceberg-go/blob/main/catalog/rest/options.go).
 
 When `GET /v1/config` returns a non-null `idempotency-key-lifetime`, the client
-sends fresh UUIDv7 `Idempotency-Key` headers on namespace, table, view and
-transaction mutations, including create view, and on scan cancellation. After
-negotiation, a configured default `Idempotency-Key` is dropped from all requests
-when the server advertises a lifetime; the initial `GET /v1/config` may still
-carry it because advertisement is not yet known. Scan plan and task requests
-send keys independently of this advertisement and have a separate retry policy.
-Go's standard HTTP transport may replay certain failed requests on reused
-connections with the same key. The advertised lifetime is not currently enforced,
-including zero or malformed values.
+sends a fresh UUIDv7 `Idempotency-Key` header on namespace, table, view and
+transaction mutations, including create view, and on scan cancellation, plus on
+scan plan and task requests. After negotiation, a configured default
+`Idempotency-Key` is dropped from all requests when the server advertises a
+lifetime; the initial `GET /v1/config` may still carry it because advertisement
+is not yet known.
+
+A keyed request is resent with the same key and body only after a 500, 502, 503
+or 504 response, a timeout or a connection error, never after a 4xx (including
+408 and 429). A transaction refreshed after a 409 is a new request with a new
+key. Resends use jittered backoff, honor `Retry-After` and the request context,
+and stop after three resends or when the next delay would reach the lifetime,
+counted from the first attempt. A commit that cannot be resent after an ambiguous
+failure returns `ErrCommitStateUnknown`; other calls return the last error.
+
+Resends are allowed only when the lifetime parses (ISO-8601, `PnDTnHnMnS`) and is
+positive. This is stricter than Java, which stops bounding resends when the
+lifetime is malformed. The key is still sent whenever the lifetime is present.
+Go's standard HTTP transport can also replay a keyed request on a reused
+connection that fails before any response, and follow 307/308 redirects. Those
+replays of requests with a body are held to the same window. A keyed `DELETE` has
+no body, so its transport replay cannot be bounded this way and may happen
+outside the lifetime.
+
+Scan plan and task requests send a generated key only when a lifetime is
+advertised. A caller-supplied `IdempotencyKey` is always sent; when a lifetime is
+advertised, its age (read from the UUIDv7 timestamp) counts against the window,
+and without one it is sent once and never resent.
 
 | Group | Options |
 |---|---|
