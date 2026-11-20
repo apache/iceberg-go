@@ -1765,16 +1765,15 @@ func (sp *snapshotProducer) commitManifests(ctx context.Context, newManifests, a
 	capturedSnapshot := snapshot // copy the value so the closure is self-contained
 
 	rebuildFn := func(rebuildCtx context.Context, freshMeta Metadata, freshParent *Snapshot, fio iceio.WriteFileIO, attempt int) (*Snapshot, error) {
-		if replacesRowsWithoutLineage && freshParent != nil && freshParent.FirstRowID != nil {
-			return nil, fmt.Errorf("%w: %w: the rewrite's source rows were assigned v3 row IDs after planning; replan from the target branch",
-				ErrTransactionUnusable, ErrCommitFailed)
-		}
-
 		// A concurrent writer may have already removed the files this producer
 		// intends to rewrite. Grafting our replacement on top of the fresh
 		// parent would duplicate rows, so abort terminally. The scan also
 		// reports which removed delete files / DVs survive on the fresh parent
 		// so the summary below does not double-subtract a peer's prior removal.
+		if replacesRowsWithoutLineage && freshParent != nil && freshParent.FirstRowID != nil {
+			return nil, fmt.Errorf("%w: %w: the rewrite's source rows were assigned v3 row IDs after planning; replan from the target branch",
+				ErrTransactionUnusable, ErrCommitFailed)
+		}
 		present, err := sp.checkRemovedFiles(rebuildCtx, freshParent)
 		if err != nil {
 			return nil, err
