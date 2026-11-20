@@ -316,3 +316,32 @@ func TestRewriteCompactionRetainsSharedDeleteWhenLastGroupOnlyIsRewritten(t *tes
 		})
 	}
 }
+
+func TestRewriteCompactionDropsSharedDeleteWithOnlyNewerSurvivor(t *testing.T) {
+	for _, mode := range []string{"atomic", "distributed"} {
+		t.Run(mode, func(t *testing.T) {
+			tbl, groups := setupSharedPositionDeleteRewrite(t, newRewriteTestTable(t))
+			tbl = appendRows(t, tbl, `[{"id":5,"data":"newer"}]`)
+			tx := tbl.NewTransaction()
+			if mode == "atomic" {
+				result, err := tx.RewriteDataFiles(t.Context(), groups, table.RewriteDataFilesOptions{})
+				require.NoError(t, err)
+				require.Equal(t, 1, result.RemovedPositionDeleteFiles)
+			} else {
+				rewrite := tx.NewRewrite(nil)
+				for _, group := range groups {
+					result, err := table.ExecuteCompactionGroup(t.Context(), tbl, group)
+					require.NoError(t, err)
+					require.Len(t, result.SafePosDeletes, 1)
+					rewrite.ApplyResult(result)
+				}
+				require.NoError(t, rewrite.Commit(t.Context()))
+			}
+
+			committed, err := tx.Commit(t.Context())
+			require.NoError(t, err)
+			require.ElementsMatch(t, []int64{2, 4, 5}, scanIDs(t, committed))
+			require.Equal(t, "1", committed.CurrentSnapshot().Summary.Properties["removed-position-delete-files"])
+		})
+	}
+}
