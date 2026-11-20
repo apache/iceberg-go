@@ -573,7 +573,7 @@ Go's standard HTTP transport may replay certain failed requests on reused
 connections with the same key. The advertised lifetime is not currently enforced,
 including zero or malformed values.</p>
 <div class="table-wrapper"><table><thead><tr><th>Group</th><th>Options</th></tr></thead><tbody>
-<tr><td>Authentication</td><td><code>WithCredential</code>, <code>WithOAuthToken</code>, <code>WithAuthManager</code>, <code>NewOauth2AuthManager</code>, <code>WithAuthURI</code>, <code>WithScope</code>, <code>WithAudience</code>, <code>WithResource</code></td></tr>
+<tr><td>Authentication</td><td><code>WithCredential</code>, <code>WithOAuthToken</code>, <code>WithAuthManager</code>, <code>NewOAuth2AuthManager</code>, <code>WithAuthURI</code>, <code>WithScope</code>, <code>WithAudience</code>, <code>WithResource</code></td></tr>
 <tr><td>AWS SigV4</td><td><code>WithSigV4</code>, <code>WithSigV4RegionSvc</code>, <code>WithSigner</code></td></tr>
 <tr><td>HTTP</td><td><code>WithHeaders</code>, <code>WithTLSConfig</code>, <code>WithOAuthTLSConfig</code>, <code>WithCustomTransport</code></td></tr>
 <tr><td>Catalog routing</td><td><code>WithPrefix</code>, <code>WithWarehouseLocation</code>, <code>WithMetadataLocation</code></td></tr>
@@ -642,7 +642,7 @@ config or proxy set with <code>WithCustomTransport</code>, <code>WithTLSConfig</
 the default transport and a 60-second timeout. To use a specific client, put it
 in the context's <code>oauth2.HTTPClient</code> value when loading the catalog, or build
 the token source yourself (for example with <code>googleauth.TokenSource</code>) and pass
-<code>NewOauth2AuthManager(ts)</code> to <code>WithAuthManager</code>. One exception: on Google Cloud
+<code>NewOAuth2AuthManager(ts)</code> to <code>WithAuthManager</code>. One exception: on Google Cloud
 compute, Application Default Credentials come from the metadata server, which
 the Google library always reaches through its own client.</p>
 <pre><code class="language-go">import (
@@ -662,14 +662,14 @@ cat, err := catalog.Load(ctx, &quot;biglake&quot;, iceberg.Properties{
 <h4 id="custom-token-sources"><a class="header" href="#custom-token-sources">Custom token sources</a></h4>
 <p><code>WithCredential</code> uses the OAuth2 client-credentials flow against the catalog's
 token endpoint. For other identity providers, wrap any <code>oauth2.TokenSource</code> with
-<code>NewOauth2AuthManager</code> and pass it to <code>WithAuthManager</code>. The Google setup above
+<code>NewOAuth2AuthManager</code> and pass it to <code>WithAuthManager</code>. The Google setup above
 can also be written this way:</p>
 <pre><code class="language-go">ts, err := google.DefaultTokenSource(ctx, &quot;https://www.googleapis.com/auth/cloud-platform&quot;)
 if err != nil {
 	return err
 }
 cat, err := rest.NewCatalog(ctx, &quot;biglake&quot;, &quot;https://biglake.googleapis.com/iceberg/v1/restcatalog&quot;,
-	rest.WithAuthManager(rest.NewOauth2AuthManager(ts)),
+	rest.WithAuthManager(rest.NewOAuth2AuthManager(ts)),
 	rest.WithWarehouseLocation(&quot;gs://lakehouse-public-data&quot;),
 	rest.WithHeaders(map[string]string{&quot;x-goog-user-project&quot;: &quot;my-project&quot;}))
 </code></pre>
@@ -841,7 +841,7 @@ selected.</p>
 <div class="table-wrapper"><table><thead><tr><th>Key (constant)</th><th>Purpose</th></tr></thead><tbody>
 <tr><td><code>adls.auth.shared-key.account.name</code> (<code>io.ADLSSharedKeyAccountName</code>)</td><td>Account name.</td></tr>
 <tr><td><code>adls.auth.shared-key.account.key</code> (<code>io.ADLSSharedKeyAccountKey</code>)</td><td>Account key.</td></tr>
-<tr><td><code>adls.sas-token.&lt;host&gt;</code> (prefix <code>io.ADLSSasTokenPrefix</code>)</td><td>Per-host SAS token.</td></tr>
+<tr><td><code>adls.sas-token.&lt;host&gt;</code> (prefix <code>io.ADLSSASTokenPrefix</code>)</td><td>Per-host SAS token.</td></tr>
 <tr><td><code>adls.connection-string.&lt;account-name&gt;</code> (prefix <code>io.ADLSConnectionStringPrefix</code>)</td><td>Per-account connection string.</td></tr>
 <tr><td><code>adls.token</code> (<code>io.ADLSToken</code>)</td><td>Static Azure Storage access token, without the <code>Bearer </code> prefix. Subject to the precedence above; not refreshed.</td></tr>
 <tr><td><code>adls.client-id</code> (<code>io.ADLSClientID</code>)</td><td>Client ID of a user-assigned managed identity. Used only when the explicit managed-identity authentication path is selected.</td></tr>
@@ -3177,6 +3177,9 @@ make integration-external-rest
 <h3 id="unreleased-compatibility-notes"><a class="header" href="#unreleased-compatibility-notes">Unreleased compatibility notes</a></h3>
 <ul>
 <li>
+<p><strong>gocloud types are no longer exposed by <code>blobfs</code> and <code>gcs</code>.</strong> <code>blobfs.New</code> now returns the <code>blobfs.FileIO</code> interface, which lists the iceberg-go io interfaces and <code>io.Closer</code>, instead of a struct that embeds <code>*blob.Bucket</code>. <code>FileIO.NewWriter</code>, <code>blobfs.Writer</code> and <code>gcs.ParseGCSConfig</code> are removed; use <code>Create</code>, or configure GCS through properties. To migrate, replace <code>*blobfs.FileIO</code> with <code>blobfs.FileIO</code> in fields, signatures and <code>var _ X = (*blobfs.FileIO)(nil)</code> assertions, and assert <code>Sys()</code> results to <code>blobfs.FileIO</code> instead of <code>*blobfs.FileIO</code>.</p>
+</li>
+<li>
 <p><strong>Catalog and view FileIO may use isolated registries.</strong> Glue, Hadoop, Hive and SQL accept <code>WithIORegistry</code>, as REST already does. <code>hadoop.NewCatalog</code>, <code>sql.NewCatalog</code>, <code>view.CreateView</code>, <code>view.CreateViewWithIOProperties</code>, <code>view.CreateViewFromVersion</code> and <code>view.WriteMetadata</code> now take a trailing variadic option. Existing calls still compile. Function values assigned to a type with the old signature need a wrapper that calls the function without options. The default remains the global registry, including for <code>catalog.Load</code>.</p>
 </li>
 <li>
@@ -3366,6 +3369,9 @@ make integration-external-rest
 <p><strong>AWS identifiers use the Go initialism.</strong> <code>glue.AwsProperties</code>, <code>glue.WithAwsConfig</code> and <code>glue.WithAwsProperties</code> become <code>glue.AWSProperties</code>, <code>glue.WithAWSConfig</code> and <code>glue.WithAWSProperties</code>; <code>sigv4.WithAwsConfig</code> becomes <code>sigv4.WithAWSConfig</code>; <code>utils.WithAwsConfig</code> and <code>utils.GetAwsConfig</code> become <code>utils.WithAWSConfig</code> and <code>utils.GetAWSConfig</code>; and <code>config.CatalogConfig.AwsProfile</code> becomes <code>AWSProfile</code>. The <code>aws-profile</code> YAML key is unchanged.</p>
 </li>
 <li>
+<p><strong>Remaining exported names use Go initialisms.</strong> <code>table.PropertyUuid</code> and <code>table.PropertyCurrentSnapshotId</code> become <code>table.PropertyUUID</code> and <code>table.PropertyCurrentSnapshotID</code>; <code>table.ReassignedIds</code> becomes <code>table.ReassignedIDs</code>; the <code>table.WriteTask.Uuid</code> field becomes <code>UUID</code>; <code>glue.CatalogIdKey</code> becomes <code>glue.CatalogIDKey</code>; <code>io.ADLSSasTokenPrefix</code> becomes <code>io.ADLSSASTokenPrefix</code>; and <code>rest.Oauth2AuthManager</code> and <code>rest.NewOauth2AuthManager</code> become <code>rest.OAuth2AuthManager</code> and <code>rest.NewOAuth2AuthManager</code>. The property and config key strings are unchanged.</p>
+</li>
+<li>
 <p><strong>KMS factory registration now takes a context.</strong> Change <code>encryption.KMSFactory</code> implementations to accept <code>(context.Context, map[string]string)</code> instead of only properties, and call <code>encryption.LoadKeyManagementClient(ctx, props)</code> instead of <code>LoadKeyManagementClient(props)</code>. The existing global <code>RegisterKMS</code>, <code>UnregisterKMS</code>, and <code>GetRegisteredKMSNames</code> functions still use the default registry; <code>RegisterKMS</code> still panics for invalid registrations. Use <code>encryption.MustRegisterKMS</code> for provider initialization. For isolated registrations, create <code>registry := encryption.NewKMSRegistry()</code> after importing any KMS providers and call <code>registry.Register</code>, <code>registry.Load(ctx, props)</code>, <code>registry.Names</code>, or <code>registry.Unregister</code>. New registries snapshot the global registrations; subsequent changes do not propagate.</p>
 </li>
 <li>
@@ -3411,7 +3417,7 @@ make integration-external-rest
 <p><strong>Catalog identifier helper renamed.</strong> <code>catalog.TableNameFromIdent</code> is removed. Use <code>catalog.ObjectNameFromIdent</code> for tables, views, and functions.</p>
 </li>
 <li>
-<p><strong>Substrait expression conversion no longer takes case sensitivity.</strong> <code>substrait.ConvertExpr(schema, expression, caseSensitive)</code> becomes <code>substrait.ConvertExpr(schema, expression)</code>. Case sensitivity remains part of expression binding.</p>
+<p><strong><code>table/substrait</code> is now internal.</strong> The package moved to <code>table/internal/substrait</code>, so <code>substrait.ConvertExpr</code>, <code>substrait.ConvertSchema</code> and <code>substrait.NewExtensionSet</code> are no longer exported. There is no replacement; scans and deletes still convert filters internally.</p>
 </li>
 <li>
 <p><strong>Transform formatting requires the result type and uses the Java-aligned method name.</strong> <code>Transform.ToHumanStr(value)</code> and <code>Transform.ToHumanStrType(resultType, value)</code> are removed. Use <code>Transform.ToHumanString(resultType, value)</code> to format partition values, including timestamps with time zones.</p>
