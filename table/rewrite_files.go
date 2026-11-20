@@ -68,8 +68,9 @@ type RewriteFiles struct {
 	err                     error
 	committed               bool
 
-	workerSourceWithoutID   string
-	workerLineageUnverified bool
+	workerSourceLineage        map[string]CompactionSourceRowLineage
+	workerSourceWithoutLineage string
+	workerLineageUnverified    bool
 }
 
 type rewriteDeleteFileAddition struct {
@@ -287,12 +288,22 @@ func (r *RewriteFiles) AddFile(df iceberg.DataFile) *RewriteFiles {
 //	}
 //	if err := rewrite.Commit(ctx); err != nil { ... }
 //
-// For v3 rewrites, results that add files must set [CompactionGroupResult.PreservedRowLineage].
+// For v3 rewrites, results must carry [CompactionGroupResult.SourceRowLineage]
+// and set [CompactionGroupResult.PreservedRowLineage].
 func (r *RewriteFiles) ApplyResult(gr CompactionGroupResult) *RewriteFiles {
 	for _, df := range gr.OldDataFiles {
 		r.DeleteFile(df)
-		if r.err == nil && len(gr.NewDataFiles) > 0 && r.workerSourceWithoutID == "" && df.FirstRowID() == nil {
-			r.workerSourceWithoutID = df.FilePath()
+		if r.err != nil {
+			return r
+		}
+		path := df.FilePath()
+		if lineage, ok := gr.SourceRowLineage[path]; ok {
+			if r.workerSourceLineage == nil {
+				r.workerSourceLineage = make(map[string]CompactionSourceRowLineage)
+			}
+			r.workerSourceLineage[path] = lineage
+		} else if r.workerSourceWithoutLineage == "" {
+			r.workerSourceWithoutLineage = path
 		}
 	}
 	for _, df := range gr.NewDataFiles {
@@ -305,7 +316,7 @@ func (r *RewriteFiles) ApplyResult(gr CompactionGroupResult) *RewriteFiles {
 	for _, df := range gr.SafeDeletionVectors {
 		r.removeAutomaticDeleteFile(df)
 	}
-	if len(gr.NewDataFiles) > 0 && !gr.PreservedRowLineage {
+	if (len(gr.OldDataFiles) > 0 || len(gr.NewDataFiles) > 0) && !gr.PreservedRowLineage {
 		r.workerLineageUnverified = true
 	}
 
@@ -345,7 +356,7 @@ func (r *RewriteFiles) Commit(ctx context.Context) error {
 	if len(r.dataFilesToDelete) == 0 && len(r.dataFilesToAdd) > 0 {
 		return fmt.Errorf("%w: rewrite must delete at least one data file when adding data files", ErrInvalidOperation)
 	}
-	if r.workerLineageUnverified || r.workerSourceWithoutID != "" {
+	if r.workerLineageUnverified || r.workerSourceWithoutLineage != "" {
 		meta, err := r.txn.txnMeta()
 		if err != nil {
 			return err
@@ -355,9 +366,9 @@ func (r *RewriteFiles) Commit(ctx context.Context) error {
 				return fmt.Errorf("%w: worker result did not confirm v3 row lineage preservation; replan and rerun compaction with a v3 worker",
 					ErrInvalidOperation)
 			}
-			if parent := r.txn.planningSnapshot(meta); r.workerSourceWithoutID != "" && parent != nil && parent.FirstRowID != nil {
-				return fmt.Errorf("%w: worker result for %q has no first row ID; replan from the target branch",
-					ErrInvalidOperation, r.workerSourceWithoutID)
+			if r.workerSourceWithoutLineage != "" {
+				return fmt.Errorf("%w: worker result for %q is missing source row lineage; replan from the target branch",
+					ErrInvalidOperation, r.workerSourceWithoutLineage)
 			}
 		}
 	}
@@ -365,6 +376,9 @@ func (r *RewriteFiles) Commit(ctx context.Context) error {
 	opts := []WriteOption{withRewriteSemantics()}
 	if r.dataSequenceNumber != nil {
 		opts = append(opts, withDataSequenceNumber(*r.dataSequenceNumber))
+	}
+	if len(r.workerSourceLineage) > 0 {
+		opts = append(opts, withCompactionSourceRowLineage(r.workerSourceLineage))
 	}
 	if err := r.txn.replaceFiles(ctx, r.dataFilesToDelete, r.dataFilesToAdd,
 		r.deleteFilesToRemove, r.autoDeleteFilesToRemove, r.deleteFilesToAdd,

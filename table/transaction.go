@@ -1620,6 +1620,13 @@ type dataFileCfg struct {
 	rewriteSemantics             bool
 	equalityDeleteToDVConversion bool
 	dataSequenceNumber           *int64
+	compactionSourceRowLineage   map[string]CompactionSourceRowLineage
+}
+
+func withCompactionSourceRowLineage(lineage map[string]CompactionSourceRowLineage) WriteOption {
+	return func(cfg *dataFileCfg) {
+		cfg.compactionSourceRowLineage = lineage
+	}
 }
 
 // withRewriteSemantics marks an overwrite/replace operation as a
@@ -1872,12 +1879,18 @@ func (t *Transaction) ReplaceDataFiles(ctx context.Context, filesToDelete, files
 	}
 
 	markedForDeletion := make([]iceberg.DataFile, 0, len(setToDelete))
-	for df, err := range s.dataFiles(ctx, fs, nil) {
+	for entry, err := range s.entries(ctx, fs, -1, true) {
 		if err != nil {
 			return err
 		}
 
+		df := entry.DataFile()
 		if _, ok := setToDelete[df.FilePath()]; ok {
+			if lineage, ok := cfg.compactionSourceRowLineage[df.FilePath()]; ok {
+				if err := lineage.validate(entry); err != nil {
+					return err
+				}
+			}
 			markedForDeletion = append(markedForDeletion, df)
 		}
 
@@ -1922,6 +1935,7 @@ func (t *Transaction) ReplaceDataFiles(ctx context.Context, filesToDelete, files
 	for _, df := range markedForDeletion {
 		dvs.removeDataFile(updater, df)
 	}
+	updater.compactionSourceRowLineage = cfg.compactionSourceRowLineage
 
 	for _, df := range filesToAdd {
 		updater.appendDataFile(df)
@@ -2112,6 +2126,11 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 		if isData && isLive {
 			liveDataFiles[path] = rewriteFileState{file: df, dataSequenceNumber: entry.DataSequenceNumber()}
 			if _, ok := setToDelete[path]; ok {
+				if lineage, ok := cfg.compactionSourceRowLineage[path]; ok {
+					if err := lineage.validate(entry); err != nil {
+						return err
+					}
+				}
 				markedDataForDeletion = append(markedDataForDeletion, df)
 			}
 		}
@@ -2331,6 +2350,7 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 	for _, df := range markedDataForDeletion {
 		updater.deleteDataFile(df)
 	}
+	updater.compactionSourceRowLineage = cfg.compactionSourceRowLineage
 	for _, df := range dataFilesToAdd {
 		updater.appendDataFile(df)
 	}

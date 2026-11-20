@@ -730,6 +730,105 @@ func TestCompactionRejectsWorkerResultAfterFirstRowIDsAreAssigned(t *testing.T) 
 	require.ErrorContains(t, err, "replan")
 }
 
+func TestCompactionRejectsStaleSourceRowLineage(t *testing.T) {
+	for _, mode := range []string{"atomic", "partial", "distributed", "retry", "changed sequence only"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx := t.Context()
+			tbl, cat := newConcurrentRewriteTestTableVersion(t, 3)
+			tbl = appendRows(t, tbl, `[{"id":1},{"id":2}]`)
+			tasks, err := tbl.Scan().PlanFiles(ctx)
+			require.NoError(t, err)
+			require.Len(t, tasks, 1)
+			source := tasks[0].File
+
+			var wantIDs, wantSeqs map[int64]int64
+			replaceSource := func() *table.Table {
+				remove := tbl.NewTransaction()
+				require.NoError(t, remove.NewRewrite(nil).DeleteFile(source).Commit(ctx))
+				removed, err := remove.Commit(ctx)
+				require.NoError(t, err)
+
+				readd := removed.NewTransaction()
+				if mode == "changed sequence only" {
+					require.NoError(t, readd.AddDataFiles(ctx, []iceberg.DataFile{source}, nil))
+				} else {
+					require.NoError(t, readd.AddDataFilesByPath(ctx, []string{source.FilePath()}, nil, false))
+				}
+				readded, err := readd.Commit(ctx)
+				require.NoError(t, err)
+				wantIDs = readRowIDsByID(t, ctx, readded)
+				wantSeqs = readLineageColumnByID(t, ctx, readded, iceberg.LastUpdatedSequenceNumberColumnName)
+
+				return readded
+			}
+
+			// Exercise the lineage checks using a task with only the source
+			// file, scan range, and lineage fields.
+			group := table.CompactionTaskGroup{Tasks: []table.FileScanTask{{
+				File:               source,
+				Start:              tasks[0].Start,
+				Length:             tasks[0].Length,
+				FirstRowID:         tasks[0].FirstRowID,
+				DataSequenceNumber: tasks[0].DataSequenceNumber,
+			}}}
+			var current *table.Table
+			if mode == "retry" {
+				cat.beforeCommit = func() { current = replaceSource() }
+				_, err = tbl.RewriteDataFiles(ctx, []table.CompactionTaskGroup{group}, table.RewriteDataFilesOptions{})
+				require.ErrorIs(t, err, table.ErrTransactionUnusable)
+			} else {
+				current = replaceSource()
+				if mode == "distributed" {
+					worker, workerErr := table.ExecuteCompactionGroup(ctx, tbl, group)
+					require.NoError(t, workerErr)
+					err = current.NewTransaction().NewRewrite(nil).ApplyResult(worker).Commit(ctx)
+				} else {
+					_, err = current.RewriteDataFiles(ctx, []table.CompactionTaskGroup{group},
+						table.RewriteDataFilesOptions{PartialProgress: mode == "partial"})
+				}
+			}
+			require.ErrorIs(t, err, table.ErrInvalidOperation)
+			if mode == "changed sequence only" {
+				require.Equal(t, readRowIDsByID(t, ctx, tbl), wantIDs)
+				require.ErrorContains(t, err, "data sequence number")
+			} else {
+				require.NotEqual(t, readRowIDsByID(t, ctx, tbl), wantIDs)
+				require.ErrorContains(t, err, "first row ID")
+			}
+			require.NotEqual(t, readLineageColumnByID(t, ctx, tbl, iceberg.LastUpdatedSequenceNumberColumnName), wantSeqs)
+
+			latest, err := cat.LoadTable(ctx, tbl.Identifier())
+			require.NoError(t, err)
+			require.Equal(t, current.CurrentSnapshot().SnapshotID, latest.CurrentSnapshot().SnapshotID)
+			require.Equal(t, wantIDs, readRowIDsByID(t, ctx, latest))
+			require.Equal(t, wantSeqs, readLineageColumnByID(t, ctx, latest, iceberg.LastUpdatedSequenceNumberColumnName))
+		})
+	}
+}
+
+type compactionDataFileWithoutRowID struct{ iceberg.DataFile }
+
+func (compactionDataFileWithoutRowID) FirstRowID() *int64 { return nil }
+
+func TestCompactionResultUsesEffectiveTaskRowID(t *testing.T) {
+	ctx := t.Context()
+	tbl := appendRows(t, newV3RowLineageTestTable(t), `[{"id":1},{"id":2}]`)
+	tasks, err := tbl.Scan().PlanFiles(ctx)
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	require.NotNil(t, tasks[0].FirstRowID)
+	tasks[0].File = compactionDataFileWithoutRowID{tasks[0].File}
+
+	result, err := table.ExecuteCompactionGroup(ctx, tbl, table.CompactionTaskGroup{Tasks: tasks})
+	require.NoError(t, err)
+	require.Equal(t, tasks[0].FirstRowID, result.SourceRowLineage[tasks[0].File.FilePath()].FirstRowID)
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.NewRewrite(nil).ApplyResult(result).Commit(ctx))
+	rewritten, err := tx.Commit(ctx)
+	require.NoError(t, err)
+	require.Equal(t, readRowIDsByID(t, ctx, tbl), readRowIDsByID(t, ctx, rewritten))
+}
+
 func TestCompactionRejectsV2WorkerOutputAfterMetadataUpgrade(t *testing.T) {
 	tbl := appendRows(t, newV2RowLineageTestTable(t), `[{"id":1},{"id":2}]`)
 	tbl = appendRows(t, tbl, `[{"id":3},{"id":4}]`)

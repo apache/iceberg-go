@@ -140,8 +140,8 @@ type CompactionTaskGroup struct {
 //
 // A distributed coordinator aggregates results from N workers and
 // applies them to a [RewriteFiles] builder via [RewriteFiles.ApplyResult]
-// to commit a single atomic snapshot. Each field is plain data
-// ([]iceberg.DataFile values plus scalars) — callers serialize the
+// to commit a single atomic snapshot. Each field is plain data.
+// Callers serialize the
 // contained DataFiles across process boundaries themselves; the
 // typical pattern is to have the worker write a manifest containing
 // the new files and ship the manifest path to the coordinator, which
@@ -181,6 +181,31 @@ type CompactionGroupResult struct {
 	// PreservedRowLineage reports that the worker wrote v3 row lineage
 	// columns. Preserve it when transferring results to a coordinator.
 	PreservedRowLineage bool
+
+	// SourceRowLineage records the effective lineage used to read each v3
+	// source file, keyed by file path. Preserve it with the worker result.
+	SourceRowLineage map[string]CompactionSourceRowLineage
+}
+
+// CompactionSourceRowLineage describes a source file as read by the worker.
+type CompactionSourceRowLineage struct {
+	FirstRowID         *int64 // nil for a source from a pre-v3 snapshot
+	DataSequenceNumber int64
+}
+
+func (l CompactionSourceRowLineage) validate(entry iceberg.ManifestEntry) error {
+	file := entry.DataFile()
+	actual := file.FirstRowID()
+	if actual != l.FirstRowID && (actual == nil || l.FirstRowID == nil || *actual != *l.FirstRowID) {
+		return fmt.Errorf("%w: first row ID of compaction source %q changed; replan from the target branch",
+			ErrInvalidOperation, file.FilePath())
+	}
+	if entry.DataSequenceNumber() != l.DataSequenceNumber {
+		return fmt.Errorf("%w: data sequence number of compaction source %q changed; replan from the target branch",
+			ErrInvalidOperation, file.FilePath())
+	}
+
+	return nil
 }
 
 // RewriteDataFilesOptions bundles the per-rewrite knobs for
@@ -576,7 +601,7 @@ func (t *Transaction) RewriteDataFiles(ctx context.Context, groups []CompactionT
 // On a v3 table, each task must carry its inherited data sequence number.
 // Once the table has assigned row IDs, standalone workers also require the
 // inherited first row ID. Use a local scan plan where the catalog allows it
-// and preserve the source files' first row IDs when transferring results.
+// and preserve [CompactionGroupResult.SourceRowLineage] in worker results.
 //
 // In-process callers should prefer [Transaction.RewriteDataFiles],
 // which drives this and the commit step in one call.
@@ -694,8 +719,19 @@ func executeCompactionGroup(ctx context.Context, tbl *Table, branch string, grou
 	}
 
 	oldFiles := make([]iceberg.DataFile, 0, len(group.Tasks))
+	var sourceLineage map[string]CompactionSourceRowLineage
+	if preserveLineage {
+		sourceLineage = make(map[string]CompactionSourceRowLineage, len(group.Tasks))
+	}
 	for _, task := range group.Tasks {
 		oldFiles = append(oldFiles, task.File)
+		if preserveLineage {
+			lineage := CompactionSourceRowLineage{DataSequenceNumber: *task.DataSequenceNumber}
+			if task.FirstRowID != nil {
+				lineage.FirstRowID = new(*task.FirstRowID)
+			}
+			sourceLineage[task.File.FilePath()] = lineage
+		}
 	}
 
 	return CompactionGroupResult{
@@ -707,6 +743,7 @@ func executeCompactionGroup(ctx context.Context, tbl *Table, branch string, grou
 		BytesBefore:         group.TotalSizeBytes,
 		BytesAfter:          bytesAfter,
 		PreservedRowLineage: preserveLineage,
+		SourceRowLineage:    sourceLineage,
 	}, nil
 }
 
@@ -910,12 +947,14 @@ func (t *Transaction) rewriteDataFilesPartial(ctx context.Context, groups []Comp
 		}
 		newDataFiles := make([]iceberg.DataFile, 0)
 		oldDataFiles := make([]iceberg.DataFile, 0, len(rewrittenFiles))
+		sourceLineage := make(map[string]CompactionSourceRowLineage)
 		for _, gr := range batchResults {
 			oldDataFiles = append(oldDataFiles, gr.OldDataFiles...)
 			newDataFiles = append(newDataFiles, gr.NewDataFiles...)
+			maps.Copy(sourceLineage, gr.SourceRowLineage)
 		}
 		if err := groupTxn.ReplaceFiles(ctx, oldDataFiles, newDataFiles, deletesToRemove,
-			props, withRewriteSemantics()); err != nil {
+			props, withRewriteSemantics(), withCompactionSourceRowLineage(sourceLineage)); err != nil {
 			return result, cleanupBatch(fmt.Errorf("stage partial rewrite batch: %w", err))
 		}
 

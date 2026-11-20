@@ -820,6 +820,8 @@ type snapshotProducer struct {
 	deletedDVsByRef         map[string]iceberg.DataFile
 	snapshotProps           iceberg.Properties
 	written                 writtenManifests
+
+	compactionSourceRowLineage map[string]CompactionSourceRowLineage
 }
 
 // deleteFileAddition carries the data sequence number of a rewritten delete
@@ -1529,6 +1531,11 @@ func (sp *snapshotProducer) checkRemovedFiles(ctx context.Context, parent *Snaps
 			}
 			df := entry.DataFile()
 			if m.ManifestContent() == iceberg.ManifestContentData {
+				if lineage, ok := sp.compactionSourceRowLineage[df.FilePath()]; ok {
+					if err := lineage.validate(entry); err != nil {
+						return nil, fmt.Errorf("%w: %w: %w", ErrTransactionUnusable, ErrCommitFailed, err)
+					}
+				}
 				delete(missingData, df.FilePath())
 
 				continue
