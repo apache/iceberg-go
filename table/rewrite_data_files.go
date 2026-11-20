@@ -493,6 +493,7 @@ func (t *Transaction) RewriteDataFiles(ctx context.Context, groups []CompactionT
 	if err != nil {
 		return nil, err
 	}
+	snapshotID = t.rewriteStartSnapshotID(snapshotID)
 	checkedHead := t.planningSnapshot(meta)
 	if snapshotID != nil {
 		files, err := compactionSourceFiles(groups)
@@ -910,11 +911,7 @@ func (t *Transaction) rewriteDataFilesPartial(ctx context.Context, groups []Comp
 	if err != nil {
 		return result, err
 	}
-	if snapshotID == nil {
-		if head := latestSnapshotForBranch(current.Metadata(), t.branch); head != nil {
-			snapshotID = &head.SnapshotID
-		}
-	}
+	snapshotID = t.rewriteStartSnapshotID(snapshotID)
 	sources, err := compactionSourceFiles(pendingGroups)
 	if err != nil {
 		return result, err
@@ -1213,6 +1210,18 @@ func validateRewriteConflicts(cc *conflictContext, files []iceberg.DataFile) err
 var errSnapshotHistoryIncompleteForRewrite = errors.New(
 	"cannot validate compaction: history may be incomplete under REST snapshot-loading-mode=refs; reload with snapshot-loading-mode=all",
 )
+
+// rewriteStartSnapshotID uses the transaction's base for plans without provenance.
+func (t *Transaction) rewriteStartSnapshotID(planned *int64) *int64 {
+	if planned != nil {
+		return planned
+	}
+	if base := latestSnapshotForBranch(t.tbl.metadata, t.branch); base != nil {
+		return &base.SnapshotID
+	}
+
+	return nil
+}
 
 // validateRewriteFromSnapshot covers changes already visible when the rewrite
 // is staged. The transaction's existing validators cover subsequent changes

@@ -1023,6 +1023,40 @@ func TestAtomicCompactionRejectsDeleteStagedWhileReading(t *testing.T) {
 	require.ElementsMatch(t, []int64{2}, scanIDs(t, committed))
 }
 
+func TestCompactionRejectsStagedDeleteWithoutPlanningSnapshot(t *testing.T) {
+	for _, mode := range []string{"atomic", "distributed"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx := t.Context()
+			tbl, _ := newConcurrentRewriteTestTable(t)
+			tbl = appendRows(t, tbl, `[{"id":1},{"id":2}]`)
+			tasks, err := tbl.Scan().PlanFiles(ctx)
+			require.NoError(t, err)
+			require.Len(t, tasks, 1)
+			tasks[0].PlanningSnapshotID = nil
+			group := table.CompactionTaskGroup{Tasks: tasks}
+
+			tx := tbl.NewTransaction()
+			del := writeRowDeltaPositionDelete(t, tbl.Location(), "staged", tasks[0].File.FilePath(), []int64{0})
+			require.NoError(t, tx.NewRowDelta(nil).AddDeletes(del).Commit(ctx))
+
+			if mode == "atomic" {
+				_, err = tx.RewriteDataFiles(ctx, []table.CompactionTaskGroup{group}, table.RewriteDataFilesOptions{})
+			} else {
+				worker, workerErr := table.ExecuteCompactionGroup(ctx, tbl, group)
+				require.NoError(t, workerErr)
+				require.Nil(t, worker.PlanningSnapshotID)
+
+				err = tx.NewRewrite(nil).ApplyResult(worker).Commit(ctx)
+			}
+			require.ErrorIs(t, err, table.ErrConflictingDeleteFiles)
+
+			committed, err := tx.Commit(ctx)
+			require.NoError(t, err)
+			require.Equal(t, []int64{2}, scanIDs(t, committed))
+		})
+	}
+}
+
 func TestCompactionRejectsReaddedSourcePath(t *testing.T) {
 	for _, mode := range []string{"atomic", "partial", "distributed", "retry"} {
 		t.Run(mode, func(t *testing.T) {
@@ -1121,6 +1155,32 @@ func TestCompactionRejectsConcurrentChangeToNewBranchParent(t *testing.T) {
 	require.NoError(t, err)
 	require.Nil(t, latest.SnapshotByName(branch))
 	require.ElementsMatch(t, []int64{2, 3, 4}, scanIDs(t, latest))
+}
+
+func TestCompactionOnExplicitNewBranchAllowsMainAppend(t *testing.T) {
+	ctx := t.Context()
+	tbl, cat := newConcurrentRewriteTestTable(t)
+	tbl = appendRows(t, tbl, `[{"id":1}]`)
+	tbl = appendRowsOnRef(t, tbl, "source", 2, 3)
+
+	scan, err := tbl.Scan().UseRef("source")
+	require.NoError(t, err)
+	defer scan.Close()
+	tasks, err := scan.PlanFiles(ctx)
+	require.NoError(t, err)
+
+	tx, err := tbl.NewTransactionOnBranch("compacted")
+	require.NoError(t, err)
+	require.NoError(t, tx.ReplaceBranchFromRef("compacted", "source"))
+	_, err = tx.RewriteDataFiles(ctx, []table.CompactionTaskGroup{{Tasks: tasks}}, table.RewriteDataFilesOptions{})
+	require.NoError(t, err)
+
+	cat.beforeCommit = func() { appendRows(t, tbl, `[{"id":4}]`) }
+	committed, err := tx.Commit(ctx)
+	require.NoError(t, err)
+	require.ElementsMatch(t, []int64{1, 4}, scanIDs(t, committed))
+	require.ElementsMatch(t, []int64{1, 2, 3}, idsOnRef(t, committed, "compacted"))
+	require.Equal(t, committed.SnapshotByName("source").SnapshotID, *committed.SnapshotByName("compacted").ParentSnapshotID)
 }
 
 func TestRejectedCompactionDoesNotPinNewBranch(t *testing.T) {

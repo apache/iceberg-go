@@ -97,9 +97,9 @@ func (t *Transaction) NewRewrite(snapshotProps iceberg.Properties) *RewriteFiles
 // committed after this snapshot. Worker results supplied through
 // [RewriteFiles.ApplyResult] must agree with the snapshot when they carry
 // their own planning snapshot ID.
-// Without an explicit ID or any worker snapshot IDs, validation starts at
-// the transaction's base. Supply the original planning snapshot explicitly
-// when using legacy worker results planned before the transaction began.
+// Legacy worker results without an ID are validated from the transaction's
+// base. Supply an explicit snapshot for results planned at a different point,
+// or for rewrites assembled from individual files that need this check.
 func (r *RewriteFiles) ValidateFromSnapshot(snapshotID int64) *RewriteFiles {
 	r.planningSnapshotID = &snapshotID
 
@@ -313,11 +313,38 @@ func (t *Transaction) applyRewriteLocked(updates []Update, reqs []Requirement, r
 		return t.applyLocked(updates, reqs)
 	}
 
-	// A new branch inherits main. Pin both refs alongside the rewrite so a
-	// failed rewrite cannot leave a requirement on other transaction work.
+	if !t.rewriteNeedsMainRequirement() {
+		return t.applyLocked(updates, reqs)
+	}
+
+	// Pin both refs alongside the rewrite to keep the inherited parent stable.
 	reqs = append(reqs, AssertRefSnapshotID(MainBranch, t.baseRefSnapshotID(MainBranch)))
 
 	return t.applyPinnedLocked(updates, reqs, []string{t.branch, MainBranch})
+}
+
+// A new branch inherits main when a snapshot is staged before its ref is set.
+// An explicit ref assignment tells replay where to start the branch.
+func (t *Transaction) rewriteNeedsMainRequirement() bool {
+	var branchExists bool
+	for _, update := range t.meta.updates {
+		switch u := update.(type) {
+		case *addSnapshotUpdate:
+			if !branchExists {
+				return true
+			}
+		case *setSnapshotRefUpdate:
+			if u.RefName == t.branch {
+				branchExists = true
+			}
+		case *removeSnapshotRefUpdate:
+			if u.RefName == t.branch {
+				branchExists = false
+			}
+		}
+	}
+
+	return !branchExists
 }
 
 func (r *RewriteFiles) applyResult(gr CompactionGroupResult) *RewriteFiles {
@@ -375,6 +402,12 @@ func (r *RewriteFiles) Commit(ctx context.Context) error {
 	snapshotID, err := r.workerSnapshots.resolve(r.planningSnapshotID)
 	if err != nil {
 		return err
+	}
+	if snapshotID == nil && r.workerSnapshots.missing {
+		if _, err := r.txn.txnMeta(); err != nil {
+			return err
+		}
+		snapshotID = r.txn.rewriteStartSnapshotID(nil)
 	}
 	opts := []WriteOption{withRewriteSemantics(), func(cfg *dataFileCfg) { cfg.rewriteFromSnapshotID = snapshotID }}
 	if r.dataSequenceNumber != nil {

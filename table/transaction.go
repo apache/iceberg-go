@@ -370,17 +370,15 @@ func (t *Transaction) planningSnapshot(meta *MetadataBuilder) *Snapshot {
 	return meta.currentSnapshotForRef(t.branch)
 }
 
-// checkRewriteParentLocked keeps the parent inspected by a snapshot-validated
-// rewrite stable through manifest writing and staging. The caller holds t.mx.
-func (t *Transaction) checkRewriteParentLocked(cfg dataFileCfg, expected *Snapshot) error {
+// checkRewriteParentLocked keeps the inspected parent stable through manifest
+// writing and staging. The caller holds t.mx.
+func (t *Transaction) checkRewriteParentLocked(expected *Snapshot) error {
 	if err := t.checkUsable(); err != nil {
 		return err
 	}
-	if cfg.rewriteFromSnapshotID != nil {
-		head := t.planningSnapshot(t.meta)
-		if head == nil || head.SnapshotID != expected.SnapshotID {
-			return fmt.Errorf("%w: transaction head changed while staging the rewrite; retry from the staged snapshot", ErrCommitFailed)
-		}
+	head := t.planningSnapshot(t.meta)
+	if head == nil || head.SnapshotID != expected.SnapshotID {
+		return fmt.Errorf("%w: transaction head changed while staging the rewrite; replan from the target branch", ErrCommitFailed)
 	}
 
 	return nil
@@ -1936,7 +1934,7 @@ func (t *Transaction) ReplaceDataFiles(ctx context.Context, filesToDelete, files
 
 	t.mx.Lock()
 	defer t.mx.Unlock()
-	if err := t.checkRewriteParentLocked(cfg, s); err != nil {
+	if err := t.checkRewriteParentLocked(s); err != nil {
 		return err
 	}
 
@@ -2350,7 +2348,7 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 
 	t.mx.Lock()
 	defer t.mx.Unlock()
-	if err := t.checkRewriteParentLocked(cfg, s); err != nil {
+	if err := t.checkRewriteParentLocked(s); err != nil {
 		return err
 	}
 
