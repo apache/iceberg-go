@@ -370,6 +370,20 @@ func (t *Transaction) planningSnapshot(meta *MetadataBuilder) *Snapshot {
 	return meta.currentSnapshotForRef(t.branch)
 }
 
+// checkRewriteParentLocked keeps the inspected parent stable through manifest
+// writing and staging. The caller holds t.mx.
+func (t *Transaction) checkRewriteParentLocked(expected *Snapshot) error {
+	if err := t.checkUsable(); err != nil {
+		return err
+	}
+	head := t.planningSnapshot(t.meta)
+	if head == nil || head.SnapshotID != expected.SnapshotID {
+		return fmt.Errorf("%w: transaction head changed while staging the rewrite; replan from the target branch", ErrCommitFailed)
+	}
+
+	return nil
+}
+
 // transactionRequirements returns the requirements a commit on branch must carry.
 // The result is always a fresh allocation, never aliasing reqs, so callers may append to it
 // while holding the transaction lock.
@@ -1620,6 +1634,22 @@ type dataFileCfg struct {
 	rewriteSemantics             bool
 	equalityDeleteToDVConversion bool
 	dataSequenceNumber           *int64
+	// Keep dataFileCfg comparable because it is part of WriteOption's signature.
+	compactionSourceRowLineage *map[string]CompactionSourceRowLineage
+}
+
+func (cfg dataFileCfg) compactionLineage() map[string]CompactionSourceRowLineage {
+	if cfg.compactionSourceRowLineage == nil {
+		return nil
+	}
+
+	return *cfg.compactionSourceRowLineage
+}
+
+func withCompactionSourceRowLineage(lineage map[string]CompactionSourceRowLineage) WriteOption {
+	return func(cfg *dataFileCfg) {
+		cfg.compactionSourceRowLineage = &lineage
+	}
 }
 
 // withRewriteSemantics marks an overwrite/replace operation as a
@@ -1872,12 +1902,18 @@ func (t *Transaction) ReplaceDataFiles(ctx context.Context, filesToDelete, files
 	}
 
 	markedForDeletion := make([]iceberg.DataFile, 0, len(setToDelete))
-	for df, err := range s.dataFiles(ctx, fs, nil) {
+	for entry, err := range s.entries(ctx, fs, -1, true) {
 		if err != nil {
 			return err
 		}
 
+		df := entry.DataFile()
 		if _, ok := setToDelete[df.FilePath()]; ok {
+			if lineage, ok := cfg.compactionLineage()[df.FilePath()]; ok {
+				if err := lineage.validate(entry); err != nil {
+					return err
+				}
+			}
 			markedForDeletion = append(markedForDeletion, df)
 		}
 
@@ -1910,6 +1946,12 @@ func (t *Transaction) ReplaceDataFiles(ctx context.Context, filesToDelete, files
 		op = OpReplace
 	}
 
+	t.mx.Lock()
+	defer t.mx.Unlock()
+	if err := t.checkRewriteParentLocked(s); err != nil {
+		return err
+	}
+
 	commitUUID := uuid.New()
 	updater := t.updateSnapshot(wfs, snapshotProps, op).mergeOverwrite(&commitUUID, nil)
 	if cfg.rewriteSemantics {
@@ -1922,6 +1964,7 @@ func (t *Transaction) ReplaceDataFiles(ctx context.Context, filesToDelete, files
 	for _, df := range markedForDeletion {
 		dvs.removeDataFile(updater, df)
 	}
+	updater.compactionSourceRowLineage = cfg.compactionLineage()
 
 	for _, df := range filesToAdd {
 		updater.appendDataFile(df)
@@ -1932,10 +1975,6 @@ func (t *Transaction) ReplaceDataFiles(ctx context.Context, filesToDelete, files
 		return err
 	}
 
-	// Keep validator registration atomic with staging so Commit cannot run
-	// between the two.
-	t.mx.Lock()
-	defer t.mx.Unlock()
 	if err := t.applyLocked(updates, reqs); err != nil {
 		return err
 	}
@@ -2112,6 +2151,11 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 		if isData && isLive {
 			liveDataFiles[path] = rewriteFileState{file: df, dataSequenceNumber: entry.DataSequenceNumber()}
 			if _, ok := setToDelete[path]; ok {
+				if lineage, ok := cfg.compactionLineage()[path]; ok {
+					if err := lineage.validate(entry); err != nil {
+						return err
+					}
+				}
 				markedDataForDeletion = append(markedDataForDeletion, df)
 			}
 		}
@@ -2319,6 +2363,12 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 		op = OpReplace
 	}
 
+	t.mx.Lock()
+	defer t.mx.Unlock()
+	if err := t.checkRewriteParentLocked(s); err != nil {
+		return err
+	}
+
 	commitUUID := uuid.New()
 	updater := t.updateSnapshot(wfs, snapshotProps, op).mergeOverwrite(&commitUUID, nil)
 	if cfg.rewriteSemantics {
@@ -2331,6 +2381,7 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 	for _, df := range markedDataForDeletion {
 		updater.deleteDataFile(df)
 	}
+	updater.compactionSourceRowLineage = cfg.compactionLineage()
 	for _, df := range dataFilesToAdd {
 		updater.appendDataFile(df)
 	}
@@ -2366,10 +2417,6 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 		validator = rewriteValidator(markedDataForDeletion)
 	}
 
-	// Keep validator registration atomic with staging so Commit cannot run
-	// between the two.
-	t.mx.Lock()
-	defer t.mx.Unlock()
 	if err := t.applyLocked(updates, reqs); err != nil {
 		return err
 	}

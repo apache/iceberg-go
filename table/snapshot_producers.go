@@ -820,6 +820,8 @@ type snapshotProducer struct {
 	deletedDVsByRef         map[string]iceberg.DataFile
 	snapshotProps           iceberg.Properties
 	written                 writtenManifests
+
+	compactionSourceRowLineage map[string]CompactionSourceRowLineage
 }
 
 // deleteFileAddition carries the data sequence number of a rewritten delete
@@ -1529,6 +1531,11 @@ func (sp *snapshotProducer) checkRemovedFiles(ctx context.Context, parent *Snaps
 			}
 			df := entry.DataFile()
 			if m.ManifestContent() == iceberg.ManifestContentData {
+				if lineage, ok := sp.compactionSourceRowLineage[df.FilePath()]; ok {
+					if err := lineage.validate(entry); err != nil {
+						return nil, fmt.Errorf("%w: %w: %w", ErrTransactionUnusable, ErrCommitFailed, err)
+					}
+				}
 				delete(missingData, df.FilePath())
 
 				continue
@@ -1650,6 +1657,15 @@ func writeManifestListFile(
 // before anything is written (RewriteManifests detecting a no-op) can build the
 // manifests themselves and only then decide to write the manifest list.
 func (sp *snapshotProducer) commitManifests(ctx context.Context, newManifests, addedContent []iceberg.ManifestFile) (_ []Update, _ []Requirement, err error) {
+	var replacesRowsWithoutLineage bool
+	if sp.op == OpReplace && len(sp.deletedFiles) > 0 && len(sp.addedFiles) > 0 {
+		parent, err := sp.parentSnapshot()
+		if err != nil {
+			return nil, nil, err
+		}
+		replacesRowsWithoutLineage = parent != nil && parent.FirstRowID == nil
+	}
+
 	nextSequence := sp.txn.meta.nextSequenceNumber()
 	summary, err := sp.summary(sp.snapshotProps)
 	if err != nil {
@@ -1754,6 +1770,10 @@ func (sp *snapshotProducer) commitManifests(ctx context.Context, newManifests, a
 		// parent would duplicate rows, so abort terminally. The scan also
 		// reports which removed delete files / DVs survive on the fresh parent
 		// so the summary below does not double-subtract a peer's prior removal.
+		if replacesRowsWithoutLineage && freshParent != nil && freshParent.FirstRowID != nil {
+			return nil, fmt.Errorf("%w: %w: the rewrite's source rows were assigned v3 row IDs after planning; replan from the target branch",
+				ErrTransactionUnusable, ErrCommitFailed)
+		}
 		present, err := sp.checkRemovedFiles(rebuildCtx, freshParent)
 		if err != nil {
 			return nil, err

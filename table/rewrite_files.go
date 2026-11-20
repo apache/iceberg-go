@@ -67,6 +67,10 @@ type RewriteFiles struct {
 	snapshotProps           iceberg.Properties
 	err                     error
 	committed               bool
+
+	workerSourceLineage        map[string]CompactionSourceRowLineage
+	workerSourceWithoutLineage string
+	workerLineageUnverified    bool
 }
 
 type rewriteDeleteFileAddition struct {
@@ -283,9 +287,24 @@ func (r *RewriteFiles) AddFile(df iceberg.DataFile) *RewriteFiles {
 //	    rewrite.ApplyResult(gr)
 //	}
 //	if err := rewrite.Commit(ctx); err != nil { ... }
+//
+// For v3 rewrites, results must carry [CompactionGroupResult.SourceRowLineage]
+// and set [CompactionGroupResult.PreservedRowLineage].
 func (r *RewriteFiles) ApplyResult(gr CompactionGroupResult) *RewriteFiles {
 	for _, df := range gr.OldDataFiles {
 		r.DeleteFile(df)
+		if r.err != nil {
+			return r
+		}
+		path := df.FilePath()
+		if lineage, ok := gr.SourceRowLineage[path]; ok {
+			if r.workerSourceLineage == nil {
+				r.workerSourceLineage = make(map[string]CompactionSourceRowLineage)
+			}
+			r.workerSourceLineage[path] = lineage
+		} else if r.workerSourceWithoutLineage == "" {
+			r.workerSourceWithoutLineage = path
+		}
 	}
 	for _, df := range gr.NewDataFiles {
 		r.AddFile(df)
@@ -296,6 +315,9 @@ func (r *RewriteFiles) ApplyResult(gr CompactionGroupResult) *RewriteFiles {
 	}
 	for _, df := range gr.SafeDeletionVectors {
 		r.removeAutomaticDeleteFile(df)
+	}
+	if (len(gr.OldDataFiles) > 0 || len(gr.NewDataFiles) > 0) && !gr.PreservedRowLineage {
+		r.workerLineageUnverified = true
 	}
 
 	return r
@@ -334,10 +356,16 @@ func (r *RewriteFiles) Commit(ctx context.Context) error {
 	if len(r.dataFilesToDelete) == 0 && len(r.dataFilesToAdd) > 0 {
 		return fmt.Errorf("%w: rewrite must delete at least one data file when adding data files", ErrInvalidOperation)
 	}
+	if err := r.validateWorkerLineage(); err != nil {
+		return err
+	}
 
 	opts := []WriteOption{withRewriteSemantics()}
 	if r.dataSequenceNumber != nil {
 		opts = append(opts, withDataSequenceNumber(*r.dataSequenceNumber))
+	}
+	if len(r.workerSourceLineage) > 0 {
+		opts = append(opts, withCompactionSourceRowLineage(r.workerSourceLineage))
 	}
 	if err := r.txn.replaceFiles(ctx, r.dataFilesToDelete, r.dataFilesToAdd,
 		r.deleteFilesToRemove, r.autoDeleteFilesToRemove, r.deleteFilesToAdd,

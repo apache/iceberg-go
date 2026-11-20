@@ -1132,12 +1132,25 @@ func newCompactedDataFile(t *testing.T, tbl *table.Table, path string, recordCou
 
 // compactWithDeletes swaps data for compacted and removes dels, either through
 // ReplaceFiles or, when automatic is set, through RewriteFiles.
-func compactWithDeletes(ctx context.Context, tx *table.Transaction, automatic bool, data, compacted, dels []iceberg.DataFile) error {
+func compactWithDeletes(t *testing.T, tbl *table.Table, tx *table.Transaction, automatic bool, data, compacted, dels []iceberg.DataFile) error {
+	t.Helper()
+	ctx := t.Context()
 	if !automatic {
 		return tx.ReplaceFiles(ctx, data, compacted, dels, nil)
 	}
 
-	result := table.CompactionGroupResult{OldDataFiles: data, NewDataFiles: compacted}
+	// The fixture uses metadata-only files and exercises the commit path.
+	result := table.CompactionGroupResult{OldDataFiles: data, NewDataFiles: compacted, PreservedRowLineage: true}
+	if tbl.Metadata().FormatVersion() >= 3 {
+		result.SourceRowLineage = make(map[string]table.CompactionSourceRowLineage, len(data))
+		for _, source := range data {
+			entry := currentManifestEntry(t, tbl, source.FilePath())
+			result.SourceRowLineage[source.FilePath()] = table.CompactionSourceRowLineage{
+				FirstRowID:         entry.DataFile().FirstRowID(),
+				DataSequenceNumber: entry.DataSequenceNumber(),
+			}
+		}
+	}
 	for _, del := range dels {
 		if table.IsDeletionVector(del) {
 			result.SafeDeletionVectors = append(result.SafeDeletionVectors, del)
@@ -1247,7 +1260,7 @@ func TestReplaceFilesRejectsDeleteFileRemovedByCurrentSnapshot(t *testing.T) {
 
 			compacted := newCompactedDataFile(t, tbl, tbl.Location()+"/data/compacted.parquet", 1)
 			before := metadataFileCount(t, tbl)
-			err = compactWithDeletes(t.Context(), tbl.NewTransaction(), tt.automatic,
+			err = compactWithDeletes(t, tbl, tbl.NewTransaction(), tt.automatic,
 				[]iceberg.DataFile{data}, []iceberg.DataFile{compacted}, []iceberg.DataFile{del})
 			assert.ErrorContains(t, err, tt.wantErr)
 			assert.Equal(t, before, metadataFileCount(t, tbl), "a rejected replace must not write manifests")
@@ -1263,7 +1276,7 @@ func TestReplaceFilesRejectsDeletionVectorSupersededByCurrentSnapshot(t *testing
 		return func(t *testing.T, tx *table.Transaction, tbl *table.Table, task table.FileScanTask, superseded iceberg.DataFile) error {
 			compacted := newCompactedDataFile(t, tbl, tbl.Location()+"/data/compacted.parquet", 4)
 
-			return compactWithDeletes(t.Context(), tx, automatic,
+			return compactWithDeletes(t, tbl, tx, automatic,
 				[]iceberg.DataFile{task.File}, []iceberg.DataFile{compacted}, []iceberg.DataFile{superseded})
 		}
 	}
