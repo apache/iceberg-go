@@ -147,10 +147,10 @@ var ErrCommitDiverged = errors.New("commit diverged: base snapshot is no longer 
 // a new transaction built from a reloaded table may succeed.
 var ErrConflictingDataFiles = fmt.Errorf("%w: concurrent data files added", ErrCommitFailed)
 
-// ErrDuplicateDataFiles is returned when a RowDelta adds the same data file
-// path twice or when a retry finds a concurrent addition of that path still
-// live. It does not wrap ErrCommitFailed: refreshing the table alone cannot
-// resolve a collision. The caller must use a different data file path.
+// ErrDuplicateDataFiles is returned when a writer stages duplicate data paths
+// or a retry finds a concurrent addition of a staged path still live.
+// It does not wrap ErrCommitFailed: a refresh cannot resolve the collision.
+// The caller must use a different data file path.
 var ErrDuplicateDataFiles = errors.New("duplicate data file path")
 
 // ErrConflictingDeleteFiles is returned when a concurrent commit added
@@ -620,6 +620,64 @@ func validateDataFilesExist(cc *conflictContext, referencedPaths []string) error
 	}
 
 	return dataFilesMissingError(missing, "missing")
+}
+
+type replayDataPathCheck struct {
+	paths          map[string]struct{}
+	includeDeletes bool
+}
+
+// validate checks the live files in the parent a replay will
+// inherit. Staging already checked the original parent's immutable manifests,
+// so only manifests newly referenced by the replay parent need to be opened.
+func (check replayDataPathCheck) validate(ctx context.Context, fs iceio.IO, original, parent *Snapshot) error {
+	if len(check.paths) == 0 || parent == nil ||
+		(original != nil && original.ManifestList != "" && original.ManifestList == parent.ManifestList) {
+		return nil
+	}
+
+	var checked map[string]struct{}
+	if original != nil {
+		// The original snapshot may have expired. If its list is unavailable,
+		// scan the replay parent without pruning.
+		if manifests, err := original.Manifests(ctx, fs); err == nil {
+			checked = make(map[string]struct{}, len(manifests))
+			for _, manifest := range manifests {
+				checked[manifest.FilePath()] = struct{}{}
+			}
+		}
+	}
+
+	manifests, err := parent.Manifests(ctx, fs)
+	if err != nil {
+		return fmt.Errorf("read manifests for replay parent %d: %w", parent.SnapshotID, err)
+	}
+	conflict := ErrDuplicateDataFiles
+	if check.includeDeletes {
+		conflict = ErrConflictingDataFiles
+	}
+	for _, manifest := range manifests {
+		if !check.includeDeletes && manifest.ManifestContent() != iceberg.ManifestContentData {
+			continue
+		}
+		if _, ok := checked[manifest.FilePath()]; ok {
+			continue
+		}
+		for entry, err := range manifest.Entries(ctx, fs, true) {
+			if err != nil {
+				return fmt.Errorf("read entries for replay parent %d: %w", parent.SnapshotID, err)
+			}
+			path := entry.DataFile().FilePath()
+			if _, exists := check.paths[path]; !exists {
+				continue
+			}
+
+			return fmt.Errorf("%w: %w: replay parent %d already references file %q",
+				ErrTransactionUnusable, conflict, parent.SnapshotID, path)
+		}
+	}
+
+	return nil
 }
 
 // validateNoConcurrentDVs returns an error wrapping ErrConflictingDeleteFiles
