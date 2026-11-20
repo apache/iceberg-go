@@ -966,6 +966,53 @@ func TestCompactionRejectsDeletesCommittedBeforeTransaction(t *testing.T) {
 	}
 }
 
+func TestCompactionRejectsMixedPlanningSnapshots(t *testing.T) {
+	ctx := t.Context()
+	tbl, _ := newConcurrentRewriteTestTable(t)
+	tbl = appendRows(t, tbl, `[{"id":1}]`)
+	scan := tbl.Scan()
+	defer scan.Close()
+	older, err := scan.PlanFiles(ctx)
+	require.NoError(t, err)
+	require.Len(t, older, 1)
+
+	tbl = appendRows(t, tbl, `[{"id":2}]`)
+	newerScan := tbl.Scan(table.WithRowFilter(iceberg.EqualTo(iceberg.Reference("id"), int64(2))))
+	defer newerScan.Close()
+	newer, err := newerScan.PlanFiles(ctx)
+	require.NoError(t, err)
+	require.Len(t, newer, 1)
+	require.NotEqual(t, older[0].File.FilePath(), newer[0].File.FilePath())
+	require.NotNil(t, older[0].PlanningSnapshotID)
+	require.NotNil(t, newer[0].PlanningSnapshotID)
+	require.NotEqual(t, *older[0].PlanningSnapshotID, *newer[0].PlanningSnapshotID)
+
+	before := parquetFiles(t, tbl.Location())
+	_, err = table.ExecuteCompactionGroup(ctx, tbl,
+		table.CompactionTaskGroup{Tasks: []table.FileScanTask{older[0], newer[0]}})
+	require.ErrorIs(t, err, table.ErrInvalidOperation)
+	require.ErrorContains(t, err, "mixes planning snapshots")
+
+	_, err = tbl.RewriteDataFiles(ctx, []table.CompactionTaskGroup{{Tasks: older}, {Tasks: newer}},
+		table.RewriteDataFilesOptions{})
+	require.ErrorIs(t, err, table.ErrInvalidOperation)
+	require.ErrorContains(t, err, "mixes planning snapshots")
+	require.ElementsMatch(t, before, parquetFiles(t, tbl.Location()))
+
+	first, err := table.ExecuteCompactionGroup(ctx, tbl, table.CompactionTaskGroup{Tasks: older})
+	require.NoError(t, err)
+	second, err := table.ExecuteCompactionGroup(ctx, tbl, table.CompactionTaskGroup{Tasks: newer})
+	require.NoError(t, err)
+	tx := tbl.NewTransaction()
+	err = tx.NewRewrite(nil).ApplyResult(first).ApplyResult(second).Commit(ctx)
+	require.ErrorIs(t, err, table.ErrInvalidOperation)
+	require.ErrorContains(t, err, "mixes planning snapshots")
+
+	err = tx.NewRewrite(nil).ValidateFromSnapshot(*newer[0].PlanningSnapshotID).ApplyResult(first).Commit(ctx)
+	require.ErrorIs(t, err, table.ErrInvalidOperation)
+	require.ErrorContains(t, err, "differs from validation snapshot")
+}
+
 type compactionSourceOpenHook struct {
 	iceio.LocalFS
 	path   string
