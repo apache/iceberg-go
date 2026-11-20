@@ -18,13 +18,10 @@
 package table_test
 
 import (
-	"context"
-	"path/filepath"
 	"strconv"
 	"testing"
 
 	"github.com/apache/iceberg-go"
-	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
 	"github.com/stretchr/testify/require"
 )
@@ -36,33 +33,16 @@ import (
 func newAddFilesConflictTable(t *testing.T, version int, numRetries string) (*table.Table, *concurrentTestCatalog, string) {
 	t.Helper()
 
-	location := filepath.ToSlash(t.TempDir())
-	schema := iceberg.NewSchema(0,
-		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
-		iceberg.NestedField{ID: 2, Name: "data", Type: iceberg.PrimitiveTypes.String, Required: false},
-	)
-
-	meta, err := table.NewMetadata(schema, iceberg.UnpartitionedSpec, table.UnsortedSortOrder, location,
-		iceberg.Properties{
-			table.PropertyFormatVersion:        strconv.Itoa(version),
-			table.CommitNumRetriesKey:          numRetries,
-			table.CommitMinRetryWaitMsKey:      "1",
-			table.CommitMaxRetryWaitMsKey:      "2",
-			table.CommitTotalRetryTimeoutMsKey: "1000",
-		})
-	require.NoError(t, err)
-
-	metaLoc := location + "/metadata/v1.metadata.json"
-	fsF := func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil }
-	cat := &concurrentTestCatalog{metadata: meta, location: metaLoc, fsF: fsF}
-	tbl := table.New(table.Identifier{"db", "add_files_conflict"}, meta, metaLoc, fsF, cat)
+	tbl, cat := newConcurrentRewriteTestTableVersion(t, version)
 
 	arrowSc, err := table.SchemaToArrowSchema(tbl.Schema(), nil, false, false)
 	require.NoError(t, err)
 
+	location := tbl.Location()
 	seed := location + "/data/a.parquet"
 	writeParquetFile(t, seed, arrowSc, `[{"id": 0, "data": "a"}]`)
 	tx := tbl.NewTransaction()
+	require.NoError(t, tx.SetProperties(iceberg.Properties{table.CommitNumRetriesKey: numRetries}))
 	require.NoError(t, tx.AddDataFilesByPath(t.Context(), []string{seed}, nil, false))
 	tbl, err = tx.Commit(t.Context())
 	require.NoError(t, err)
@@ -77,7 +57,7 @@ func newAddFilesConflictTable(t *testing.T, version int, numRetries string) (*ta
 func loadCurrent(t *testing.T, cat *concurrentTestCatalog) *table.Table {
 	t.Helper()
 
-	tbl, err := cat.LoadTable(t.Context(), table.Identifier{"db", "add_files_conflict"})
+	tbl, err := cat.LoadTable(t.Context(), table.Identifier{"db", "concurrent_rewrite"})
 	require.NoError(t, err)
 
 	return tbl
