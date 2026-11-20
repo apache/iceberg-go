@@ -2695,7 +2695,7 @@ func TestInspectPartitionsPromotedIdentitySource(t *testing.T) {
 			}
 			tbl := inspectTableWithManifestListAndSchemas(t, oldSchema, newSchema, spec, 2, manifests)
 
-			rr, err := tbl.Inspect().Partitions(t.Context())
+			rr, err := Partitions(t.Context(), tbl)
 			require.NoError(t, err)
 			defer rr.Release()
 			record := collectRecord(t, rr)
@@ -2706,7 +2706,7 @@ func TestInspectPartitionsPromotedIdentitySource(t *testing.T) {
 			require.Equal(t, tt.records, record.Column(2).(*array.Int64).Value(0))
 			require.Equal(t, tt.files, record.Column(3).(*array.Int32).Value(0))
 
-			files, err := tbl.Inspect().Files(t.Context())
+			files, err := Files(t.Context(), tbl)
 			require.NoError(t, err)
 			defer files.Release()
 			var fileRows int64
