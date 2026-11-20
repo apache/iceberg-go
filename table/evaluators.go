@@ -979,10 +979,16 @@ func intBackedDecimal(descr *parquetschema.Column) bool {
 }
 
 // parquetStatsBounds converts a Parquet column chunk's min/max statistics into
-// Iceberg bound bytes. Any evaluator that populates bounds from raw Parquet
-// statistics must go through here rather than calling EncodeMin/EncodeMax
-// directly, or int-backed decimals silently prune rows that match.
-func parquetStatsBounds(stats metadata.TypedStatistics) (lower, upper []byte) {
+// Iceberg bound bytes, reporting false when the statistics carry no usable min
+// and max. Any evaluator that populates bounds from raw Parquet statistics must
+// go through here rather than calling EncodeMin/EncodeMax directly, or
+// int-backed decimals and millisecond timestamps silently prune rows that match.
+func parquetStatsBounds(stats metadata.TypedStatistics) (lower, upper []byte, ok bool) {
+	stats = internal.TimestampMillisAsMicros(stats)
+	if !stats.HasMinMax() {
+		return nil, nil, false
+	}
+
 	lower, upper = stats.EncodeMin(), stats.EncodeMax()
 	if intBackedDecimal(stats.Descr()) {
 		// EncodeMin/EncodeMax return fresh buffers, so reversing in place is safe.
@@ -992,7 +998,7 @@ func parquetStatsBounds(stats metadata.TypedStatistics) (lower, upper []byte) {
 		slices.Reverse(upper)
 	}
 
-	return lower, upper
+	return lower, upper, true
 }
 
 func (m *inclusiveMetricsEval) TestRowGroup(rgmeta *metadata.RowGroupMetaData, colIndices []int) (bool, error) {
@@ -1042,14 +1048,13 @@ func (m *inclusiveMetricsEval) TestRowGroup(rgmeta *metadata.RowGroupMetaData, c
 		if stats.HasNullCount() {
 			m.nullCounts[fieldID] = stats.NullCount()
 		}
-		if stats.HasMinMax() {
+		if lower, upper, ok := parquetStatsBounds(stats); ok {
 			if m.lowerBounds == nil {
 				// Lower and upper bounds are always allocated together.
 				m.lowerBounds = make(map[int][]byte, len(colIndices))
 				m.upperBounds = make(map[int][]byte, len(colIndices))
 			}
 
-			lower, upper := parquetStatsBounds(stats)
 			m.lowerBounds[fieldID] = lower
 			m.upperBounds[fieldID] = upper
 		}
