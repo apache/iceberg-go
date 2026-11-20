@@ -1663,7 +1663,9 @@ func fileScanTaskForDataEntry(
 // list of FileScanTasks that match the current Scan criteria. When planning
 // happens locally it times the whole operation and emits a ScanReport to the
 // scan's reporter on success; remote (server-side) planning reports its own
-// metrics and does not emit here.
+// metrics and does not emit here. Tasks identify their planning snapshot in
+// [FileScanTask.PlanningSnapshotID]. A loaded table without a snapshot has no
+// tasks to plan, even if a remote planner could see a newer snapshot.
 func (scan *Scan) PlanFiles(ctx context.Context) ([]FileScanTask, error) {
 	return scan.planFiles(ctx, false)
 }
@@ -1968,9 +1970,11 @@ func (scan *Scan) planFilesRemote(ctx context.Context, recordPlanningSnapshot bo
 	if recordPlanningSnapshot && snapshotID == nil && scan.metadata != nil {
 		// Pin the request to the loaded snapshot so its tasks identify the
 		// snapshot they read even if the server's table has advanced.
-		if snap := scan.metadata.CurrentSnapshot(); snap != nil {
-			snapshotID = &snap.SnapshotID
+		snap := scan.metadata.CurrentSnapshot()
+		if snap == nil {
+			return nil, scan.closePlanIO()
 		}
+		snapshotID = &snap.SnapshotID
 	}
 	result, err := scan.planner.PlanFiles(ctx, ScanPlanningRequest{
 		Identifier:        slices.Clone(scan.identifier),
