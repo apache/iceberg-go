@@ -24,11 +24,16 @@ import (
 	"math"
 	"testing"
 
+	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/compute"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/arrow-go/v18/parquet"
 	"github.com/apache/arrow-go/v18/parquet/file"
 	"github.com/apache/arrow-go/v18/parquet/metadata"
+	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	"github.com/apache/arrow-go/v18/parquet/schema"
+	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/table/internal"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -246,4 +251,200 @@ func TestTimestampMillisAsMicros(t *testing.T) {
 			})
 		}
 	})
+}
+
+func openCheckedParquetReader(t testing.TB, alloc memory.Allocator, data []byte) internal.FileReader {
+	t.Helper()
+
+	pqRdr, err := file.NewParquetReader(bytes.NewReader(data),
+		file.WithReadProps(parquet.NewReaderProperties(alloc)))
+	require.NoError(t, err)
+
+	arrRdr, err := pqarrow.NewFileReader(pqRdr, pqarrow.ArrowReadProperties{}, alloc)
+	require.NoError(t, err)
+
+	return internal.WrapParquetFileReader(arrRdr)
+}
+
+func TestTimestampMillisGetRecordsOverflowReturnsError(t *testing.T) {
+	tests := []struct {
+		name string
+		val  int64
+	}{
+		{"positive overflow", math.MaxInt64/1000 + 1},
+		{"negative overflow", math.MinInt64/1000 - 1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			alloc := memory.NewCheckedAllocator(memory.DefaultAllocator)
+			defer alloc.AssertSize(t, 0)
+
+			data := buildTimestampTestParquet(t,
+				timestampTestNode(t, schema.TimeUnitMillis, false),
+				parquet.NewWriterProperties(parquet.WithStats(false)),
+				[]int64{1_000, tt.val},
+			)
+
+			ctx := compute.WithAllocator(t.Context(), alloc)
+			rdr := openCheckedParquetReader(t, alloc, data)
+			defer func() { require.NoError(t, rdr.Close()) }()
+
+			sc, err := rdr.Schema()
+			require.NoError(t, err)
+			require.Equal(t, arrow.Microsecond, sc.Field(0).Type.(*arrow.TimestampType).Unit)
+
+			rr, err := rdr.GetRecords(ctx, []int{0}, nil)
+			require.NoError(t, err)
+			defer rr.Release()
+
+			assert.False(t, rr.Next())
+			require.ErrorIs(t, rr.Err(), iceberg.ErrInvalidArgument)
+		})
+	}
+}
+
+func TestTimestampMillisNestedAndNullsNormalizeWithoutLeak(t *testing.T) {
+	alloc := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer alloc.AssertSize(t, 0)
+
+	fieldIDMeta := func(id string) arrow.Metadata {
+		return arrow.MetadataFrom(map[string]string{"PARQUET:field_id": id})
+	}
+	msType := &arrow.TimestampType{Unit: arrow.Millisecond}
+	msTzType := &arrow.TimestampType{Unit: arrow.Millisecond, TimeZone: "UTC"}
+
+	arrowSc := arrow.NewSchema([]arrow.Field{
+		{Name: "ts", Type: msType, Nullable: true, Metadata: fieldIDMeta("1")},
+		{Name: "st", Type: arrow.StructOf(
+			arrow.Field{Name: "inner_ts", Type: msTzType, Nullable: true, Metadata: fieldIDMeta("3")},
+		), Nullable: true, Metadata: fieldIDMeta("2")},
+		{Name: "lst", Type: arrow.ListOfField(
+			arrow.Field{Name: "element", Type: msType, Nullable: true, Metadata: fieldIDMeta("5")},
+		), Nullable: true, Metadata: fieldIDMeta("4")},
+		{Name: "mp", Type: arrow.MapOfFields(
+			arrow.Field{Name: "key", Type: arrow.BinaryTypes.String, Nullable: false, Metadata: fieldIDMeta("7")},
+			arrow.Field{Name: "value", Type: msType, Nullable: true, Metadata: fieldIDMeta("8")},
+		), Nullable: true, Metadata: fieldIDMeta("6")},
+	}, nil)
+
+	rb := array.NewRecordBuilder(alloc, arrowSc)
+	defer rb.Release()
+
+	// Row 0: non-null across all columns
+	rb.Field(0).(*array.TimestampBuilder).Append(1_500)
+	sb := rb.Field(1).(*array.StructBuilder)
+	sb.Append(true)
+	sb.FieldBuilder(0).(*array.TimestampBuilder).Append(2_500)
+	lb := rb.Field(2).(*array.ListBuilder)
+	lb.Append(true)
+	lb.ValueBuilder().(*array.TimestampBuilder).Append(3_500)
+	lb.ValueBuilder().(*array.TimestampBuilder).AppendNull()
+	mb := rb.Field(3).(*array.MapBuilder)
+	mb.Append(true)
+	mb.KeyBuilder().(*array.StringBuilder).Append("k")
+	mb.ItemBuilder().(*array.TimestampBuilder).Append(4_500)
+
+	// Row 1: nulls across all columns
+	rb.Field(0).(*array.TimestampBuilder).AppendNull()
+	sb.AppendNull()
+	lb.AppendNull()
+	mb.AppendNull()
+
+	rec := rb.NewRecordBatch()
+	defer rec.Release()
+	tbl := array.NewTableFromRecords(arrowSc, []arrow.RecordBatch{rec})
+	defer tbl.Release()
+
+	var buf bytes.Buffer
+	require.NoError(t, pqarrow.WriteTable(tbl, &buf, 2,
+		parquet.NewWriterProperties(parquet.WithStats(false)),
+		pqarrow.NewArrowWriterProperties(pqarrow.WithAllocator(alloc))))
+
+	ctx := compute.WithAllocator(t.Context(), alloc)
+	rdr := openCheckedParquetReader(t, alloc, buf.Bytes())
+	defer func() { require.NoError(t, rdr.Close()) }()
+
+	pruned, cols, err := rdr.PrunedSchema(map[int]struct{}{1: {}, 3: {}, 5: {}, 7: {}, 8: {}}, nil)
+	require.NoError(t, err)
+	assert.Equal(t, arrow.Microsecond, pruned.Field(0).Type.(*arrow.TimestampType).Unit)
+	assert.Equal(t, arrow.Microsecond, pruned.Field(1).Type.(*arrow.StructType).Field(0).Type.(*arrow.TimestampType).Unit)
+	assert.Equal(t, "UTC", pruned.Field(1).Type.(*arrow.StructType).Field(0).Type.(*arrow.TimestampType).TimeZone)
+	assert.Equal(t, arrow.Microsecond, pruned.Field(2).Type.(*arrow.ListType).Elem().(*arrow.TimestampType).Unit)
+	assert.Equal(t, arrow.Microsecond, pruned.Field(3).Type.(*arrow.MapType).ItemType().(*arrow.TimestampType).Unit)
+
+	rr, err := rdr.GetRecords(ctx, cols, nil)
+	require.NoError(t, err)
+	defer rr.Release()
+
+	require.True(t, rr.Next())
+	got := rr.RecordBatch()
+	require.Equal(t, int64(2), got.NumRows())
+
+	tsCol := got.Column(0).(*array.Timestamp)
+	assert.Equal(t, arrow.Timestamp(1_500_000), tsCol.Value(0))
+	assert.True(t, tsCol.IsNull(1))
+
+	stCol := got.Column(1).(*array.Struct)
+	assert.Equal(t, arrow.Timestamp(2_500_000), stCol.Field(0).(*array.Timestamp).Value(0))
+	assert.True(t, stCol.IsNull(1))
+
+	lstCol := got.Column(2).(*array.List)
+	lstVals := lstCol.ListValues().(*array.Timestamp)
+	assert.Equal(t, arrow.Timestamp(3_500_000), lstVals.Value(0))
+	assert.True(t, lstVals.IsNull(1))
+	assert.True(t, lstCol.IsNull(1))
+
+	mpCol := got.Column(3).(*array.Map)
+	mpVals := mpCol.Items().(*array.Timestamp)
+	assert.Equal(t, arrow.Timestamp(4_500_000), mpVals.Value(0))
+	assert.True(t, mpCol.IsNull(1))
+
+	assert.False(t, rr.Next())
+	require.NoError(t, rr.Err())
+}
+
+func TestTimestampMillisDictionaryEncodedNormalizesWithoutLeak(t *testing.T) {
+	alloc := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer alloc.AssertSize(t, 0)
+
+	data := buildTimestampTestParquet(t,
+		timestampTestNode(t, schema.TimeUnitMillis, false),
+		parquet.NewWriterProperties(
+			parquet.WithStats(false),
+			parquet.WithDictionaryDefault(true),
+			parquet.WithDictionaryCostFallbackFor("ts", false),
+		),
+		[]int64{1_000, 2_000, 1_000, 2_000},
+	)
+
+	pqRdr, err := file.NewParquetReader(bytes.NewReader(data),
+		file.WithReadProps(parquet.NewReaderProperties(alloc)))
+	require.NoError(t, err)
+
+	var arrProps pqarrow.ArrowReadProperties
+	arrProps.SetReadDict(0, true)
+	arrRdr, err := pqarrow.NewFileReader(pqRdr, arrProps, alloc)
+	require.NoError(t, err)
+
+	rdr := internal.WrapParquetFileReader(arrRdr)
+	defer func() { require.NoError(t, rdr.Close()) }()
+
+	ctx := compute.WithAllocator(t.Context(), alloc)
+	rr, err := rdr.GetRecords(ctx, []int{0}, nil)
+	require.NoError(t, err)
+	defer rr.Release()
+
+	require.True(t, rr.Next())
+	got := rr.RecordBatch()
+	tsCol := got.Column(0).(*array.Timestamp)
+	assert.Equal(t, arrow.Microsecond, tsCol.DataType().(*arrow.TimestampType).Unit)
+	require.Equal(t, 4, tsCol.Len())
+	assert.Equal(t, arrow.Timestamp(1_000_000), tsCol.Value(0))
+	assert.Equal(t, arrow.Timestamp(2_000_000), tsCol.Value(1))
+	assert.Equal(t, arrow.Timestamp(1_000_000), tsCol.Value(2))
+	assert.Equal(t, arrow.Timestamp(2_000_000), tsCol.Value(3))
+
+	assert.False(t, rr.Next())
+	require.NoError(t, rr.Err())
 }

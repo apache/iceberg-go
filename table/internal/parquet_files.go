@@ -2400,8 +2400,24 @@ func (w wrapPqArrowReader) Close() error {
 	return w.ParquetReader().Close()
 }
 
+func (w wrapPqArrowReader) Schema() (*arrow.Schema, error) {
+	sc, err := w.FileReader.Schema()
+	if err != nil {
+		return nil, err
+	}
+	norm, _ := normalizeTimestampMillisSchema(sc)
+
+	return norm, nil
+}
+
 func (w wrapPqArrowReader) PrunedSchema(projectedIDs map[int]struct{}, mapping iceberg.NameMapping) (*arrow.Schema, []int, error) {
-	return pruneParquetColumns(w.Manifest, projectedIDs, false, mapping)
+	sc, cols, err := pruneParquetColumns(w.Manifest, projectedIDs, false, mapping)
+	if err != nil {
+		return nil, nil, err
+	}
+	norm, _ := normalizeTimestampMillisSchema(sc)
+
+	return norm, cols, nil
 }
 
 // parquetRowGroupSplitOffset returns the same first-page offset used when
@@ -2624,7 +2640,22 @@ func (w wrapPqArrowReader) GetRecords(ctx context.Context, cols []int, tester an
 		}
 	}
 
-	return w.GetRecordReader(ctx, cols, rgList)
+	rr, err := w.GetRecordReader(ctx, cols, rgList)
+	if err != nil {
+		return nil, err
+	}
+
+	normSchema, needsNorm := normalizeTimestampMillisSchema(rr.Schema())
+	if !needsNorm {
+		return rr, nil
+	}
+
+	alloc := w.dictionaryMem
+	if alloc == nil {
+		alloc = compute.GetAllocator(ctx)
+	}
+
+	return newTimestampMillisRecordReader(rr, normSchema, alloc), nil
 }
 
 // nonClosingReaderAtSeeker gives a temporary Parquet reader access to a shared
