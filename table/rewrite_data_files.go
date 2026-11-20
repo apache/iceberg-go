@@ -507,7 +507,7 @@ func (t *Transaction) RewriteDataFiles(ctx context.Context, groups []CompactionT
 		rewrite.ApplyResult(gr)
 		// A shared position delete is not safe until the coordinator checks
 		// every surviving file, so do not count worker hints as removals.
-		accumulateGroupMetricsWithDeletes(result, gr, 0, 0)
+		accumulateGroupMetrics(result, gr)
 		for _, df := range gr.SafePosDeletes {
 			stagedDeleteFiles[df.FilePath()] = struct{}{}
 		}
@@ -976,7 +976,7 @@ func recordCommittedRewriteBatch(
 	txn.tbl = next
 	txn.committed = true
 	for _, gr := range batchResults {
-		accumulateGroupMetricsWithDeletes(result, gr, 0, 0)
+		accumulateGroupMetrics(result, gr)
 		result.CompletedGroups = append(result.CompletedGroups, gr)
 	}
 	result.RemovedPositionDeleteFiles += len(deadPositionDeletes)
@@ -1002,12 +1002,10 @@ func cleanupCompactionOutputs(fs iceio.IO, batchResults []CompactionGroupResult)
 	return cleanupErr
 }
 
-func accumulateGroupMetricsWithDeletes(r *RewriteResult, gr CompactionGroupResult, positionDeletes, deletionVectors int) {
+func accumulateGroupMetrics(r *RewriteResult, gr CompactionGroupResult) {
 	r.RewrittenGroups++
 	r.AddedDataFiles += len(gr.NewDataFiles)
 	r.RemovedDataFiles += len(gr.OldDataFiles)
-	r.RemovedPositionDeleteFiles += positionDeletes
-	r.RemovedDeletionVectorFiles += deletionVectors
 	r.BytesBefore += gr.BytesBefore
 	r.BytesAfter += gr.BytesAfter
 }
