@@ -78,6 +78,15 @@ func sumValue(t *testing.T, m metricdata.Metrics) (int64, attribute.Set) {
 	return s.DataPoints[0].Value, s.DataPoints[0].Attributes
 }
 
+func gaugeValue(t *testing.T, m metricdata.Metrics) (int64, attribute.Set) {
+	t.Helper()
+	g, ok := m.Data.(metricdata.Gauge[int64])
+	require.True(t, ok, "metric %q is not an int64 gauge", m.Name)
+	require.Len(t, g.DataPoints, 1)
+
+	return g.DataPoints[0].Value, g.DataPoints[0].Attributes
+}
+
 func histogramSum(t *testing.T, m metricdata.Metrics) float64 {
 	t.Helper()
 	h, ok := m.Data.(metricdata.Histogram[float64])
@@ -109,11 +118,16 @@ func attributeKeys(rm metricdata.ResourceMetrics) map[string]bool {
 	keys := map[string]bool{}
 	for _, sm := range rm.ScopeMetrics {
 		for _, m := range sm.Metrics {
-			if s, ok := m.Data.(metricdata.Sum[int64]); ok {
-				for _, dp := range s.DataPoints {
-					for _, kv := range dp.Attributes.ToSlice() {
-						keys[string(kv.Key)] = true
-					}
+			var dps []metricdata.DataPoint[int64]
+			switch d := m.Data.(type) {
+			case metricdata.Sum[int64]:
+				dps = d.DataPoints
+			case metricdata.Gauge[int64]:
+				dps = d.DataPoints
+			}
+			for _, dp := range dps {
+				for _, kv := range dp.Attributes.ToSlice() {
+					keys[string(kv.Key)] = true
 				}
 			}
 		}
@@ -225,6 +239,13 @@ func TestReporterCommitFullCoverage(t *testing.T) {
 	assert.True(t, names["iceberg.commit.duration"], "commit duration missing")
 	for _, s := range commitCounterSpecs {
 		assert.True(t, names[s.name], "commit metric %q not emitted", s.name)
+		_, isSum := findMetric(t, rm, s.name).Data.(metricdata.Sum[int64])
+		assert.True(t, isSum, "commit metric %q must be a counter", s.name)
+	}
+	for _, s := range commitGaugeSpecs {
+		assert.True(t, names[s.name], "commit metric %q not emitted", s.name)
+		_, isGauge := findMetric(t, rm, s.name).Data.(metricdata.Gauge[int64])
+		assert.True(t, isGauge, "commit metric %q must be a gauge", s.name)
 	}
 
 	recs, _ := sumValue(t, findMetric(t, rm, "iceberg.commit.records.added"))
@@ -236,6 +257,23 @@ func TestReporterCommitFullCoverage(t *testing.T) {
 
 	bytesMetric := findMetric(t, rm, "iceberg.commit.file_size.added_bytes")
 	assert.Equal(t, "By", bytesMetric.Unit)
+
+	// Table totals are gauges carrying the value reported by the commit.
+	wantTotals := map[string]int64{
+		"iceberg.commit.data_files.total":         15,
+		"iceberg.commit.delete_files.total":       8,
+		"iceberg.commit.records.total":            5000,
+		"iceberg.commit.file_size.total_bytes":    2000000,
+		"iceberg.commit.positional_deletes.total": 300,
+		"iceberg.commit.equality_deletes.total":   150,
+	}
+	require.Len(t, commitGaugeSpecs, len(wantTotals))
+	for name, want := range wantTotals {
+		got, _ := gaugeValue(t, findMetric(t, rm, name))
+		assert.Equal(t, want, got, name)
+	}
+	assert.Equal(t, "By", findMetric(t, rm, "iceberg.commit.file_size.total_bytes").Unit)
+	assert.Empty(t, findMetric(t, rm, "iceberg.commit.records.total").Unit)
 
 	assert.InDelta(t, 200.0, histogramSum(t, findMetric(t, rm, "iceberg.commit.duration")), 0.0001)
 }
@@ -268,6 +306,67 @@ func TestReporterMultipleReports(t *testing.T) {
 	assert.Equal(t, int64(30), files)
 	attempts, _ := sumValue(t, findMetric(t, rm, "iceberg.commit.attempts"))
 	assert.Equal(t, int64(3), attempts)
+}
+
+// TestReporterCommitTotalsAreGauges verifies that commit total_* values keep the
+// last reported value instead of accumulating, while per-commit deltas still sum.
+func TestReporterCommitTotalsAreGauges(t *testing.T) {
+	rep, collect := newTestReporter(t)
+	c := func(v int64) *metrics.CounterResult { return metrics.NewCounterResult(metrics.UnitCount, v) }
+	for _, total := range []int64{100, 250} {
+		rep.Report(context.Background(), metrics.CommitReport{
+			TableName: "db.t",
+			Operation: "append",
+			Metrics: metrics.CommitMetricsResult{
+				AddedRecords: c(150),
+				TotalRecords: c(total),
+			},
+		})
+	}
+
+	rm := collect()
+	total, attrs := gaugeValue(t, findMetric(t, rm, "iceberg.commit.records.total"))
+	assert.Equal(t, int64(250), total, "gauge must hold the last value, not the sum")
+	assert.Equal(t, "db.t", attrStr(t, attrs, keyTableName))
+	added, _ := sumValue(t, findMetric(t, rm, "iceberg.commit.records.added"))
+	assert.Equal(t, int64(300), added, "per-commit deltas keep accumulating")
+}
+
+// TestReporterCommitTotalsPerTable verifies gauges keep one series per table.
+func TestReporterCommitTotalsPerTable(t *testing.T) {
+	rep, collect := newTestReporter(t)
+	for table, total := range map[string]int64{"db.a": 10, "db.b": 20} {
+		rep.Report(context.Background(), metrics.CommitReport{
+			TableName: table,
+			Operation: "append",
+			Metrics:   metrics.CommitMetricsResult{TotalRecords: metrics.NewCounterResult(metrics.UnitCount, total)},
+		})
+	}
+
+	g, ok := findMetric(t, collect(), "iceberg.commit.records.total").Data.(metricdata.Gauge[int64])
+	require.True(t, ok)
+	got := map[string]int64{}
+	for _, dp := range g.DataPoints {
+		got[attrStr(t, dp.Attributes, keyTableName)] = dp.Value
+	}
+	assert.Equal(t, map[string]int64{"db.a": 10, "db.b": 20}, got)
+}
+
+// TestReporterMissingTotalKeepsLastGauge verifies an unset total is skipped
+// rather than recorded as zero.
+func TestReporterMissingTotalKeepsLastGauge(t *testing.T) {
+	rep, collect := newTestReporter(t)
+	rep.Report(context.Background(), metrics.CommitReport{
+		TableName: "db.t",
+		Metrics:   metrics.CommitMetricsResult{TotalRecords: metrics.NewCounterResult(metrics.UnitCount, 42)},
+	})
+	rep.Report(context.Background(), metrics.CommitReport{
+		TableName: "db.t",
+		Metrics:   metrics.CommitMetricsResult{Attempts: metrics.NewCounterResult(metrics.UnitCount, 1)},
+	})
+
+	total, _ := gaugeValue(t, findMetric(t, collect(), "iceberg.commit.records.total"))
+	assert.Equal(t, int64(42), total)
 }
 
 // TestReporterDefaultAttributeSet asserts the default attribute set matches Java:

@@ -19,10 +19,12 @@
 // iceberg-go. It maps every field of a ScanReport's ScanMetricsResult and a
 // CommitReport's CommitMetricsResult to an OpenTelemetry instrument, so
 // scan/commit metrics can flow to any OTLP backend (Prometheus, Datadog,
-// CloudWatch, ...). Durations are histograms (ms); every other field is a
-// monotonic counter (bytes carry the "By" unit, counts are unit-less). Fields
-// that are unset in a given report are skipped, so no empty time series is
-// created.
+// CloudWatch, ...). Durations are histograms (ms). The commit total_* fields
+// (records, data files, delete files, file size, positional and equality
+// deletes) are table totals after the commit, so they are gauges holding the last
+// reported value. Every other field is a monotonic counter (bytes carry the "By"
+// unit, counts are unit-less). Fields that are unset in a given report are
+// skipped, so no empty time series is created.
 //
 // The host application owns the OpenTelemetry SDK: the reporter obtains a Meter
 // from the global MeterProvider (or one supplied via [WithMeter]). If no SDK is
@@ -37,7 +39,9 @@
 // series grows with the number of tables; the OpenTelemetry metrics SDK caps a
 // stream at 2000 attribute combinations by default and folds the overflow into a
 // single otel.metric.overflow=true point, so drop iceberg.table.name (via
-// [WithAttributes]) in deployments with a very large number of tables.
+// [WithAttributes]) in deployments with a very large number of tables. Gauges
+// are last-write-wins per attribute set, so dropping iceberg.table.name makes
+// the totals of different tables overwrite each other.
 //
 // The names, units, and attribute set mirror Java's OtelMetricsReporter
 // (apache/iceberg#16250) so metrics are consistent across implementations.
@@ -89,6 +93,13 @@ type commitCounterSpec struct {
 	get              func(metrics.CommitMetricsResult) *metrics.CounterResult
 }
 
+// commitGaugeSpec describes one commit gauge instrument and how to read its
+// value out of a CommitMetricsResult.
+type commitGaugeSpec struct {
+	name, desc, unit string
+	get              func(metrics.CommitMetricsResult) *metrics.CounterResult
+}
+
 // scanCounterSpecs enumerates every counter derived from ScanMetricsResult. The
 // order, names, units, and descriptions mirror Java's ScanInstruments.
 var scanCounterSpecs = []scanCounterSpec{
@@ -110,13 +121,14 @@ var scanCounterSpecs = []scanCounterSpec{
 	{"iceberg.scan.dvs", "Number of deletion vectors in scan result", "", func(m metrics.ScanMetricsResult) *metrics.CounterResult { return m.DVs }},
 }
 
-// commitCounterSpecs enumerates every counter derived from CommitMetricsResult.
-// The order, names, units, and descriptions mirror Java's CommitInstruments.
+// commitCounterSpecs enumerates every monotonic counter derived from
+// CommitMetricsResult: per-commit deltas (added/removed), attempts, and manifest
+// stats. The table totals live in commitGaugeSpecs. The order, names, units, and
+// descriptions mirror Java's CommitInstruments.
 var commitCounterSpecs = []commitCounterSpec{
 	{"iceberg.commit.attempts", "Number of commit attempts", "", func(m metrics.CommitMetricsResult) *metrics.CounterResult { return m.Attempts }},
 	{"iceberg.commit.data_files.added", "Number of data files added by commit", "", func(m metrics.CommitMetricsResult) *metrics.CounterResult { return m.AddedDataFiles }},
 	{"iceberg.commit.data_files.removed", "Number of data files removed by commit", "", func(m metrics.CommitMetricsResult) *metrics.CounterResult { return m.RemovedDataFiles }},
-	{"iceberg.commit.data_files.total", "Total number of data files after commit", "", func(m metrics.CommitMetricsResult) *metrics.CounterResult { return m.TotalDataFiles }},
 	{"iceberg.commit.delete_files.added", "Number of delete files added by commit", "", func(m metrics.CommitMetricsResult) *metrics.CounterResult { return m.AddedDeleteFiles }},
 	{"iceberg.commit.delete_files.equality.added", "Number of equality delete files added by commit", "", func(m metrics.CommitMetricsResult) *metrics.CounterResult { return m.AddedEqualityDeleteFiles }},
 	{"iceberg.commit.delete_files.positional.added", "Number of positional delete files added by commit", "", func(m metrics.CommitMetricsResult) *metrics.CounterResult { return m.AddedPositionalDeleteFiles }},
@@ -125,23 +137,31 @@ var commitCounterSpecs = []commitCounterSpec{
 	{"iceberg.commit.delete_files.equality.removed", "Number of equality delete files removed by commit", "", func(m metrics.CommitMetricsResult) *metrics.CounterResult { return m.RemovedEqualityDeleteFiles }},
 	{"iceberg.commit.delete_files.positional.removed", "Number of positional delete files removed by commit", "", func(m metrics.CommitMetricsResult) *metrics.CounterResult { return m.RemovedPositionalDeleteFiles }},
 	{"iceberg.commit.dvs.removed", "Number of deletion vectors removed by commit", "", func(m metrics.CommitMetricsResult) *metrics.CounterResult { return m.RemovedDVs }},
-	{"iceberg.commit.delete_files.total", "Total number of delete files after commit", "", func(m metrics.CommitMetricsResult) *metrics.CounterResult { return m.TotalDeleteFiles }},
 	{"iceberg.commit.records.added", "Number of records added by commit", "", func(m metrics.CommitMetricsResult) *metrics.CounterResult { return m.AddedRecords }},
 	{"iceberg.commit.records.removed", "Number of records removed by commit", "", func(m metrics.CommitMetricsResult) *metrics.CounterResult { return m.RemovedRecords }},
-	{"iceberg.commit.records.total", "Total number of records after commit", "", func(m metrics.CommitMetricsResult) *metrics.CounterResult { return m.TotalRecords }},
 	{"iceberg.commit.file_size.added_bytes", "Total size of data files added by commit", unitBytes, func(m metrics.CommitMetricsResult) *metrics.CounterResult { return m.AddedFilesSizeBytes }},
 	{"iceberg.commit.file_size.removed_bytes", "Total size of data files removed by commit", unitBytes, func(m metrics.CommitMetricsResult) *metrics.CounterResult { return m.RemovedFilesSizeBytes }},
-	{"iceberg.commit.file_size.total_bytes", "Total size of all data files after commit", unitBytes, func(m metrics.CommitMetricsResult) *metrics.CounterResult { return m.TotalFilesSizeBytes }},
 	{"iceberg.commit.positional_deletes.added", "Number of positional deletes added by commit", "", func(m metrics.CommitMetricsResult) *metrics.CounterResult { return m.AddedPositionalDeletes }},
 	{"iceberg.commit.positional_deletes.removed", "Number of positional deletes removed by commit", "", func(m metrics.CommitMetricsResult) *metrics.CounterResult { return m.RemovedPositionalDeletes }},
-	{"iceberg.commit.positional_deletes.total", "Total number of positional deletes after commit", "", func(m metrics.CommitMetricsResult) *metrics.CounterResult { return m.TotalPositionalDeletes }},
 	{"iceberg.commit.equality_deletes.added", "Number of equality deletes added by commit", "", func(m metrics.CommitMetricsResult) *metrics.CounterResult { return m.AddedEqualityDeletes }},
 	{"iceberg.commit.equality_deletes.removed", "Number of equality deletes removed by commit", "", func(m metrics.CommitMetricsResult) *metrics.CounterResult { return m.RemovedEqualityDeletes }},
-	{"iceberg.commit.equality_deletes.total", "Total number of equality deletes after commit", "", func(m metrics.CommitMetricsResult) *metrics.CounterResult { return m.TotalEqualityDeletes }},
 	{"iceberg.commit.manifests.created", "Number of manifests created by commit", "", func(m metrics.CommitMetricsResult) *metrics.CounterResult { return m.ManifestsCreated }},
 	{"iceberg.commit.manifests.replaced", "Number of manifests replaced by commit", "", func(m metrics.CommitMetricsResult) *metrics.CounterResult { return m.ManifestsReplaced }},
 	{"iceberg.commit.manifests.kept", "Number of manifests kept by commit", "", func(m metrics.CommitMetricsResult) *metrics.CounterResult { return m.ManifestsKept }},
 	{"iceberg.commit.manifest_entries.processed", "Number of manifest entries processed by commit", "", func(m metrics.CommitMetricsResult) *metrics.CounterResult { return m.ManifestEntriesProcessed }},
+}
+
+// commitGaugeSpecs enumerates the commit fields that are table totals after the
+// commit (taken from the snapshot summary's total-* entries). They describe the
+// state of the table, not the commit, so summing them across commits is
+// meaningless; they are recorded as gauges that keep the last value per series.
+var commitGaugeSpecs = []commitGaugeSpec{
+	{"iceberg.commit.data_files.total", "Total number of data files after commit", "", func(m metrics.CommitMetricsResult) *metrics.CounterResult { return m.TotalDataFiles }},
+	{"iceberg.commit.delete_files.total", "Total number of delete files after commit", "", func(m metrics.CommitMetricsResult) *metrics.CounterResult { return m.TotalDeleteFiles }},
+	{"iceberg.commit.records.total", "Total number of records after commit", "", func(m metrics.CommitMetricsResult) *metrics.CounterResult { return m.TotalRecords }},
+	{"iceberg.commit.file_size.total_bytes", "Total size of all data files after commit", unitBytes, func(m metrics.CommitMetricsResult) *metrics.CounterResult { return m.TotalFilesSizeBytes }},
+	{"iceberg.commit.positional_deletes.total", "Total number of positional deletes after commit", "", func(m metrics.CommitMetricsResult) *metrics.CounterResult { return m.TotalPositionalDeletes }},
+	{"iceberg.commit.equality_deletes.total", "Total number of equality deletes after commit", "", func(m metrics.CommitMetricsResult) *metrics.CounterResult { return m.TotalEqualityDeletes }},
 }
 
 // Reporter records iceberg metrics reports to OpenTelemetry instruments.
@@ -153,6 +173,7 @@ type Reporter struct {
 
 	commitDuration metric.Float64Histogram
 	commitCounters []metric.Int64Counter // parallel to commitCounterSpecs
+	commitGauges   []metric.Int64Gauge   // parallel to commitGaugeSpecs
 }
 
 var _ metrics.Reporter = (*Reporter)(nil)
@@ -223,6 +244,13 @@ func NewReporter(opts ...Option) (*Reporter, error) {
 		}
 		r.commitCounters[i], err = newCounter(meter, s.name, s.desc, s.unit)
 	}
+	r.commitGauges = make([]metric.Int64Gauge, len(commitGaugeSpecs))
+	for i, s := range commitGaugeSpecs {
+		if err != nil {
+			break
+		}
+		r.commitGauges[i], err = newGauge(meter, s.name, s.desc, s.unit)
+	}
 
 	if err != nil {
 		return nil, err
@@ -240,6 +268,16 @@ func newCounter(meter metric.Meter, name, desc, unit string) (metric.Int64Counte
 	}
 
 	return meter.Int64Counter(name, opts...)
+}
+
+// newGauge builds an Int64Gauge, attaching a unit only when one is set.
+func newGauge(meter metric.Meter, name, desc, unit string) (metric.Int64Gauge, error) {
+	opts := []metric.Int64GaugeOption{metric.WithDescription(desc)}
+	if unit != "" {
+		opts = append(opts, metric.WithUnit(unit))
+	}
+
+	return meter.Int64Gauge(name, opts...)
 }
 
 // Report implements [metrics.Reporter].
@@ -296,6 +334,17 @@ func (r *Reporter) reportCommit(ctx context.Context, cr metrics.CommitReport) {
 	recordDuration(ctx, r.commitDuration, m.TotalDuration, opt)
 	for i, s := range commitCounterSpecs {
 		addCounter(ctx, r.commitCounters[i], s.get(m), opt)
+	}
+	for i, s := range commitGaugeSpecs {
+		recordGauge(ctx, r.commitGauges[i], s.get(m), opt)
+	}
+}
+
+// recordGauge sets a gauge to the report's value. Unset fields are skipped so a
+// missing total never overwrites the last known one with zero.
+func recordGauge(ctx context.Context, g metric.Int64Gauge, cr *metrics.CounterResult, opt metric.RecordOption) {
+	if cr != nil {
+		g.Record(ctx, cr.Value, opt)
 	}
 }
 
