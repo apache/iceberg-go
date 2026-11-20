@@ -20,6 +20,7 @@ package table_test
 import (
 	"context"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -71,6 +72,10 @@ func newV2RowLineageTestTable(t *testing.T) *table.Table {
 }
 
 func readRowIDsByID(t *testing.T, ctx context.Context, tbl *table.Table) map[int64]int64 {
+	return readLineageColumnByID(t, ctx, tbl, iceberg.RowIDColumnName)
+}
+
+func readLineageColumnByID(t *testing.T, ctx context.Context, tbl *table.Table, column string) map[int64]int64 {
 	t.Helper()
 
 	_, itr, err := tbl.Scan(table.WithRowLineage()).ToArrowRecords(ctx)
@@ -81,14 +86,14 @@ func readRowIDsByID(t *testing.T, ctx context.Context, tbl *table.Table) map[int
 		require.NoError(t, err)
 		idIdx := rec.Schema().FieldIndices("id")
 		require.NotEmpty(t, idIdx)
-		rowIDIdx := rec.Schema().FieldIndices(iceberg.RowIDColumnName)
-		require.NotEmpty(t, rowIDIdx, "_row_id must be projected")
+		lineageIdx := rec.Schema().FieldIndices(column)
+		require.NotEmpty(t, lineageIdx, "%s must be projected", column)
 
 		idCol := rec.Column(idIdx[0]).(*array.Int64)
-		rowIDCol := rec.Column(rowIDIdx[0]).(*array.Int64)
+		lineageCol := rec.Column(lineageIdx[0]).(*array.Int64)
 		for i := range int(rec.NumRows()) {
-			require.False(t, rowIDCol.IsNull(i), "_row_id must be non-null for id=%d", idCol.Value(i))
-			got[idCol.Value(i)] = rowIDCol.Value(i)
+			require.False(t, lineageCol.IsNull(i), "%s must be non-null for id=%d", column, idCol.Value(i))
+			got[idCol.Value(i)] = lineageCol.Value(i)
 		}
 		rec.Release()
 	}
@@ -514,6 +519,7 @@ func TestExecuteCompactionGroupPreservesRowIDAcrossV2Upgrade(t *testing.T) {
 	pre := readRowIDsByID(t, ctx, tbl)
 	assert.Equal(t, map[int64]int64{3: 0, 4: 1, 1: 2, 2: 3}, pre,
 		"each row's inherited _row_id must be distinct and contiguous from 0")
+	preSeq := readLineageColumnByID(t, ctx, tbl, iceberg.LastUpdatedSequenceNumberColumnName)
 
 	group := table.CompactionTaskGroup{
 		PartitionKey:   "single",
@@ -535,4 +541,76 @@ func TestExecuteCompactionGroupPreservesRowIDAcrossV2Upgrade(t *testing.T) {
 	post := readRowIDsByID(t, ctx, tbl)
 	assert.Equal(t, pre, post,
 		"compaction across a v2->v3 upgrade must preserve every row's _row_id, including the v2-era rows")
+	assert.Equal(t, preSeq, readLineageColumnByID(t, ctx, tbl, iceberg.LastUpdatedSequenceNumberColumnName))
+}
+
+func TestCompactionRejectsIncompleteRowLineage(t *testing.T) {
+	tbl := appendRows(t, newV3RowLineageTestTable(t), `[{"id":1},{"id":2}]`)
+	tbl = appendRows(t, tbl, `[{"id":3},{"id":4}]`)
+	tasks, err := tbl.Scan().PlanFiles(t.Context())
+	require.NoError(t, err)
+	require.Len(t, tasks, 2)
+	before := parquetFiles(t, tbl.Location())
+	for _, tc := range []struct {
+		name    string
+		clear   func([]table.FileScanTask)
+		missing string
+	}{
+		{"missing data sequence", func(tasks []table.FileScanTask) {
+			tasks[0].DataSequenceNumber = nil
+		}, "data sequence number"},
+		{"mixed first row IDs", func(tasks []table.FileScanTask) {
+			tasks[0].FirstRowID = nil
+		}, "first row ID"},
+		{"both first row IDs missing", func(tasks []table.FileScanTask) {
+			for i := range tasks {
+				tasks[i].FirstRowID = nil
+			}
+		}, "first row ID"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			group := table.CompactionTaskGroup{Tasks: slices.Clone(tasks)}
+			tc.clear(group.Tasks)
+
+			_, err := table.ExecuteCompactionGroup(t.Context(), tbl, group)
+			require.ErrorIs(t, err, table.ErrInvalidOperation)
+			require.ErrorContains(t, err, tc.missing)
+			for _, partial := range []bool{false, true} {
+				_, err := tbl.RewriteDataFiles(t.Context(), []table.CompactionTaskGroup{group},
+					table.RewriteDataFilesOptions{PartialProgress: partial})
+				require.ErrorIs(t, err, table.ErrInvalidOperation)
+				require.ErrorContains(t, err, tc.missing)
+			}
+			require.ElementsMatch(t, before, parquetFiles(t, tbl.Location()))
+		})
+	}
+}
+
+func TestCompactionCanAssignFirstRowIDsOnLegacyBranch(t *testing.T) {
+	const branch = "legacy"
+	tbl := appendRowsOnRef(t, newV2RowLineageTestTable(t), branch, 1, 2)
+	upgrade := tbl.NewTransaction()
+	require.NoError(t, upgrade.UpgradeFormatVersion(3))
+	tbl, err := upgrade.Commit(t.Context())
+	require.NoError(t, err)
+	tbl = appendRows(t, tbl, `[{"id":3},{"id":4}]`)
+	require.NotNil(t, tbl.CurrentSnapshot().FirstRowID)
+	require.Nil(t, tbl.SnapshotByName(branch).FirstRowID)
+
+	scan, err := tbl.Scan().UseRef(branch)
+	require.NoError(t, err)
+	defer scan.Close()
+	tasks, err := scan.PlanFiles(t.Context())
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	require.Nil(t, tasks[0].FirstRowID)
+
+	txn, err := tbl.NewTransactionOnBranch(branch)
+	require.NoError(t, err)
+	result, err := txn.RewriteDataFiles(t.Context(), []table.CompactionTaskGroup{{Tasks: tasks}},
+		table.RewriteDataFilesOptions{PartialProgress: true})
+	require.NoError(t, err)
+	require.Equal(t, 1, result.RewrittenGroups)
+	require.NotNil(t, result.Table.SnapshotByName(branch).FirstRowID)
+	require.ElementsMatch(t, []int64{1, 2}, idsOnRef(t, result.Table, branch))
 }

@@ -23,8 +23,8 @@ import (
 	"fmt"
 	iofs "io/fs"
 	"iter"
-	"log/slog"
 	"maps"
+	"slices"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/iceberg-go"
@@ -498,7 +498,7 @@ func (t *Transaction) RewriteDataFiles(ctx context.Context, groups []CompactionT
 			continue
 		}
 
-		gr, err := ExecuteCompactionGroup(ctx, staged.Table, group, opts.GroupOptions...)
+		gr, err := executeCompactionGroup(ctx, staged.Table, t.branch, group, opts.GroupOptions...)
 		if err != nil {
 			return result, err
 		}
@@ -564,6 +564,10 @@ func (t *Transaction) RewriteDataFiles(ctx context.Context, groups []CompactionT
 // source file in full; partial ranges or residual filters would otherwise
 // silently discard rows when the original task is replaced.
 //
+// Once a v3 table has assigned row IDs, standalone workers require each task
+// to carry its inherited first row ID and data sequence number. Use a local
+// scan plan where the catalog allows it.
+//
 // In-process callers should prefer [Transaction.RewriteDataFiles],
 // which drives this and the commit step in one call.
 //
@@ -571,6 +575,10 @@ func (t *Transaction) RewriteDataFiles(ctx context.Context, groups []CompactionT
 // write path is always used (a compaction group is single-partition
 // by construction so its read stream is trivially clustered).
 func ExecuteCompactionGroup(ctx context.Context, tbl *Table, group CompactionTaskGroup, opts ...CompactionGroupOption) (CompactionGroupResult, error) {
+	return executeCompactionGroup(ctx, tbl, "", group, opts...)
+}
+
+func executeCompactionGroup(ctx context.Context, tbl *Table, branch string, group CompactionTaskGroup, opts ...CompactionGroupOption) (CompactionGroupResult, error) {
 	if len(group.Tasks) == 0 {
 		return CompactionGroupResult{PartitionKey: group.PartitionKey}, nil
 	}
@@ -613,36 +621,12 @@ func ExecuteCompactionGroup(ctx context.Context, tbl *Table, group CompactionTas
 		scanOpts = append(scanOpts, WithArrowBatchSize(cfg.arrowBatchSize))
 	}
 
-	// Preserve row lineage only when every source file in the group carries
-	// it. A mixed group (some files with FirstRowID, some without — e.g.
-	// legacy files on a v3 table) would otherwise produce one output where
-	// post-lineage rows have explicit _row_id values and pre-lineage rows
-	// have nulls, which violates the per-file uniqueness/coverage
-	// invariant the v3 spec requires. Row IDs are assigned lazily during
-	// the first v3 manifest-list write after a v1/v2->v3 upgrade, so mixed
-	// groups are expected during migration; for now we degrade gracefully
-	// and do not preserve lineage for the surviving rows.
-	preserveLineage := tbl.metadata.FormatVersion() >= 3 && allTasksHaveRowLineage(group.Tasks)
+	preserveLineage, err := compactionRowLineage(tbl.metadata, branch, group.Tasks)
+	if err != nil {
+		return CompactionGroupResult{}, err
+	}
 	if preserveLineage {
 		scanOpts = append(scanOpts, WithRowLineage())
-	} else if tbl.metadata.FormatVersion() >= 3 {
-		// Drop lineage for the whole mixed group. Warn only when at least one
-		// source file already carried lineage; all-legacy groups fall through
-		// silently because there is no lineage to lose.
-		var lineageFiles, legacyFiles int
-		for _, t := range group.Tasks {
-			if t.FirstRowID != nil {
-				lineageFiles++
-			} else {
-				legacyFiles++
-			}
-		}
-		if lineageFiles > 0 {
-			slog.Warn("compaction group has mixed row lineage; dropping _row_id on output",
-				"partition_key", group.PartitionKey,
-				"lineage_files", lineageFiles,
-				"legacy_files", legacyFiles)
-		}
 	}
 
 	arrowSchema, records, err := strategy.records(ctx, tbl.Scan(scanOpts...), group.Tasks)
@@ -713,20 +697,32 @@ func ExecuteCompactionGroup(ctx context.Context, tbl *Table, group CompactionTas
 	}, nil
 }
 
-// allTasksHaveRowLineage returns true iff every task in the group has a
-// non-nil FirstRowID — i.e. every source file already carries v3 row lineage.
-// It returns false for an empty task slice.
-func allTasksHaveRowLineage(tasks []FileScanTask) bool {
-	if len(tasks) == 0 {
-		return false
+func compactionRowLineage(meta Metadata, branch string, tasks []FileScanTask) (bool, error) {
+	if meta.FormatVersion() < 3 {
+		return false, nil
 	}
-	for _, t := range tasks {
-		if t.FirstRowID == nil {
-			return false
+
+	// A branch can still point to a pre-v3 snapshot after another branch has
+	// assigned row IDs. Standalone workers do not know the target branch.
+	required := meta.NextRowID() > 0
+	if branch != "" {
+		parent := latestSnapshotForBranch(meta, branch)
+		required = parent != nil && parent.FirstRowID != nil
+	}
+	if !required && !slices.ContainsFunc(tasks, func(task FileScanTask) bool { return task.FirstRowID != nil }) {
+		return false, nil
+	}
+
+	for _, task := range tasks {
+		switch {
+		case task.FirstRowID == nil || *task.FirstRowID < 0:
+			return false, fmt.Errorf("%w: cannot preserve v3 row lineage for %q without a valid first row ID", ErrInvalidOperation, task.File.FilePath())
+		case task.DataSequenceNumber == nil || *task.DataSequenceNumber < 0:
+			return false, fmt.Errorf("%w: cannot preserve v3 row lineage for %q without a valid data sequence number", ErrInvalidOperation, task.File.FilePath())
 		}
 	}
 
-	return true
+	return true, nil
 }
 
 // rewriteDataFilesPartial executes groups and commits them in durable batches.
@@ -847,7 +843,7 @@ func (t *Transaction) rewriteDataFilesPartial(ctx context.Context, groups []Comp
 				return result, cleanupBatch(err)
 			}
 
-			gr, err := ExecuteCompactionGroup(ctx, current, group, opts.GroupOptions...)
+			gr, err := executeCompactionGroup(ctx, current, t.branch, group, opts.GroupOptions...)
 			if err != nil {
 				return result, cleanupBatch(err, gr)
 			}
