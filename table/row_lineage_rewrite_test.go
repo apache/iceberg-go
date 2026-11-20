@@ -680,7 +680,7 @@ func TestCompactionCannotReplayAfterFirstRowIDsAreAssigned(t *testing.T) {
 	require.Equal(t, assigned, readRowIDsByID(t, t.Context(), current))
 }
 
-func TestPartialCompactionRequiresReplanningAfterFirstRowIDsAreAssigned(t *testing.T) {
+func TestPartialCompactionPreservesFirstRowIDsAssignedByEarlierBatch(t *testing.T) {
 	tbl := appendRows(t, newV2RowLineageTestTable(t), `[{"id":1},{"id":2}]`)
 	tbl = appendRows(t, tbl, `[{"id":3},{"id":4}]`)
 	upgrade := tbl.NewTransaction()
@@ -690,23 +690,28 @@ func TestPartialCompactionRequiresReplanningAfterFirstRowIDsAreAssigned(t *testi
 	tasks, err := tbl.Scan().PlanFiles(t.Context())
 	require.NoError(t, err)
 	require.Len(t, tasks, 2)
+	taskPath := tasks[1].File.FilePath()
+	// The original sequence numbers are still visible on the legacy parent.
+	wantSeqs := readLineageColumnByID(t, t.Context(), tbl, iceberg.LastUpdatedSequenceNumberColumnName)
 
 	groups := []table.CompactionTaskGroup{{Tasks: tasks[:1]}, {Tasks: tasks[1:]}}
 	result, err := tbl.RewriteDataFiles(t.Context(), groups, table.RewriteDataFilesOptions{
 		PartialProgress: true,
 		MaxCommits:      2,
 	})
-	require.ErrorIs(t, err, table.ErrInvalidOperation)
-	require.ErrorContains(t, err, "replan")
-	require.Len(t, result.CompletedGroups, 1)
-	assigned := readRowIDsByID(t, t.Context(), result.Table)
+	require.NoError(t, err)
+	require.Len(t, result.CompletedGroups, 2)
+	require.Empty(t, result.FailedGroups)
+	firstBatchID := *result.Table.CurrentSnapshot().ParentSnapshotID
+	firstBatch := result.Table.Scan(table.WithRowLineage(), table.WithSnapshotID(firstBatchID))
+	defer firstBatch.Close()
+	assigned := readLineageColumnFromScan(t, t.Context(), firstBatch, iceberg.RowIDColumnName)
 	require.Len(t, assigned, 4)
-
-	fresh, err := result.Table.Scan().PlanFiles(t.Context())
-	require.NoError(t, err)
-	result, err = result.Table.RewriteDataFiles(t.Context(), []table.CompactionTaskGroup{{Tasks: fresh}}, table.RewriteDataFilesOptions{})
-	require.NoError(t, err)
 	require.Equal(t, assigned, readRowIDsByID(t, t.Context(), result.Table))
+	require.Equal(t, wantSeqs, readLineageColumnByID(t, t.Context(), result.Table, iceberg.LastUpdatedSequenceNumberColumnName))
+	remainingLineage := result.CompletedGroups[1].SourceRowLineage[taskPath]
+	require.NotNil(t, remainingLineage.FirstRowID)
+	require.Nil(t, tasks[1].FirstRowID, "refresh must not change the caller's plan")
 }
 
 func TestCompactionRejectsWorkerResultAfterFirstRowIDsAreAssigned(t *testing.T) {
@@ -783,8 +788,10 @@ func TestCompactionRejectsStaleSourceRowLineage(t *testing.T) {
 					require.NoError(t, workerErr)
 					err = current.NewTransaction().NewRewrite(nil).ApplyResult(worker).Commit(ctx)
 				} else {
+					before := parquetFiles(t, current.Location())
 					_, err = current.RewriteDataFiles(ctx, []table.CompactionTaskGroup{group},
 						table.RewriteDataFilesOptions{PartialProgress: mode == "partial"})
+					require.ElementsMatch(t, before, parquetFiles(t, current.Location()), "rejected rewrite must leave no outputs")
 				}
 			}
 			require.ErrorIs(t, err, table.ErrInvalidOperation)

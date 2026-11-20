@@ -194,15 +194,25 @@ type CompactionSourceRowLineage struct {
 }
 
 func (l CompactionSourceRowLineage) validate(entry iceberg.ManifestEntry) error {
-	file := entry.DataFile()
-	actual := file.FirstRowID()
-	if actual != l.FirstRowID && (actual == nil || l.FirstRowID == nil || *actual != *l.FirstRowID) {
-		return fmt.Errorf("%w: first row ID of compaction source %q changed; replan from the target branch",
-			ErrInvalidOperation, file.FilePath())
+	return l.compare(entry.DataFile().FilePath(), manifestSourceRowLineage(entry))
+}
+
+func manifestSourceRowLineage(entry iceberg.ManifestEntry) CompactionSourceRowLineage {
+	return CompactionSourceRowLineage{
+		FirstRowID:         entry.DataFile().FirstRowID(),
+		DataSequenceNumber: entry.DataSequenceNumber(),
 	}
-	if entry.DataSequenceNumber() != l.DataSequenceNumber {
+}
+
+func (l CompactionSourceRowLineage) compare(path string, actual CompactionSourceRowLineage) error {
+	id := actual.FirstRowID
+	if id != l.FirstRowID && (id == nil || l.FirstRowID == nil || *id != *l.FirstRowID) {
+		return fmt.Errorf("%w: first row ID of compaction source %q changed; replan from the target branch",
+			ErrInvalidOperation, path)
+	}
+	if actual.DataSequenceNumber != l.DataSequenceNumber {
 		return fmt.Errorf("%w: data sequence number of compaction source %q changed; replan from the target branch",
-			ErrInvalidOperation, file.FilePath())
+			ErrInvalidOperation, path)
 	}
 
 	return nil
@@ -513,10 +523,8 @@ func (t *Transaction) RewriteDataFiles(ctx context.Context, groups []CompactionT
 	if err != nil {
 		return nil, err
 	}
-	for _, group := range groups {
-		if err := validateCompactionRowLineage(staged.Metadata(), t.branch, group.Tasks); err != nil {
-			return nil, err
-		}
+	if err := validateCompactionPlanLineage(ctx, staged.Table, t.branch, groups); err != nil {
+		return nil, err
 	}
 
 	result := &RewriteResult{}
@@ -775,6 +783,95 @@ func validateCompactionRowLineage(meta Metadata, branch string, tasks []FileScan
 	return nil
 }
 
+func validateCompactionPlanLineage(ctx context.Context, tbl *Table, branch string, groups []CompactionTaskGroup) error {
+	if tbl.metadata.FormatVersion() < 3 {
+		return nil
+	}
+
+	paths := make(map[string]struct{})
+	for _, group := range groups {
+		if err := validateCompactionRowLineage(tbl.metadata, branch, group.Tasks); err != nil {
+			return err
+		}
+		for _, task := range group.Tasks {
+			paths[task.File.FilePath()] = struct{}{}
+		}
+	}
+	if len(paths) == 0 {
+		return nil
+	}
+
+	fs, err := tbl.fsF(ctx)
+	if err != nil {
+		return err
+	}
+	sourceLineage, err := readCompactionSourceLineage(ctx, fs, latestSnapshotForBranch(tbl.metadata, branch), paths)
+	if err != nil {
+		return err
+	}
+	for _, group := range groups {
+		for _, task := range group.Tasks {
+			path := task.File.FilePath()
+			actual, ok := sourceLineage[path]
+			if !ok {
+				return fmt.Errorf("%w: compaction source %q is missing from the target branch; replan", ErrInvalidOperation, path)
+			}
+			expected := CompactionSourceRowLineage{FirstRowID: task.FirstRowID, DataSequenceNumber: *task.DataSequenceNumber}
+			if err := expected.compare(path, actual); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+func readCompactionSourceLineage(ctx context.Context, fs iceio.IO, parent *Snapshot, paths map[string]struct{}) (map[string]CompactionSourceRowLineage, error) {
+	lineage := make(map[string]CompactionSourceRowLineage, len(paths))
+	if parent == nil || len(paths) == 0 {
+		return lineage, nil
+	}
+
+	for entry, err := range parent.entries(ctx, fs, iceberg.ManifestContentData, true) {
+		if err != nil {
+			return nil, err
+		}
+		path := entry.DataFile().FilePath()
+		if _, ok := paths[path]; ok {
+			lineage[path] = manifestSourceRowLineage(entry)
+			if len(lineage) == len(paths) {
+				break
+			}
+		}
+	}
+
+	return lineage, nil
+}
+
+// The first v3 commit gives surviving legacy files their row IDs. Fill in
+// only those newly assigned values, keeping the original tasks and deletes.
+func refreshCompactionRowIDs(group CompactionTaskGroup, lineage map[string]CompactionSourceRowLineage) (CompactionTaskGroup, error) {
+	group.Tasks = slices.Clone(group.Tasks)
+	for i := range group.Tasks {
+		task := &group.Tasks[i]
+		if task.FirstRowID != nil || task.File == nil || task.DataSequenceNumber == nil {
+			continue
+		}
+		path := task.File.FilePath()
+		actual, ok := lineage[path]
+		if !ok || actual.FirstRowID == nil {
+			return CompactionTaskGroup{}, fmt.Errorf("%w: compaction source %q has no newly assigned first row ID; replan", ErrInvalidOperation, path)
+		}
+		expected := CompactionSourceRowLineage{FirstRowID: actual.FirstRowID, DataSequenceNumber: *task.DataSequenceNumber}
+		if err := expected.compare(path, actual); err != nil {
+			return CompactionTaskGroup{}, err
+		}
+		task.FirstRowID = actual.FirstRowID
+	}
+
+	return group, nil
+}
+
 // rewriteDataFilesPartial executes groups and commits them in durable batches.
 // A batch is the atomic unit for both the MaxCommits bound and delete cleanup:
 // classic position deletes are rechecked against the union of every old data
@@ -831,6 +928,7 @@ func (t *Transaction) rewriteDataFilesPartial(ctx context.Context, groups []Comp
 	current := t.tbl
 	sincePlanning := deletesSincePlanning{checked: t.tbl.Metadata(), branch: t.branch}
 	failedCommits := 0
+	var assignedLineage map[string]CompactionSourceRowLineage
 
 	for batchStart := 0; batchStart < len(pendingGroups); batchStart += groupsPerCommit {
 		if err := ctx.Err(); err != nil {
@@ -893,6 +991,12 @@ func (t *Transaction) rewriteDataFilesPartial(ctx context.Context, groups []Comp
 				return result, cleanupBatch(err)
 			}
 
+			if assignedLineage != nil {
+				group, err = refreshCompactionRowIDs(group, assignedLineage)
+				if err != nil {
+					return result, cleanupBatch(err)
+				}
+			}
 			gr, err := executeCompactionGroup(ctx, current, t.branch, group, opts.GroupOptions...)
 			if err != nil {
 				return result, cleanupBatch(err, gr)
@@ -997,7 +1101,25 @@ func (t *Transaction) rewriteDataFilesPartial(ctx context.Context, groups []Comp
 			continue
 		}
 
+		previousParent := latestSnapshotForBranch(current.metadata, t.branch)
 		recordCommittedRewriteBatch(result, next, batchResults, deadPositionDeletes, safeDVs, &current, t)
+		if batchEnd < len(pendingGroups) && previousParent != nil && previousParent.FirstRowID == nil {
+			newHead := latestSnapshotForBranch(next.metadata, t.branch)
+			if newHead != nil && newHead.FirstRowID != nil {
+				paths := make(map[string]struct{})
+				for _, group := range pendingGroups[batchEnd:] {
+					for _, task := range group.Tasks {
+						if task.File != nil && task.FirstRowID == nil {
+							paths[task.File.FilePath()] = struct{}{}
+						}
+					}
+				}
+				assignedLineage, err = readCompactionSourceLineage(ctx, fs, newHead, paths)
+				if err != nil {
+					return result, fmt.Errorf("read first row IDs assigned by compaction: %w", err)
+				}
+			}
+		}
 	}
 
 	return result, nil
