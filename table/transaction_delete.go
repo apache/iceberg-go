@@ -186,7 +186,7 @@ func (t *Transaction) performMergeOnReadDeletion(ctx context.Context, snapshotPr
 		for _, entry := range withPartialDeletions {
 			partialFiles = append(partialFiles, entry.DataFile())
 		}
-		referenced, err := t.writePositionDeletesForFiles(ctx, fs, updater, dvs, partialFiles, filter, caseSensitive, concurrency, commitUUID)
+		referenced, err := t.writePositionDeletesForFiles(ctx, wfs, updater, dvs, partialFiles, filter, caseSensitive, concurrency, commitUUID)
 		if err != nil {
 			return nil, err
 		}
@@ -273,8 +273,9 @@ func WithDeleteCaseInsensitive() DeleteOption {
 // On a v3 table, every data file the delete removes or rewrites takes its deletion vector with it.
 // A merge-on-read delete replaces the existing deletion vector of a file it deletes rows from.
 //
-// A commit that removes a deletion vector is not replayed: if another writer commits first,
-// it fails with ErrCommitFailed instead of refreshing and retrying, so reload the table and run the delete again.
+// A commit that removes a deletion vector or a legacy position-delete file is not
+// replayed: if another writer commits first, it fails with ErrCommitFailed instead
+// of refreshing and retrying, so reload the table and run the delete again.
 //
 // The concurrency parameter controls the level of parallelism for manifest processing and file rewriting and
 // can be overridden using the WithOverwriteConcurrency option. Defaults to runtime.GOMAXPROCS(0).
@@ -885,6 +886,67 @@ func (t *Transaction) rewriteSingleFile(ctx context.Context, args rewriteSingleF
 	return result, nil
 }
 
+// positionDeleteWriterRecords releases each scan-owned batch after the writer
+// consumes it. The v2 feeder completes before the caller reads observed paths.
+func positionDeleteWriterRecords(records iter.Seq2[arrow.RecordBatch, error], observe func(arrow.RecordBatch) error) iter.Seq2[arrow.RecordBatch, error] {
+	return func(yield func(arrow.RecordBatch, error) bool) {
+		for batch, err := range records {
+			if err == nil && observe != nil {
+				err = observe(batch)
+			}
+			if err != nil {
+				if batch != nil {
+					batch.Release()
+				}
+				yield(nil, err)
+
+				return
+			}
+			more := yield(batch, nil)
+			batch.Release()
+			if !more {
+				return
+			}
+		}
+	}
+}
+
+func collectPositionDeletePaths(ctx context.Context, batch arrow.RecordBatch, seen map[string]struct{}, paths []string) ([]string, error) {
+	column := batch.Column(0)
+	values, err := tblutils.FilePathValues(column)
+	if err != nil {
+		return nil, err
+	}
+	for i := range values.Len() {
+		if i%positionalDeleteCancellationCheckInterval == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
+		path, err := positionDeletePathAt(values, column, i)
+		if err != nil {
+			return nil, err
+		}
+		if _, ok := seen[path]; !ok {
+			path = strings.Clone(path)
+			seen[path] = struct{}{}
+			paths = append(paths, path)
+		}
+	}
+
+	return paths, nil
+}
+
+func positionDeletePathAt(values arrow.TypedArray[string], column arrow.Array, i int) (string, error) {
+	if !isNullPositionDeletePath(values, column, i) {
+		if path := values.Value(i); path != "" {
+			return path, nil
+		}
+	}
+
+	return "", fmt.Errorf("%w: empty file_path in position delete", iceberg.ErrInvalidSchema)
+}
+
 func isNullPositionDeletePath(values arrow.TypedArray[string], column arrow.Array, i int) bool {
 	if values.IsNull(i) {
 		return true
@@ -896,21 +958,15 @@ func isNullPositionDeletePath(values arrow.TypedArray[string], column arrow.Arra
 	return false
 }
 
-// writePositionDeletesForFiles writes position-delete files for the rows in
-// files that match filter, appends them to updater, and returns the distinct
-// data-file paths those deletes reference, including paths in v2 delete files
-// that cover more than one data file.
-func (t *Transaction) writePositionDeletesForFiles(ctx context.Context, fs io.IO, updater *snapshotProducer, dvs liveDeletionVectors, files []iceberg.DataFile, filter iceberg.BooleanExpression, caseSensitive bool, concurrency int, commitUUID uuid.UUID) ([]string, error) {
+// writePositionDeletesForFiles writes position deletes on v2 or DVs on v3.
+// It returns distinct data-file paths affected by the new deletes.
+// A v2 position-delete file may cover multiple data files, so those paths
+// must be collected from streamed records rather than its manifest entry.
+// On v3, only files with new positions receive replacement DVs. An unchanged
+// file must retain its prior deletes, and a shared legacy delete file cannot
+// be removed just because one of its targets now has a DV.
+func (t *Transaction) writePositionDeletesForFiles(ctx context.Context, fs io.WriteFileIO, updater *snapshotProducer, dvs liveDeletionVectors, files []iceberg.DataFile, filter iceberg.BooleanExpression, caseSensitive bool, concurrency int, commitUUID uuid.UUID) ([]string, error) {
 	meta, err := t.txnMeta()
-	if err != nil {
-		return nil, err
-	}
-
-	posDeleteRecIter, err := t.makePositionDeleteRecordsForFilter(ctx, fs, files, filter, caseSensitive, concurrency)
-	if err != nil {
-		return nil, err
-	}
-	wfs, err := requireWriteFileIO(fs)
 	if err != nil {
 		return nil, err
 	}
@@ -920,88 +976,56 @@ func (t *Transaction) writePositionDeletesForFiles(ctx context.Context, fs io.IO
 		partitionContextByFilePath[df.FilePath()] = partitionContext{partitionData: df.Partition(), specID: df.SpecID()}
 	}
 
-	// A v2 output file can contain deletes for multiple data files and then
-	// has no referenced_data_file. Collect the paths while writing its rows.
-	// The writer consumes this iterator in one feeder and joins it before the
-	// output iterator completes, so the map is read only after that join.
-	streamedPaths := make(map[string]struct{})
-	streamedPathOrder := make([]string, 0)
-	recordsWithPaths := func(yield func(arrow.RecordBatch, error) bool) {
-		for record, err := range posDeleteRecIter {
-			if err != nil {
-				if record != nil {
-					record.Release()
-				}
-				yield(nil, err)
-
-				return
-			}
-			column := record.Column(0)
-			values, err := tblutils.FilePathValues(column)
-			if err != nil {
-				record.Release()
-				yield(nil, err)
-
-				return
-			}
-			for i := range values.Len() {
-				if i%positionalDeleteCancellationCheckInterval == 0 {
-					if err := ctx.Err(); err != nil {
-						record.Release()
-						yield(nil, err)
-
-						return
-					}
-				}
-				if isNullPositionDeletePath(values, column, i) || values.Value(i) == "" {
-					record.Release()
-					yield(nil, fmt.Errorf("%w: empty file_path in position delete", iceberg.ErrInvalidSchema))
-
-					return
-				}
-				path := values.Value(i)
-				if _, ok := streamedPaths[path]; !ok {
-					ownedPath := strings.Clone(path)
-					streamedPaths[ownedPath] = struct{}{}
-					streamedPathOrder = append(streamedPathOrder, ownedPath)
-				}
-			}
-			more := yield(record, nil)
-			record.Release()
-			if !more {
-				return
-			}
-		}
-	}
-
-	// V3 tables store deletes as deletion vectors, and the spec allows at most
-	// one DV per data file. A data file being partially deleted may already
-	// carry a DV from an earlier delete; those existing positions are folded
-	// into the new DV (the incremental deletes) and the superseded DVs are
-	// removed. Without this a second delete on the same file would write a
-	// second live DV, corrupting the table (buildDVIndex rejects it).
-	// dvs is empty on v2.
-	existingDVs := make(map[string]iceberg.DataFile)
-	existingDVBitmaps := make(map[string]*dv.RoaringPositionBitmap)
+	// Read existing DVs before starting the record scan so a failed Puffin
+	// read cannot strand scan workers or their Arrow buffers.
+	existingDeletes := make(map[string]*dv.RoaringPositionBitmap, min(len(dvs), len(files)))
 	for _, df := range files {
-		entry, ok := dvs[df.FilePath()]
+		path := df.FilePath()
+		entry, ok := dvs[path]
 		if !ok {
 			continue
 		}
 		bitmap, err := dv.ReadDV(ctx, fs, entry.DataFile())
 		if err != nil {
-			return nil, fmt.Errorf("failed to read existing deletion vector for %s: %w", df.FilePath(), err)
+			return nil, fmt.Errorf("failed to read existing deletion vector for %s: %w", path, err)
 		}
-		existingDVs[df.FilePath()] = entry.DataFile()
-		existingDVBitmaps[df.FilePath()] = bitmap
+		existingDeletes[path] = bitmap
+	}
+	posDeleteRecIter, oldPositionDeletes, err := t.makePositionDeleteRecordsForFilter(ctx, fs, files, filter, caseSensitive, concurrency)
+	if err != nil {
+		return nil, err
+	}
+	// An upgraded table may still have v2 position deletes that need to be
+	// carried into the first DV. The writer uses a seed only after finding
+	// at least one position that it does not already cover.
+	for path, bitmap := range oldPositionDeletes.bitmaps {
+		if existing := existingDeletes[path]; existing != nil {
+			existing.Or(bitmap)
+		} else {
+			existingDeletes[path] = bitmap
+		}
+	}
+
+	// A v2 output can cover multiple files and omit referenced_data_file.
+	// Collect its paths as the writer consumes the records.
+	var streamedPathOrder []string
+	var observe func(arrow.RecordBatch) error
+	if meta.formatVersion < 3 {
+		seenPaths := make(map[string]struct{})
+		observe = func(batch arrow.RecordBatch) error {
+			var err error
+			streamedPathOrder, err = collectPositionDeletePaths(ctx, batch, seenPaths, streamedPathOrder)
+
+			return err
+		}
 	}
 
 	posDeleteFiles := positionDeleteRecordsToDataFiles(ctx, meta.loc, meta, partitionContextByFilePath, recordWritingArgs{
-		sc:          PositionalDeleteArrowSchema,
-		itr:         recordsWithPaths,
-		writeUUID:   &commitUUID,
-		fs:          wfs,
-		existingDVs: existingDVBitmaps,
+		sc:              PositionalDeleteArrowSchema,
+		itr:             positionDeleteWriterRecords(posDeleteRecIter, observe),
+		writeUUID:       &commitUUID,
+		fs:              fs,
+		existingDeletes: existingDeletes,
 	})
 
 	var referenced []string
@@ -1018,30 +1042,84 @@ func (t *Transaction) writePositionDeletesForFiles(ctx context.Context, fs io.IO
 			}
 		}
 	}
-	for _, ref := range streamedPathOrder {
-		if _, ok := seen[ref]; !ok {
-			seen[ref] = struct{}{}
-			referenced = append(referenced, ref)
+	if meta.formatVersion < 3 {
+		for _, ref := range streamedPathOrder {
+			if _, ok := seen[ref]; !ok {
+				seen[ref] = struct{}{}
+				referenced = append(referenced, ref)
+			}
 		}
-	}
-
-	// Supersede the old DVs only after the merged replacements are staged, so a
-	// write failure above leaves the existing DVs untouched.
-	for _, dvFile := range existingDVs {
-		updater.removeDeletionVector(dvFile)
+	} else {
+		supersedeDeletesForWrittenDVs(updater, seen, oldPositionDeletes, dvs)
 	}
 
 	return referenced, nil
 }
 
-func (t *Transaction) makePositionDeleteRecordsForFilter(ctx context.Context, fs io.IO, files []iceberg.DataFile, filter iceberg.BooleanExpression, caseSensitive bool, concurrency int) (seq2 iter.Seq2[arrow.RecordBatch, error], err error) {
+// supersedeDeletesForWrittenDVs removes old deletes only for data files that
+// received a replacement DV. File-scoped legacy deletes are folded into the
+// new bitmap; shared position-delete files must remain live because another
+// data file can still need them.
+func supersedeDeletesForWrittenDVs(updater *snapshotProducer, replacedPaths map[string]struct{}, oldPositionDeletes *legacyPositionDeletes, oldDVs liveDeletionVectors) {
+	for dataFilePath := range replacedPaths {
+		for _, deleteFile := range oldPositionDeletes.fileScoped[dataFilePath] {
+			updater.removeDeleteFile(deleteFile)
+		}
+		if entry, ok := oldDVs[dataFilePath]; ok {
+			updater.removeDeletionVector(entry.DataFile())
+		}
+	}
+}
+
+// legacyPositionDeletes records applicable v2 position deletes for the
+// current scan. bitmaps contains their row positions grouped by data-file
+// path, including positions from shared delete files. fileScoped contains
+// only delete files dedicated to one target; those may be removed when that
+// target receives a replacement DV. Shared delete files must stay live.
+type legacyPositionDeletes struct {
+	bitmaps    map[string]*dv.RoaringPositionBitmap
+	fileScoped map[string][]iceberg.DataFile
+}
+
+func loadLegacyPositionDeletes(tasks []FileScanTask, positionsByFile perFilePosDeletes) (*legacyPositionDeletes, error) {
+	deletes := &legacyPositionDeletes{
+		bitmaps:    make(map[string]*dv.RoaringPositionBitmap, len(positionsByFile)),
+		fileScoped: make(map[string][]iceberg.DataFile),
+	}
+	for path, positions := range positionsByFile {
+		bitmap, err := collectPosDeleteBitmap(positions)
+		if err != nil {
+			return nil, fmt.Errorf("invalid existing position deletes for %s: %w", path, err)
+		}
+		if !bitmap.IsEmpty() {
+			deletes.bitmaps[path] = bitmap
+		}
+	}
+
+	// An explicit referenced_data_file or equal file_path bounds identifies
+	// deletes that can be removed when their target receives a replacement DV.
+	for _, task := range tasks {
+		path := task.File.FilePath()
+		for _, deleteFile := range task.DeleteFiles {
+			if deleteFile.ContentType() != iceberg.EntryContentPosDeletes ||
+				IsDeletionVector(deleteFile) || referencedDataFilePath(deleteFile) != path {
+				continue
+			}
+			deletes.fileScoped[path] = append(deletes.fileScoped[path], deleteFile)
+		}
+	}
+
+	return deletes, nil
+}
+
+func (t *Transaction) makePositionDeleteRecordsForFilter(ctx context.Context, fs io.IO, files []iceberg.DataFile, filter iceberg.BooleanExpression, caseSensitive bool, concurrency int) (seq2 iter.Seq2[arrow.RecordBatch, error], oldPositionDeletes *legacyPositionDeletes, err error) {
 	meta, err := t.txnMeta()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	if err := tblutils.ValidateParquetReadProperties(meta.props); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	ctx = tblutils.WithTableProperties(ctx, meta.props)
 
@@ -1056,11 +1134,11 @@ func (t *Transaction) makePositionDeleteRecordsForFilter(ctx context.Context, fs
 	}
 	scan, err := t.Scan(scanOpts...)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	planned, err := scan.PlanFiles(ctx)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	existingDeletes := make(map[string][]iceberg.DataFile, len(planned))
 	for _, task := range planned {
@@ -1085,17 +1163,17 @@ func (t *Transaction) makePositionDeleteRecordsForFilter(ctx context.Context, fs
 
 	boundFilter, err := iceberg.BindExpr(meta.CurrentSchema(), filter, caseSensitive)
 	if err != nil {
-		return nil, fmt.Errorf("failed to bind filter: %w", err)
+		return nil, nil, fmt.Errorf("failed to bind filter: %w", err)
 	}
 
 	builtMeta, err := meta.Build()
 	if err != nil {
-		return nil, fmt.Errorf("failed to build metadata: %w", err)
+		return nil, nil, fmt.Errorf("failed to build metadata: %w", err)
 	}
 
 	filterIDs, err := iceberg.ExtractFieldIDs(boundFilter)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	selected := make(map[int]iceberg.Void, len(filterIDs))
 	for _, id := range filterIDs {
@@ -1103,7 +1181,7 @@ func (t *Transaction) makePositionDeleteRecordsForFilter(ctx context.Context, fs
 	}
 	projection, err := iceberg.PruneColumns(meta.CurrentSchema(), selected, false)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	scanner := &arrowScan{
@@ -1118,7 +1196,7 @@ func (t *Transaction) makePositionDeleteRecordsForFilter(ctx context.Context, fs
 	}
 	invariants, err := scanner.scanInvariants(builtMeta.Properties())
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	deletesPerFile, err := readAllDeleteFiles(ctx, fs, tasks, concurrency)
@@ -1127,7 +1205,19 @@ func (t *Transaction) makePositionDeleteRecordsForFilter(ctx context.Context, fs
 		// the error if some goroutines completed before the failure.
 		releasePerFilePosDeletes(deletesPerFile)
 
-		return nil, err
+		return nil, nil, err
+	}
+
+	if meta.formatVersion >= 3 {
+		// The scan already opened these deletes to filter the input rows.
+		oldPositionDeletes, err = loadLegacyPositionDeletes(tasks, deletesPerFile)
+		if err != nil {
+			releasePerFilePosDeletes(deletesPerFile)
+
+			return nil, nil, err
+		}
+	} else {
+		oldPositionDeletes = &legacyPositionDeletes{}
 	}
 
 	extSet := substrait.NewExtensionSet()
@@ -1178,5 +1268,5 @@ func (t *Transaction) makePositionDeleteRecordsForFilter(ctx context.Context, fs
 		close(records)
 	}()
 
-	return createIterator(ctx, uint(numWorkers), records, deletesPerFile, cancel, scanner.rowLimit), nil
+	return createIterator(ctx, uint(numWorkers), records, deletesPerFile, cancel, scanner.rowLimit), oldPositionDeletes, nil
 }

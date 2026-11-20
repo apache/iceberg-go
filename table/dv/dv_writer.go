@@ -152,8 +152,9 @@ func (w *DVWriter) AddPosition(dataFilePath string, position int64, specID int32
 	return nil
 }
 
-// Load seeds the writer with an already-written deletion vector for a data
-// file so subsequent Add or AddPosition calls merge new positions into it.
+// Load seeds the writer with previously deleted positions for a data file.
+// These may come from an existing DV or legacy position-delete files.
+// Subsequent Add or AddPosition calls merge new positions into the same entry.
 // The spec permits at most one DV per data file per snapshot. When a data file
 // that already has a DV receives more deletes, the old positions must be
 // carried into the replacement DV (and the old DV superseded) rather than dropped.
@@ -168,9 +169,7 @@ func (w *DVWriter) AddPosition(dataFilePath string, position int64, specID int32
 // partition values across calls for the same path.
 //
 // bitmap must be non-nil; its set positions are copied and the caller retains
-// ownership. (A nil bitmap would register a cardinality-0 entry, which is never
-// useful — collectExistingDVs always supplies a non-nil bitmap read from the
-// existing DV.)
+// ownership.
 func (w *DVWriter) Load(dataFilePath string, bitmap *RoaringPositionBitmap, specID int32, partitionData map[int]any) {
 	entry := w.getOrCreateEntry(dataFilePath, specID, partitionData)
 

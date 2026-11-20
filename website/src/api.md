@@ -421,6 +421,28 @@ newTbl, err := tbl.Delete(ctx,
 )
 ```
 
+With `write.delete.mode=merge-on-read`, format v2 writes position-delete
+files and format v3 writes deletion vectors (DVs). After a table is upgraded
+from v2 to v3, its older position-delete files remain valid. The **first**
+DV written for a data file carries over positions from applicable legacy
+position-delete files for that data file. Equality deletes are not folded
+into the DV and continue to apply independently. Without those earlier
+position deletes, a reader could show rows deleted before the upgrade.
+A later delete merges into the file's existing DV, so there is never more
+than one live DV for that data file.
+
+Only a file that receives **newly deleted positions** gets a replacement
+DV. The old DV or file-scoped position-delete files for that data file are
+superseded after the new DV is staged. Shared position-delete files may
+still be needed by other data files, so they remain live even when one
+target has a DV. A delete matching only previously deleted rows leaves
+the existing delete files and DVs unchanged.
+
+Removing an old position-delete file or DV makes the commit
+**non-replayable**. If another writer commits first, the operation can
+return `table.ErrCommitFailed` rather than automatically refresh and
+retry. Reload the table and perform the delete in a new transaction.
+
 ### Add existing files
 
 When you already have data files (e.g. produced by another writer), register them without rewriting:
