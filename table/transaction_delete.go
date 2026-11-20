@@ -1061,6 +1061,37 @@ type legacyPositionDeletes struct {
 	fileScoped map[string][]iceberg.DataFile
 }
 
+func loadLegacyPositionDeletes(tasks []FileScanTask, positionsByFile perFilePosDeletes) (*legacyPositionDeletes, error) {
+	deletes := &legacyPositionDeletes{
+		bitmaps:    make(map[string]*dv.RoaringPositionBitmap, len(positionsByFile)),
+		fileScoped: make(map[string][]iceberg.DataFile),
+	}
+	for path, positions := range positionsByFile {
+		bitmap, err := collectPosDeleteBitmap(positions)
+		if err != nil {
+			return nil, fmt.Errorf("invalid existing position deletes for %s: %w", path, err)
+		}
+		if !bitmap.IsEmpty() {
+			deletes.bitmaps[path] = bitmap
+		}
+	}
+
+	// An explicit referenced_data_file or equal file_path bounds identifies
+	// deletes that can be removed when their target receives a replacement DV.
+	for _, task := range tasks {
+		path := task.File.FilePath()
+		for _, deleteFile := range task.DeleteFiles {
+			if deleteFile.ContentType() != iceberg.EntryContentPosDeletes ||
+				IsDeletionVector(deleteFile) || referencedDataFilePath(deleteFile) != path {
+				continue
+			}
+			deletes.fileScoped[path] = append(deletes.fileScoped[path], deleteFile)
+		}
+	}
+
+	return deletes, nil
+}
+
 func (t *Transaction) makePositionDeleteRecordsForFilter(ctx context.Context, fs io.IO, files []iceberg.DataFile, filter iceberg.BooleanExpression, caseSensitive bool, concurrency int) (seq2 iter.Seq2[arrow.RecordBatch, error], oldPositionDeletes *legacyPositionDeletes, err error) {
 	meta, err := t.txnMeta()
 	if err != nil {
@@ -1157,38 +1188,16 @@ func (t *Transaction) makePositionDeleteRecordsForFilter(ctx context.Context, fs
 		return nil, nil, err
 	}
 
-	oldPositionDeletes = &legacyPositionDeletes{}
-	// Reuse the planner-matched position deletes when upgrading a v2 table to
-	// v3. They have already been read for filtering out previously deleted
-	// rows, so turning them into DV seeds does not require another file read.
 	if meta.formatVersion >= 3 {
-		oldPositionDeletes.bitmaps = make(map[string]*dv.RoaringPositionBitmap, len(deletesPerFile))
-		for path, positions := range deletesPerFile {
-			bitmap, err := collectPosDeleteBitmap(positions)
-			if err != nil {
-				releasePerFilePosDeletes(deletesPerFile)
+		// The scan already opened these deletes to filter the input rows.
+		oldPositionDeletes, err = loadLegacyPositionDeletes(tasks, deletesPerFile)
+		if err != nil {
+			releasePerFilePosDeletes(deletesPerFile)
 
-				return nil, nil, fmt.Errorf("invalid existing position deletes for %s: %w", path, err)
-			}
-			if !bitmap.IsEmpty() {
-				oldPositionDeletes.bitmaps[path] = bitmap
-			}
+			return nil, nil, err
 		}
-
-		// Java considers a position-delete file file-scoped when it has an
-		// explicit referenced_data_file or equal file_path bounds. Only such
-		// files can be removed once their target receives a replacement DV.
-		oldPositionDeletes.fileScoped = make(map[string][]iceberg.DataFile)
-		for _, task := range tasks {
-			path := task.File.FilePath()
-			for _, deleteFile := range task.DeleteFiles {
-				if deleteFile.ContentType() != iceberg.EntryContentPosDeletes ||
-					IsDeletionVector(deleteFile) || referencedDataFilePath(deleteFile) != path {
-					continue
-				}
-				oldPositionDeletes.fileScoped[path] = append(oldPositionDeletes.fileScoped[path], deleteFile)
-			}
-		}
+	} else {
+		oldPositionDeletes = &legacyPositionDeletes{}
 	}
 
 	extSet := substrait.NewExtensionSet()
