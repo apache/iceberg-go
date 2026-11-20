@@ -135,3 +135,68 @@ func TestManifestDeflateCodecReleasesLargeBufferAfterSmallBlock(t *testing.T) {
 	require.Equal(t, small, decoded)
 	require.LessOrEqual(t, codec.output.Cap(), manifestDeflateShrinkThreshold)
 }
+
+
+func TestManifestDeflateCodecAlternatingBlocksAndClose(t *testing.T) {
+	codec := newManifestDeflateCodec()
+	t.Cleanup(func() { require.NoError(t, codec.Close()) })
+
+	// The inflater must not carry state between empty, small, and large
+	// blocks, even after the codec is closed and used again.
+	blocks := [][]byte{
+		nil,
+		[]byte("a"),
+		bytes.Repeat([]byte("large block with a distinct payload"), 4096),
+		[]byte("a different small block"),
+		nil,
+		bytes.Repeat([]byte{0, 1, 2, 3, 4, 5}, 2048),
+	}
+	encoded := make([][]byte, len(blocks))
+	for i, block := range blocks {
+		var err error
+		encoded[i], err = codec.Compress(block)
+		require.NoError(t, err)
+	}
+
+	for round := 0; round < 3; round++ {
+		for i, block := range blocks {
+			decoded, err := codec.DecompressBounded(encoded[i], int64(len(block)))
+			require.NoError(t, err, "round %d, block %d", round, i)
+			require.Len(t, decoded, len(block))
+			require.True(t, bytes.Equal(block, decoded), "round %d, block %d", round, i)
+		}
+
+		require.NoError(t, codec.Close())
+		require.Nil(t, codec.reader)
+		require.Zero(t, codec.output.Cap())
+	}
+}
+
+func TestManifestDeflateCodecRepeatedLimitFailuresRecover(t *testing.T) {
+	codec := newManifestDeflateCodec()
+	t.Cleanup(func() { require.NoError(t, codec.Close()) })
+
+	for _, plain := range [][]byte{
+		[]byte("small block"),
+		bytes.Repeat([]byte("longer block"), 1024),
+		[]byte("another block"),
+	} {
+		encoded, err := codec.Compress(plain)
+		require.NoError(t, err)
+
+		for attempt := 0; attempt < 2; attempt++ {
+			_, err = codec.DecompressBounded(encoded, int64(len(plain)-1))
+			require.ErrorContains(t, err, "decompressed block exceeds limit")
+			require.Zero(t, codec.output.Cap(), "an unsuccessful block must not retain a buffer")
+		}
+
+		decoded, err := codec.DecompressBounded(encoded, int64(len(plain)))
+		require.NoError(t, err)
+		require.Equal(t, plain, decoded)
+
+		// A zero limit means no bound, not a zero-length block.
+		decoded, err = codec.DecompressBounded(encoded, 0)
+		require.NoError(t, err)
+		require.Equal(t, plain, decoded)
+	}
+}
