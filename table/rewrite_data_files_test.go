@@ -966,6 +966,41 @@ func TestCompactionRejectsDeletesCommittedBeforeTransaction(t *testing.T) {
 	}
 }
 
+func TestPartialCompactionCanCreateBranchFromPlanningSnapshot(t *testing.T) {
+	planned, cat, groups, _ := newAbsorbedDeleteFixture(t, absorbedPositionDelete, 2)
+	cat.beforeCommit = nil
+
+	tx, err := planned.NewTransactionOnBranch("compaction")
+	require.NoError(t, err)
+	result, err := tx.RewriteDataFiles(t.Context(), groups, table.RewriteDataFilesOptions{
+		PartialProgress: true,
+		MaxCommits:      2,
+	})
+	require.NoError(t, err)
+	require.Len(t, result.CompletedGroups, 2)
+	require.Empty(t, result.FailedGroups)
+	require.Equal(t, table.OpReplace, result.Table.SnapshotByName("compaction").Summary.Operation)
+	require.Equal(t, planned.CurrentSnapshot().SnapshotID, result.Table.CurrentSnapshot().SnapshotID)
+	require.ElementsMatch(t, []int64{1, 2, 3, 4}, idsOnRef(t, result.Table, "compaction"))
+}
+
+func TestCompactionRejectsConcurrentChangeToNewBranchParent(t *testing.T) {
+	planned, cat, groups, _ := newAbsorbedDeleteFixture(t, absorbedPositionDelete, 2, 0)
+	const branch = "compaction"
+	tx, err := planned.NewTransactionOnBranch(branch)
+	require.NoError(t, err)
+	_, err = tx.RewriteDataFiles(t.Context(), groups, table.RewriteDataFilesOptions{})
+	require.NoError(t, err)
+	_, err = tx.Commit(t.Context())
+	require.ErrorIs(t, err, table.ErrTransactionUnusable)
+	require.Nil(t, cat.beforeCommit)
+
+	latest, err := cat.LoadTable(t.Context(), planned.Identifier())
+	require.NoError(t, err)
+	require.Nil(t, latest.SnapshotByName(branch))
+	require.ElementsMatch(t, []int64{2, 3, 4}, scanIDs(t, latest))
+}
+
 func TestCompactionPlanningSnapshotOnTargetBranch(t *testing.T) {
 	planned, cat, groups, _ := newAbsorbedDeleteFixture(t, absorbedPositionDelete, 2)
 	cat.beforeCommit = nil

@@ -97,7 +97,8 @@ func (t *Transaction) NewRewrite(snapshotProps iceberg.Properties) *RewriteFiles
 // snapshot. Worker results supplied through [RewriteFiles.ApplyResult] must
 // agree with the snapshot when they carry their own planning snapshot ID.
 // Without an explicit ID or any worker snapshot IDs, validation starts at
-// the transaction's base as usual.
+// the transaction's base. Supply the original planning snapshot explicitly
+// when using legacy worker results planned before the transaction began.
 func (r *RewriteFiles) ValidateFromSnapshot(snapshotID int64) *RewriteFiles {
 	r.planningSnapshotID = &snapshotID
 
@@ -306,6 +307,19 @@ func (r *RewriteFiles) ApplyResult(gr CompactionGroupResult) *RewriteFiles {
 	return r.applyResult(gr)
 }
 
+func (t *Transaction) pinNewRewriteBranch() error {
+	if t.branch == "" || t.branch == MainBranch || t.baseRefSnapshotID(t.branch) != nil {
+		return nil
+	}
+
+	// A new branch inherits main. Retrying against a different ref could
+	// change which deletes apply to the rows the workers already read.
+	return t.applyPinned(nil, []Requirement{
+		AssertRefSnapshotID(t.branch, nil),
+		AssertRefSnapshotID(MainBranch, t.baseRefSnapshotID(MainBranch)),
+	}, []string{t.branch, MainBranch})
+}
+
 func (r *RewriteFiles) applyResult(gr CompactionGroupResult) *RewriteFiles {
 	for _, df := range gr.OldDataFiles {
 		r.DeleteFile(df)
@@ -368,6 +382,11 @@ func (r *RewriteFiles) Commit(ctx context.Context) error {
 			return err
 		}
 		if err := r.txn.validateRewriteFromSnapshot(ctx, meta, snapshotID, r.dataFilesToDelete); err != nil {
+			return err
+		}
+	}
+	if len(r.dataFilesToDelete) > 0 {
+		if err := r.txn.pinNewRewriteBranch(); err != nil {
 			return err
 		}
 	}

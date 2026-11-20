@@ -885,7 +885,7 @@ func (t *Transaction) rewriteDataFilesPartial(ctx context.Context, groups []Comp
 		return result, err
 	}
 	if snapshotID == nil {
-		if head := current.SnapshotByName(t.branch); head != nil {
+		if head := latestSnapshotForBranch(current.Metadata(), t.branch); head != nil {
 			snapshotID = &head.SnapshotID
 		}
 	}
@@ -1001,6 +1001,9 @@ func (t *Transaction) rewriteDataFilesPartial(ctx context.Context, groups []Comp
 		groupTxn, err := current.NewTransactionOnBranch(t.branch)
 		if err != nil {
 			return result, cleanupBatch(fmt.Errorf("create transaction for partial rewrite batch: %w", err))
+		}
+		if err := groupTxn.pinNewRewriteBranch(); err != nil {
+			return result, cleanupBatch(err)
 		}
 		newDataFiles := make([]iceberg.DataFile, 0)
 		oldDataFiles := make([]iceberg.DataFile, 0, len(rewrittenFiles))
@@ -1183,7 +1186,7 @@ type deletesSincePlanning struct {
 // ErrConflictingDeleteFiles if any delete since planning applies to groups.
 func (d *deletesSincePlanning) validate(ctx context.Context, current Metadata, fs iceio.IO, groups []CompactionTaskGroup) error {
 	// The rewrite validator binds no filters, so case sensitivity is moot.
-	head := current.SnapshotByName(d.branch)
+	head := latestSnapshotForBranch(current, d.branch)
 	cc, err := newConflictContextAt(ctx, current, d.branch, head, d.checkedSnapshotID, fs, true)
 	if err != nil {
 		return err
