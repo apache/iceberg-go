@@ -1682,27 +1682,33 @@ func (c *dictionaryEntryMemo) apply(
 	deleteSet *singleBytesEqualityDeleteSet,
 	mem memory.Allocator,
 ) bool {
-	dict := column.Dictionary()
-	if data := column.Data().Dictionary(); c.dict != data {
-		c.dict = data
-		c.results = slices.Grow(c.results[:0], dict.Len())[:dict.Len()]
-		clear(c.results)
-	}
-
-	switch d := dict.(type) {
+	switch d := column.Dictionary().(type) {
 	case *array.String:
-		applyDictionaryEntryResults(m, column, d, d.ValueOffsets(), d.ValueBytes(), deleteSet, mem, c.results)
+		applyDictionaryEntryResults(m, column, d, d.ValueOffsets(), d.ValueBytes(), deleteSet, mem, c.resultsFor(column))
 	case *array.LargeString:
-		applyDictionaryEntryResults(m, column, d, d.ValueOffsets(), d.ValueBytes(), deleteSet, mem, c.results)
+		applyDictionaryEntryResults(m, column, d, d.ValueOffsets(), d.ValueBytes(), deleteSet, mem, c.resultsFor(column))
 	case *array.Binary:
-		applyDictionaryEntryResults(m, column, d, d.ValueOffsets(), d.ValueBytes(), deleteSet, mem, c.results)
+		applyDictionaryEntryResults(m, column, d, d.ValueOffsets(), d.ValueBytes(), deleteSet, mem, c.resultsFor(column))
 	case *array.LargeBinary:
-		applyDictionaryEntryResults(m, column, d, d.ValueOffsets(), d.ValueBytes(), deleteSet, mem, c.results)
+		applyDictionaryEntryResults(m, column, d, d.ValueOffsets(), d.ValueBytes(), deleteSet, mem, c.resultsFor(column))
 	default:
 		return false
 	}
 
 	return true
+}
+
+// resultsFor returns zeroed per-entry results sized to column's dictionary,
+// reusing them while they belong to the same dictionary data.
+func (c *dictionaryEntryMemo) resultsFor(column *array.Dictionary) []uint8 {
+	if data := column.Data().Dictionary(); c.dict != data {
+		c.dict = data
+		n := column.Dictionary().Len()
+		c.results = slices.Grow(c.results[:0], n)[:n]
+		clear(c.results)
+	}
+
+	return c.results
 }
 
 func applyDictionaryEntryResults[Offset ~int32 | ~int64](

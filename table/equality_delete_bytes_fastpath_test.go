@@ -473,6 +473,60 @@ func TestDictionaryEntryMemoKeepsResultsForSameDictionary(t *testing.T) {
 	}
 }
 
+func TestDictionaryEntryMemoSkipsUnsupportedDictionaryValue(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+
+	deleteSet := &singleBytesEqualityDeleteSet{keys: set[string]{"apple": {}}}
+	fixedBuilder := array.NewFixedSizeBinaryBuilder(mem, &arrow.FixedSizeBinaryType{ByteWidth: 4})
+	fixedBuilder.Append([]byte("abcd"))
+	fixedBuilder.Append([]byte("efgh"))
+	fixedDictionary := fixedBuilder.NewArray()
+	fixedBuilder.Release()
+	defer fixedDictionary.Release()
+	fixedIdx, _, err := array.FromJSON(mem, arrow.PrimitiveTypes.Int16, strings.NewReader("[0, 1]"))
+	require.NoError(t, err)
+	defer fixedIdx.Release()
+	fixedColumn := array.NewDictionaryArray(
+		&arrow.DictionaryType{IndexType: arrow.PrimitiveTypes.Int16, ValueType: fixedDictionary.DataType()},
+		fixedIdx, fixedDictionary)
+	defer fixedColumn.Release()
+
+	var mask equalityDeleteMask
+	defer mask.release()
+
+	var unsupported dictionaryEntryMemo
+	assert.False(t, unsupported.apply(&mask, fixedColumn, deleteSet, mem))
+	assert.Nil(t, unsupported.dict)
+	assert.Empty(t, unsupported.results)
+	assert.Zero(t, cap(unsupported.results))
+
+	var memo dictionaryEntryMemo
+	stringBuilder := array.NewStringBuilder(mem)
+	stringBuilder.Append("apple")
+	stringBuilder.Append("bob")
+	stringBuilder.Append("cherry")
+	stringDictionary := stringBuilder.NewArray()
+	stringBuilder.Release()
+	defer stringDictionary.Release()
+	stringIdx, _, err := array.FromJSON(mem, arrow.PrimitiveTypes.Int16, strings.NewReader("[0, 1]"))
+	require.NoError(t, err)
+	defer stringIdx.Release()
+	stringColumn := array.NewDictionaryArray(
+		&arrow.DictionaryType{IndexType: arrow.PrimitiveTypes.Int16, ValueType: stringDictionary.DataType()},
+		stringIdx, stringDictionary)
+	defer stringColumn.Release()
+	require.True(t, memo.apply(&mask, stringColumn, deleteSet, mem))
+
+	cachedDict, cachedResults := memo.dict, memo.results
+	require.Len(t, cachedResults, 3)
+
+	assert.False(t, memo.apply(&mask, fixedColumn, deleteSet, mem))
+	assert.Equal(t, cachedDict, memo.dict)
+	assert.Equal(t, cachedResults, memo.results)
+	assert.Same(t, &cachedResults[0], &memo.results[0])
+}
+
 func buildBenchDeleteSetSingleString(numDeletes int, noMatch bool) *equalityDeleteSet {
 	keys := make(set[string], numDeletes)
 	var buf bytes.Buffer
