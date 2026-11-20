@@ -2747,7 +2747,7 @@ func cloneSchema(schema *iceberg.Schema) *iceberg.Schema {
 
 	return iceberg.NewSchemaWithIdentifiers(
 		schema.ID,
-		slices.Clone(schema.IdentifierFieldIDs),
+		schema.IdentifierFieldIDs(),
 		schema.Fields()...,
 	)
 }

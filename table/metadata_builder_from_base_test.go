@@ -113,8 +113,6 @@ func TestMetadataBuilderFromBaseCopiesBuiltinMetadata(t *testing.T) {
 
 	require.NotSame(t, &metadata.SchemaList[0], &builder.schemaList[0])
 	require.NotSame(t, metadata.SchemaList[0], builder.schemaList[0])
-	builder.schemaList[0].IdentifierFieldIDs[0] = 99
-	require.Equal(t, []int{1}, metadata.SchemaList[0].IdentifierFieldIDs)
 
 	require.NotSame(t, &metadata.Specs[0], &builder.specs[0])
 	require.NotSame(t, &metadata.SnapshotList[0], &builder.snapshotList[0])

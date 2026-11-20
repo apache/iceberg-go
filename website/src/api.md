@@ -153,7 +153,7 @@ schema := iceberg.NewSchema(1,
 )
 ```
 
-For nested types use `&iceberg.StructType{...}`, `&iceberg.ListType{...}`, or `&iceberg.MapType{...}`. Use `NewSchemaWithIdentifiers(id, identifierIDs, fields...)` to mark identifier columns.
+For nested types use `iceberg.NewStructType(fields...)`, `iceberg.NewListType(elementID, element, required)`, or `iceberg.NewMapType(keyID, key, valueID, value, valueRequired)`. Their fields can't be assigned directly: read them through accessors, and to change one, build a new value. Use `NewSchemaWithIdentifiers(id, identifierIDs, fields...)` to mark identifier columns.
 
 #### Create
 

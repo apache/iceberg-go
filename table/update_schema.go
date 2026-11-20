@@ -213,7 +213,7 @@ func (u *UpdateSchema) initIdentifierFieldNames() error {
 	}
 
 	identifierFieldNames := make(map[string]struct{})
-	for _, id := range u.schema.IdentifierFieldIDs {
+	for _, id := range u.schema.IdentifierFieldIDs() {
 		name, ok := u.schema.FindColumnName(id)
 		if !ok {
 			return fmt.Errorf("identifier field %d not found", id)
@@ -794,7 +794,7 @@ func (u *UpdateSchema) unionField(path []string, newField iceberg.NestedField) e
 		if !ok {
 			return fmt.Errorf("cannot change field to map: %s", strings.Join(path, "."))
 		}
-		if !isIgnorableTypeUpdate(existingMap.KeyType, t.KeyType) {
+		if !isIgnorableTypeUpdate(existingMap.KeyType(), t.KeyType()) {
 			return fmt.Errorf("cannot update map key: %s", strings.Join(childPath(path, "key"), "."))
 		}
 		if err := u.unionField(childPath(path, "value"), t.ValueField()); err != nil {
@@ -1420,11 +1420,11 @@ func (a *applyChanges) List(listType iceberg.ListType, elementResult iceberg.Typ
 		panic(fmt.Sprintf("cannot delete element type from list: %s", elementResult))
 	}
 
-	return iceberg.NewListType(listType.ElementID, elementType, a.updatedRequired(listType.ElementID, listType.ElementRequired))
+	return iceberg.NewListType(listType.ElementID(), elementType, a.updatedRequired(listType.ElementID(), listType.ElementRequired()))
 }
 
 func (a *applyChanges) Map(mapType iceberg.MapType, keyResult, valueResult iceberg.Type) iceberg.Type {
-	keyID := mapType.KeyID
+	keyID := mapType.KeyID()
 	if _, ok := a.deletes[keyID]; ok {
 		panic(fmt.Errorf("cannot delete map keys: %s", mapType.String()))
 	}
@@ -1437,7 +1437,7 @@ func (a *applyChanges) Map(mapType iceberg.MapType, keyResult, valueResult icebe
 		panic(fmt.Errorf("cannot add fields to map keys: %s", mapType.String()))
 	}
 
-	if !mapType.KeyType.Equals(keyResult) {
+	if !mapType.KeyType().Equals(keyResult) {
 		panic(fmt.Errorf("cannot alter map keys: %s", mapType.String()))
 	}
 
@@ -1448,7 +1448,7 @@ func (a *applyChanges) Map(mapType iceberg.MapType, keyResult, valueResult icebe
 		panic(fmt.Errorf("cannot delete value type from map: %s", mapType.String()))
 	}
 
-	return iceberg.NewMapType(mapType.KeyID, mapType.KeyType, mapType.ValueID, valueType, a.updatedRequired(mapType.ValueID, mapType.ValueRequired))
+	return iceberg.NewMapType(mapType.KeyID(), mapType.KeyType(), mapType.ValueID(), valueType, a.updatedRequired(mapType.ValueID(), mapType.ValueRequired()))
 }
 
 func (a *applyChanges) Primitive(primitive iceberg.PrimitiveType) iceberg.Type {

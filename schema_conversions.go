@@ -26,8 +26,8 @@ import (
 )
 
 func partitionTypeToAvroSchema(t *StructType) (*avro.Schema, error) {
-	fields := make([]avro.SchemaField, len(t.FieldList))
-	for i, f := range t.FieldList {
+	fields := make([]avro.SchemaField, len(t.fields))
+	for i, f := range t.fields {
 		var node avro.SchemaNode
 		switch typ := f.Type.(type) {
 		case Int32Type:
