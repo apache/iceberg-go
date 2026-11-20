@@ -469,13 +469,13 @@ func TestBlobFileIOCreateHonorsOperationCancellation(t *testing.T) {
 	assert.False(t, exists)
 }
 
-func testBlobFileIO(ctx context.Context, bucketName string, bucket *blob.Bucket, allowedSchemes ...string) *FileIO {
+func testBlobFileIO(ctx context.Context, bucketName string, bucket *blob.Bucket, allowedSchemes ...string) *fileIO {
 	if len(allowedSchemes) == 0 {
 		allowedSchemes = schemes.S3
 	}
 	extractor := DefaultObjectLocationExtractor(bucketName, allowedSchemes...)
 
-	return &FileIO{
+	return &fileIO{
 		Bucket:        bucket,
 		extractObject: extractor,
 		ctx:           ctx,
@@ -548,25 +548,6 @@ func TestBlobFileIORejectsUnsupportedObjectPaths(t *testing.T) {
 	}
 }
 
-func TestNewWriterExistsError(t *testing.T) {
-	ctx := context.Background()
-
-	bucket := memblob.OpenBucket(nil)
-
-	bfs := &FileIO{
-		Bucket:        bucket,
-		extractObject: identityObjectLocation,
-		ctx:           ctx,
-	}
-	require.NoError(t, bucket.Close())
-
-	_, err := bfs.NewWriter(ctx, "test-file", false, nil)
-
-	var pathErr *fs.PathError
-	require.ErrorAs(t, err, &pathErr, "error should be a PathError wrapping the Exists failure")
-	require.Equal(t, "new writer", pathErr.Op)
-}
-
 type trackingReadCloser struct {
 	io.ReadCloser
 	closed *bool
@@ -621,7 +602,7 @@ func TestReadAtResourceCleanup(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var lastReaderClosed bool
-			bfs := &FileIO{
+			bfs := &fileIO{
 				Bucket:        bucket,
 				extractObject: identityObjectLocation,
 				ctx:           ctx,
@@ -1098,7 +1079,7 @@ func TestBlobFileIODeleteFilesIsConcurrentAndBounded(t *testing.T) {
 	bucket := blob.NewBucket(tracker)
 	defer bucket.Close()
 
-	bfs := &FileIO{
+	bfs := &fileIO{
 		Bucket:        bucket,
 		extractObject: DefaultObjectLocationExtractor("test-bucket"),
 		ctx:           context.Background(),
@@ -1271,10 +1252,10 @@ func (b *cancelAfterCopyBucket) Close() error { return nil }
 func TestBlobFileIORenameFinishesAfterCopyWhenCanceled(t *testing.T) {
 	for _, tt := range []struct {
 		name   string
-		rename func(*FileIO, context.Context, string, string) error
+		rename func(*fileIO, context.Context, string, string) error
 	}{
-		{name: "Rename", rename: (*FileIO).Rename},
-		{name: "RenameNoReplace", rename: (*FileIO).RenameNoReplace},
+		{name: "Rename", rename: (*fileIO).Rename},
+		{name: "RenameNoReplace", rename: (*fileIO).RenameNoReplace},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			type renameContextKey struct{}
@@ -1628,7 +1609,7 @@ func TestBlobFileIOPreprocessErrorRetainsOriginalPath(t *testing.T) {
 		{"remove", func() error { return fileIO.Remove(context.Background(), name) }},
 		{"write file", func() error { return fileIO.WriteFile(context.Background(), name, nil) }},
 		{"new writer", func() error {
-			_, err := fileIO.NewWriter(context.Background(), name, true, nil)
+			_, err := fileIO.Create(context.Background(), name)
 
 			return err
 		}},
