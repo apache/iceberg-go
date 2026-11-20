@@ -2181,7 +2181,10 @@ func ParseMetadataBytes(b []byte) (Metadata, error) {
 		return nil, err
 	}
 
-	var ret Metadata
+	var ret interface {
+		Metadata
+		json.Unmarshaler
+	}
 	switch formatVersion {
 	case 1:
 		ret = &metadataV1{}
@@ -2198,7 +2201,10 @@ func ParseMetadataBytes(b []byte) (Metadata, error) {
 		return nil, err
 	}
 
-	if err := json.Unmarshal(normalized, ret); err != nil {
+	// Preflight already checked JSON syntax. Call the decoder directly to avoid
+	// scanning the entire document again before entering UnmarshalJSON.
+	start, end := trimJSONSpan(normalized, 0, len(normalized))
+	if err := ret.UnmarshalJSON(normalized[start:end]); err != nil {
 		if errors.Is(err, ErrInvalidMetadata) {
 			return nil, err
 		}
@@ -2248,29 +2254,6 @@ func preflightMetadataBytes(b []byte) (map[string]json.RawMessage, int, error) {
 	}
 
 	return metadata, formatVersion, nil
-}
-
-func requirePartitionSpecIDs(b []byte) error {
-	var metadata map[string]json.RawMessage
-	if err := json.Unmarshal(b, &metadata); err != nil {
-		return fmt.Errorf("%w: %w", ErrInvalidMetadata, err)
-	}
-
-	return requirePartitionSpecIDsFromMetadata(metadata)
-}
-
-func requirePartitionSpecIDsFromMetadata(metadata map[string]json.RawMessage) error {
-	rawSpecs, ok := metadata["partition-specs"]
-	if !ok {
-		return nil
-	}
-
-	var specs []rawPartitionSpec
-	if err := json.Unmarshal(rawSpecs, &specs); err != nil {
-		return fmt.Errorf("%w: invalid partition-specs: %w", ErrInvalidMetadata, err)
-	}
-
-	return validatePartitionSpecIDs(specs)
 }
 
 type rawPartitionSpec struct {

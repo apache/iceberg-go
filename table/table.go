@@ -142,6 +142,12 @@ type CatalogIO interface {
 	CommitTable(context.Context, Identifier, []Requirement, []Update) (Metadata, string, error)
 }
 
+// FullSnapshotHistoryLoader is an optional catalog capability for operations
+// that need the complete snapshot history of a table.
+type FullSnapshotHistoryLoader interface {
+	LoadTableWithFullSnapshotHistory(context.Context, Identifier) (*Table, error)
+}
+
 type Table struct {
 	identifier           Identifier
 	metadata             Metadata
@@ -436,10 +442,6 @@ func (t Table) Delete(ctx context.Context, filter iceberg.BooleanExpression, sna
 	}
 
 	return txn.Commit(ctx)
-}
-
-func (t Table) manifestSet(ctx context.Context, snapshot Snapshot) (snapshotManifestSet, error) {
-	return t.manifestSetWithFSF(ctx, snapshot, t.fsF)
 }
 
 func (t Table) manifestSetWithFSF(
@@ -820,7 +822,11 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 			// the new branch head so re-submission is not rejected
 			// just because a peer advanced the head with a
 			// non-conflicting commit.
-			fresh, refreshErr := t.cat.LoadTable(retryCtx, slices.Clone(t.identifier))
+			load := t.cat.LoadTable
+			if loader, ok := t.cat.(FullSnapshotHistoryLoader); ok && co.replay.hasExpirationRecords() {
+				load = loader.LoadTableWithFullSnapshotHistory
+			}
+			fresh, refreshErr := load(retryCtx, slices.Clone(t.identifier))
 			if refreshErr != nil {
 				return nil, fmt.Errorf("refresh table for retry: %w", refreshErr)
 			}
@@ -828,6 +834,9 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 				if err := validateTableUUID(t.identifier, t.metadata.TableUUID(), fresh.metadata.TableUUID()); err != nil {
 					return nil, fmt.Errorf("%w: table was replaced: %w", ErrTransactionUnusable, err)
 				}
+			}
+			if fresh.snapshotHistoryRefsOnly && co.replay.hasExpirationRecords() {
+				return nil, fmt.Errorf("%w: %w", ErrTransactionUnusable, errSnapshotHistoryIncompleteForExpiration)
 			}
 			current, currentLoc = fresh.metadata, fresh.metadataLocation
 			reqs = rewriteRefSnapshotRequirements(reqs, co.branch, current, pinned)

@@ -134,6 +134,9 @@ func NewFromLocation(
 // Note: This function only supports creating new views with format version 1.
 // It does not support updating existing view metadata.
 // representation holds both SQL text and its dialect.
+// WithIORegistry selects the FileIO registry for the metadata write.
+// props configures FileIO and is also persisted in the view metadata. Use
+// CreateViewWithIOProperties to keep storage credentials out of view metadata.
 func CreateView(
 	ctx context.Context,
 	catalogName string,
@@ -143,13 +146,15 @@ func CreateView(
 	defaultNS table.Identifier,
 	loc string,
 	props iceberg.Properties,
+	opts ...MetadataIOOption,
 ) (*View, error) {
-	return CreateViewWithIOProperties(ctx, catalogName, viewIdent, schema, representation, defaultNS, loc, props, props)
+	return CreateViewWithIOProperties(ctx, catalogName, viewIdent, schema, representation, defaultNS, loc, props, props, opts...)
 }
 
 // CreateViewWithIOProperties creates a view using ioProps to configure the
 // filesystem and metadataProps as the properties persisted in view metadata.
-// representation holds both SQL text and its dialect.
+// representation holds both SQL text and its dialect. WithIORegistry optionally
+// selects the registry used by the write without changing persisted metadata.
 func CreateViewWithIOProperties(
 	ctx context.Context,
 	catalogName string,
@@ -160,6 +165,7 @@ func CreateViewWithIOProperties(
 	loc string,
 	ioProps iceberg.Properties,
 	metadataProps iceberg.Properties,
+	opts ...MetadataIOOption,
 ) (*View, error) {
 	viewVersion, err := NewVersionFromSQL(
 		InitialVersionID,
@@ -172,12 +178,13 @@ func CreateViewWithIOProperties(
 		return nil, err
 	}
 
-	return CreateViewFromVersion(ctx, viewIdent, schema, viewVersion, loc, ioProps, metadataProps)
+	return CreateViewFromVersion(ctx, viewIdent, schema, viewVersion, loc, ioProps, metadataProps, opts...)
 }
 
 // CreateViewFromVersion creates a view whose first version is version, kept as
 // given apart from its IDs. A nil default namespace defaults to the view's
 // namespace, a nil summary to the engine name, and a zero timestamp to now.
+// WithIORegistry affects only filesystem resolution for the metadata write.
 func CreateViewFromVersion(
 	ctx context.Context,
 	viewIdent table.Identifier,
@@ -186,6 +193,7 @@ func CreateViewFromVersion(
 	loc string,
 	ioProps iceberg.Properties,
 	metadataProps iceberg.Properties,
+	opts ...MetadataIOOption,
 ) (*View, error) {
 	if version == nil {
 		return nil, fmt.Errorf("%w: view version is required", ErrInvalidViewMetadata)
@@ -215,7 +223,7 @@ func CreateViewFromVersion(
 		return nil, err
 	}
 
-	metadataLocation, _, err := WriteMetadata(ctx, viewMD.Metadata, ioProps)
+	metadataLocation, _, err := WriteMetadata(ctx, viewMD.Metadata, ioProps, opts...)
 	if err != nil {
 		return nil, err
 	}

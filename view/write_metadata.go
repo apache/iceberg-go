@@ -32,6 +32,20 @@ import (
 	"github.com/google/uuid"
 )
 
+// MetadataIOOption configures the filesystem used to write view metadata.
+// This is distinct from Option, which configures a loaded View.
+type MetadataIOOption func(*metadataIOOptions)
+
+type metadataIOOptions struct {
+	registry *icebergio.Registry
+}
+
+// WithIORegistry uses a catalog-scoped FileIO registry to write view metadata.
+// A nil registry uses the process-wide default. The registry is shared, not copied.
+func WithIORegistry(registry *icebergio.Registry) MetadataIOOption {
+	return func(o *metadataIOOptions) { o.registry = registry }
+}
+
 // WriteMetadata writes a new view metadata file and returns its location and
 // filesystem. The directory comes from table.WriteMetadataPathKey, or defaults
 // to <view location>/metadata. Each file has a fresh view-<uuid>.metadata.json
@@ -41,7 +55,13 @@ import (
 // cancellation. After a successful write, the caller owns publication and may
 // use the returned filesystem to remove the file after a confirmed failed
 // commit. A commit with an unknown outcome must retain the file.
-func WriteMetadata(ctx context.Context, metadata Metadata, ioProps iceberg.Properties) (string, icebergio.WriteFileIO, error) {
+// WithIORegistry selects an isolated filesystem for this write.
+func WriteMetadata(ctx context.Context, metadata Metadata, ioProps iceberg.Properties, opts ...MetadataIOOption) (string, icebergio.WriteFileIO, error) {
+	var config metadataIOOptions
+	for _, opt := range opts {
+		opt(&config)
+	}
+
 	if err := ctx.Err(); err != nil {
 		return "", nil, err
 	}
@@ -59,7 +79,11 @@ func WriteMetadata(ctx context.Context, metadata Metadata, ioProps iceberg.Prope
 	if err != nil {
 		return "", nil, fmt.Errorf("failed to marshal view metadata: %w", err)
 	}
-	fs, err := icebergio.LoadFS(ctx, ioProps, location)
+	loadFS := icebergio.LoadFS
+	if config.registry != nil {
+		loadFS = config.registry.LoadFS
+	}
+	fs, err := loadFS(ctx, ioProps, location)
 	if err != nil {
 		return "", nil, fmt.Errorf("failed to load filesystem for view metadata: %w", err)
 	}

@@ -853,6 +853,19 @@ if err != nil { /* ... */ }
 newTbl, err := txn.Commit(ctx)
 ```
 
+Snapshot expiration needs complete ancestry to honor branch retention and snapshot
+references. When a REST table was loaded with `snapshot-loading-mode=refs`,
+expiration requests `snapshots=all` for the transaction's metadata revision
+and keeps any updates already staged in the transaction. Use
+`Transaction.ExpireSnapshotsWithContext(ctx, ...)` to control that request.
+
+If the catalog cannot supply complete history or the metadata revision has
+changed, staging returns an error matching `table.ErrInvalidOperation`.
+Reload the table and start a new transaction if the revision changed.
+Commit retries and resumed commits also request full history before replanning
+expiration. If the catalog still returns refs-only history, the commit stops
+before resubmitting and returns an error matching `table.ErrTransactionUnusable`.
+
 Pass `table.WithPostCommit(true)` to delete the unreferenced data and metadata files after the commit lands. The `iceberg expire-snapshots` CLI command wraps the same operation - see [CLI](./cli.md).
 
 ## Views
@@ -886,6 +899,14 @@ v.Properties()            // iceberg.Properties
 ```
 
 `view.New(ident, meta, metadataLocation)` constructs a view from already-loaded metadata; `view.NewFromLocation(ctx, ident, metadataLocation, fsysFactory)` loads metadata from disk or object storage.
+
+Pass `view.WithIORegistry(registry)` to `view.CreateView`,
+`view.CreateViewWithIOProperties`, `view.CreateViewFromVersion`, or
+`view.WriteMetadata` to use isolated FileIO. For `view.NewFromLocation`,
+pass a filesystem factory from the registry. The IO-properties helpers
+keep filesystem configuration (`ioProps`) separate from persisted view
+properties (`metadataProps`). See
+[FileIO configuration](./configuration.md#file-system-credentials).
 
 ## Iceberg ↔ Arrow types
 

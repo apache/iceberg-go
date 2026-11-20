@@ -22,7 +22,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"maps"
 	"strconv"
 	"sync"
 )
@@ -51,17 +50,6 @@ type deferredSnapshotOverlay struct {
 
 	applyOnce sync.Once
 	applied   []Snapshot
-}
-
-func (o *deferredSnapshotOverlay) clone() *deferredSnapshotOverlay {
-	if o == nil {
-		return nil
-	}
-
-	return &deferredSnapshotOverlay{
-		additions: cloneSnapshots(o.additions),
-		removed:   maps.Clone(o.removed),
-	}
 }
 
 func (o *deferredSnapshotOverlay) isRemoved(id int64) bool {

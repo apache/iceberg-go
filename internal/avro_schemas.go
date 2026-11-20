@@ -70,20 +70,12 @@ func DecimalNode(precision, scale int) avro.SchemaNode {
 	}
 }
 
-func DecimalSchema(precision, scale int) *avro.Schema {
-	return mustSchema(DecimalNode(precision, scale))
-}
-
 func FixedNode(size int) avro.SchemaNode {
 	return avro.SchemaNode{
 		Type: atype.Fixed,
 		Name: fmt.Sprintf("fixed_%d", size),
 		Size: size,
 	}
-}
-
-func FixedSchema(size int) *avro.Schema {
-	return mustSchema(FixedNode(size))
 }
 
 // Schema nodes for reuse in composition.
