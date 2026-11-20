@@ -225,7 +225,7 @@ func (t *Transaction) StageRewrittenDataFilesByPath(
 
 	// Path-based rewrites check both data and delete entries. Keep that
 	// check and its conflict error when staging the replacement.
-	rewrite.replacementPathValidator = func(cc *conflictContext) error {
+	validator := conflictValidatorFunc(func(cc *conflictContext) error {
 		if cc == nil {
 			return nil
 		}
@@ -247,9 +247,11 @@ func (t *Transaction) StageRewrittenDataFilesByPath(
 		}
 
 		return nil
-	}
+	})
 
-	return rewrite.Commit(ctx)
+	return rewrite.commitWithOptions(ctx, func(cfg *dataFileCfg) {
+		cfg.replacementPathValidator = &validator
+	})
 }
 
 // completePathRewriteMetricTotals sums only columns reported by every file.

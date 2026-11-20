@@ -803,6 +803,9 @@ func (m *mergeAppendFiles) processManifests(ctx context.Context, manifests []ice
 func (m *mergeAppendFiles) needsValidation() bool { return false }
 
 type snapshotProducer struct {
+	// The staging operation checked these paths against the original parent.
+	retryDataPathCheck replayDataPathCheck
+
 	producerImpl
 
 	commitUuid              uuid.UUID
@@ -820,9 +823,6 @@ type snapshotProducer struct {
 	deletedDVsByRef         map[string]iceberg.DataFile
 	snapshotProps           iceberg.Properties
 	written                 writtenManifests
-
-	// The staging operation checked these paths against the original parent.
-	retryDataPathCheck replayDataPathCheck
 }
 
 // deleteFileAddition carries the data sequence number of a rewritten delete
@@ -1653,6 +1653,7 @@ func writeManifestListFile(
 // before anything is written (RewriteManifests detecting a no-op) can build the
 // manifests themselves and only then decide to write the manifest list.
 func (sp *snapshotProducer) commitManifests(ctx context.Context, newManifests, addedContent []iceberg.ManifestFile) (_ []Update, _ []Requirement, err error) {
+	nextSequence := sp.txn.meta.nextSequenceNumber()
 	pathCheck := sp.retryDataPathCheck
 	var originalParent *Snapshot
 	if len(pathCheck.paths) > 0 {
@@ -1662,7 +1663,6 @@ func (sp *snapshotProducer) commitManifests(ctx context.Context, newManifests, a
 		}
 	}
 
-	nextSequence := sp.txn.meta.nextSequenceNumber()
 	summary, err := sp.summary(sp.snapshotProps)
 	if err != nil {
 		return nil, nil, err

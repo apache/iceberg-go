@@ -1616,12 +1616,13 @@ func validateAddedDeletionVectorTargets(
 type WriteOption func(*dataFileCfg)
 
 type dataFileCfg struct {
+	replacementPathValidator *conflictValidatorFunc
+
 	skipAutoNameMapping          bool
 	skipDuplicateCheck           bool
 	rewriteSemantics             bool
 	equalityDeleteToDVConversion bool
 	dataSequenceNumber           *int64
-	replacementPathValidator     *conflictValidatorFunc
 }
 
 // withRewriteSemantics marks an overwrite/replace operation as a

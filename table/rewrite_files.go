@@ -57,17 +57,16 @@ import (
 // Commit has been called, a second call returns an error regardless
 // of whether the first call succeeded.
 type RewriteFiles struct {
-	txn                      *Transaction
-	dataFilesToDelete        []iceberg.DataFile
-	dataFilesToAdd           []iceberg.DataFile
-	deleteFilesToAdd         []rewriteDeleteFileAddition
-	deleteFilesToRemove      []iceberg.DataFile
-	autoDeleteFilesToRemove  []iceberg.DataFile
-	dataSequenceNumber       *int64
-	replacementPathValidator conflictValidatorFunc
-	snapshotProps            iceberg.Properties
-	err                      error
-	committed                bool
+	txn                     *Transaction
+	dataFilesToDelete       []iceberg.DataFile
+	dataFilesToAdd          []iceberg.DataFile
+	deleteFilesToAdd        []rewriteDeleteFileAddition
+	deleteFilesToRemove     []iceberg.DataFile
+	autoDeleteFilesToRemove []iceberg.DataFile
+	dataSequenceNumber      *int64
+	snapshotProps           iceberg.Properties
+	err                     error
+	committed               bool
 }
 
 type rewriteDeleteFileAddition struct {
@@ -313,6 +312,10 @@ func (r *RewriteFiles) ApplyResult(gr CompactionGroupResult) *RewriteFiles {
 // builder has no file changes, or if the underlying
 // [Transaction.ReplaceFiles] call fails.
 func (r *RewriteFiles) Commit(ctx context.Context) error {
+	return r.commitWithOptions(ctx)
+}
+
+func (r *RewriteFiles) commitWithOptions(ctx context.Context, options ...WriteOption) error {
 	if r.committed {
 		return fmt.Errorf("%w: RewriteFiles.Commit already called on this builder", ErrInvalidOperation)
 	}
@@ -340,16 +343,9 @@ func (r *RewriteFiles) Commit(ctx context.Context) error {
 	if r.dataSequenceNumber != nil {
 		opts = append(opts, withDataSequenceNumber(*r.dataSequenceNumber))
 	}
-	if r.replacementPathValidator != nil {
-		// Keep the configuration exposed through WriteOption comparable.
-		validator := r.replacementPathValidator
-		opts = append(opts, func(cfg *dataFileCfg) {
-			cfg.replacementPathValidator = &validator
-		})
-	}
 	if err := r.txn.replaceFiles(ctx, r.dataFilesToDelete, r.dataFilesToAdd,
 		r.deleteFilesToRemove, r.autoDeleteFilesToRemove, r.deleteFilesToAdd,
-		r.snapshotProps, opts...); err != nil {
+		r.snapshotProps, append(opts, options...)...); err != nil {
 		return err
 	}
 
