@@ -339,6 +339,38 @@ func TestMatchDVToDataValidatesPartition(t *testing.T) {
 			dataSeq:       4,
 		},
 		{
+			name:          "matching promoted int to long",
+			dataPartition: map[int]any{1000: int32(42)},
+			dvPartition:   map[int]any{1000: int64(42)},
+			dataSeq:       4,
+		},
+		{
+			name:          "matching temporal representation",
+			dataPartition: map[int]any{1000: iceberg.Date(-1)},
+			dvPartition:   map[int]any{1000: int32(-1)},
+			dataSeq:       4,
+		},
+		{
+			name:          "matching binary values",
+			dataPartition: map[int]any{1000: []byte{0, ';', 0xff}},
+			dvPartition:   map[int]any{1000: []byte{0, ';', 0xff}},
+			dataSeq:       4,
+		},
+		{
+			name:          "binary must not match text",
+			dataPartition: map[int]any{1000: []byte("same")},
+			dvPartition:   map[int]any{1000: "same"},
+			dataSeq:       4,
+			wantError:     true,
+		},
+		{
+			name:          "null must not match literal nil",
+			dataPartition: map[int]any{1000: nil},
+			dvPartition:   map[int]any{1000: "<nil>"},
+			dataSeq:       4,
+			wantError:     true,
+		},
+		{
 			name:          "different partition values",
 			dataPartition: map[int]any{1000: int32(4)},
 			dvPartition:   map[int]any{1000: int32(5)},
