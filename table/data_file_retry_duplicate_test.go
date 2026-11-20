@@ -349,3 +349,28 @@ func TestDirectDataFileRetrySkipsInheritedManifests(t *testing.T) {
 			branchFiles(t, fs, committed.Metadata(), MainBranch))
 	})
 }
+
+func TestDirectDataFileRetryChecksEveryReplayParent(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		fs, peer, tbl := newExpireReplayTable(t, nil)
+		tbl, _ = appendOnBranch(t, tbl, MainBranch, "base")
+		peerAppend(t, fs, peer, MainBranch, "unrelated")
+		firstHead := peer.metadata
+		peerAppend(t, fs, peer, MainBranch, "duplicate")
+		nextHead := peer.metadata
+
+		cat := &peerHeadsCatalog{
+			heads: []Metadata{firstHead, nextHead},
+			errs:  []error{ErrCommitFailed, ErrCommitFailed},
+		}
+		txn := newOCCTable(t, tbl.Metadata(), fs, cat).NewTransaction()
+		stageFiles(t, txn, "duplicate")
+		_, err := txn.Commit(t.Context())
+		require.ErrorIs(t, err, ErrDuplicateDataFiles)
+		require.ErrorIs(t, err, ErrTransactionUnusable)
+		require.Equal(t, 2, cat.loads)
+		require.Equal(t, 2, cat.attempts)
+		require.Equal(t, []string{"base", "duplicate", "unrelated"},
+			branchFiles(t, fs, cat.current, MainBranch))
+	})
+}
