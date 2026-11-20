@@ -253,3 +253,43 @@ func TestRewriteFilesValidatesWorkerDeletionVectors(t *testing.T) {
 		})
 	}
 }
+
+func TestRewriteCompactionRetainsSharedDeleteWhenLastGroupOnlyIsRewritten(t *testing.T) {
+	for _, mode := range []string{"atomic", "distributed"} {
+		t.Run(mode, func(t *testing.T) {
+			tbl, groups := setupSharedPositionDeleteRewrite(t, newRewriteTestTable(t))
+			tx := tbl.NewTransaction()
+
+			if mode == "atomic" {
+				result, err := tx.RewriteDataFiles(t.Context(), groups[1:], table.RewriteDataFilesOptions{})
+				require.NoError(t, err)
+				require.Equal(t, 1, result.RewrittenGroups)
+				require.Zero(t, result.RemovedPositionDeleteFiles,
+					"rewriting the second target cannot remove a delete needed by the first")
+			} else {
+				result, err := table.ExecuteCompactionGroup(t.Context(), tbl, groups[1])
+				require.NoError(t, err)
+				require.Len(t, result.SafePosDeletes, 1)
+				require.NoError(t, tx.NewRewrite(nil).ApplyResult(result).Commit(t.Context()))
+			}
+
+			committed, err := tx.Commit(t.Context())
+			require.NoError(t, err)
+			require.ElementsMatch(t, []int64{2, 4}, scanIDs(t, committed))
+
+			tasks, err := committed.Scan().PlanFiles(t.Context())
+			require.NoError(t, err)
+			require.Len(t, tasks, 2)
+			filesWithDeletes := 0
+			for _, task := range tasks {
+				if len(task.DeleteFiles) > 0 {
+					filesWithDeletes++
+				}
+			}
+			require.Equal(t, 1, filesWithDeletes,
+				"the first source file must still have its shared delete attached")
+			require.NotContains(t, committed.CurrentSnapshot().Summary.Properties,
+				"removed-position-delete-files")
+		})
+	}
+}
