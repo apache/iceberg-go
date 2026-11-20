@@ -610,9 +610,9 @@ func TestRefreshTableCredentialsClearsADLSAuthShadowingVendedToken(t *testing.T)
 	tbl, _ := newExternalTable(t, cat, scheme, table.WithSavedConfig(iceberg.Properties{
 		iceio.ADLSSharedKeyAccountName:                 "warehouse",
 		iceio.ADLSSharedKeyAccountKey:                  "stale-key",
-		iceio.ADLSSasTokenPrefix + "warehouse":         "stale-sas",
+		iceio.ADLSSASTokenPrefix + "warehouse":         "stale-sas",
 		iceio.ADLSConnectionStringPrefix + "warehouse": "stale-conn",
-		iceio.ADLSSasTokenPrefix + otherHost:           "other-sas",
+		iceio.ADLSSASTokenPrefix + otherHost:           "other-sas",
 	}))
 
 	refreshed, err := cat.RefreshTableCredentials(context.Background(), tbl)
@@ -625,12 +625,12 @@ func TestRefreshTableCredentialsClearsADLSAuthShadowingVendedToken(t *testing.T)
 	for _, k := range []string{
 		iceio.ADLSSharedKeyAccountName,
 		iceio.ADLSSharedKeyAccountKey,
-		iceio.ADLSSasTokenPrefix + "warehouse",
+		iceio.ADLSSASTokenPrefix + "warehouse",
 		iceio.ADLSConnectionStringPrefix + "warehouse",
 	} {
 		assert.NotContains(t, props, k, "stale credential %q must not survive the refresh", k)
 	}
-	assert.Equal(t, "other-sas", props[iceio.ADLSSasTokenPrefix+otherHost])
+	assert.Equal(t, "other-sas", props[iceio.ADLSSASTokenPrefix+otherHost])
 }
 
 // tableResponseCalls are the catalog methods that build a table from a
@@ -710,9 +710,9 @@ func TestTableResponseVendedADLSTokenClearsShadowingCredentials(t *testing.T) {
 			// account's shared key.
 			iceio.ADLSSharedKeyAccountName:             "other",
 			iceio.ADLSSharedKeyAccountKey:              "other-key",
-			iceio.ADLSSasTokenPrefix + host:            "stale-sas",
+			iceio.ADLSSASTokenPrefix + host:            "stale-sas",
 			iceio.ADLSConnectionStringPrefix + "acct":  "stale-conn",
-			iceio.ADLSSasTokenPrefix + otherHost:       "other-sas",
+			iceio.ADLSSASTokenPrefix + otherHost:       "other-sas",
 			iceio.ADLSConnectionStringPrefix + "other": "other-conn",
 		},
 		map[string]string{iceio.ADLSToken: "vended-token"})
@@ -722,12 +722,12 @@ func TestTableResponseVendedADLSTokenClearsShadowingCredentials(t *testing.T) {
 		for _, k := range []string{
 			iceio.ADLSSharedKeyAccountName,
 			iceio.ADLSSharedKeyAccountKey,
-			iceio.ADLSSasTokenPrefix + host,
+			iceio.ADLSSASTokenPrefix + host,
 			iceio.ADLSConnectionStringPrefix + "acct",
 		} {
 			assert.NotContains(t, props, k, "%s: credential %q would be selected ahead of the token", name, k)
 		}
-		assert.Equal(t, "other-sas", props[iceio.ADLSSasTokenPrefix+otherHost], name)
+		assert.Equal(t, "other-sas", props[iceio.ADLSSASTokenPrefix+otherHost], name)
 		assert.Equal(t, "other-conn", props[iceio.ADLSConnectionStringPrefix+"other"], name)
 	}
 }

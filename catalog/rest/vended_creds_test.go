@@ -843,9 +843,9 @@ func TestPrefixScopedIOClearsStaleADLSAuthForVendedToken(t *testing.T) {
 		iceio.ADLSEndpoint:                         "dfs.core.windows.net",
 		iceio.ADLSSharedKeyAccountName:             "acct",
 		iceio.ADLSSharedKeyAccountKey:              "stale-key",
-		iceio.ADLSSasTokenPrefix + host:            "stale-sas",
+		iceio.ADLSSASTokenPrefix + host:            "stale-sas",
 		iceio.ADLSConnectionStringPrefix + "acct":  "stale-connection-string",
-		iceio.ADLSSasTokenPrefix + otherHost:       "other-sas",
+		iceio.ADLSSASTokenPrefix + otherHost:       "other-sas",
 		iceio.ADLSConnectionStringPrefix + "other": "other-connection-string",
 	}, []StorageCredential{{
 		Prefix: "abfss://container@" + host + "/",
@@ -862,12 +862,12 @@ func TestPrefixScopedIOClearsStaleADLSAuthForVendedToken(t *testing.T) {
 	// vended token is what actually authenticates the read.
 	assert.NotContains(t, props, iceio.ADLSSharedKeyAccountName)
 	assert.NotContains(t, props, iceio.ADLSSharedKeyAccountKey)
-	assert.NotContains(t, props, iceio.ADLSSasTokenPrefix+host)
+	assert.NotContains(t, props, iceio.ADLSSASTokenPrefix+host)
 	assert.NotContains(t, props, iceio.ADLSConnectionStringPrefix+"acct")
 
 	// Another account's SAS token and connection string never apply here and
 	// are kept.
-	assert.Equal(t, "other-sas", props[iceio.ADLSSasTokenPrefix+otherHost])
+	assert.Equal(t, "other-sas", props[iceio.ADLSSASTokenPrefix+otherHost])
 	assert.Equal(t, "other-connection-string", props[iceio.ADLSConnectionStringPrefix+"other"])
 }
 
@@ -879,7 +879,7 @@ func TestPrefixScopedIOKeepsCredentialsWhenVendedADLSTokenIsEmpty(t *testing.T) 
 	p := newPrefixScopedIO(context.Background(), iceberg.Properties{
 		iceio.ADLSSharedKeyAccountName:  "acct",
 		iceio.ADLSSharedKeyAccountKey:   "working-key",
-		iceio.ADLSSasTokenPrefix + host: "working-sas",
+		iceio.ADLSSASTokenPrefix + host: "working-sas",
 	}, []StorageCredential{{
 		Prefix: "abfss://container@" + host + "/",
 		Config: iceberg.Properties{iceio.ADLSToken: ""},
@@ -892,7 +892,7 @@ func TestPrefixScopedIOKeepsCredentialsWhenVendedADLSTokenIsEmpty(t *testing.T) 
 	// a weaker auth method.
 	assert.Equal(t, "acct", props[iceio.ADLSSharedKeyAccountName])
 	assert.Equal(t, "working-key", props[iceio.ADLSSharedKeyAccountKey])
-	assert.Equal(t, "working-sas", props[iceio.ADLSSasTokenPrefix+host])
+	assert.Equal(t, "working-sas", props[iceio.ADLSSASTokenPrefix+host])
 }
 
 func TestVendedCredsRefreshClearsStaleADLSAuth(t *testing.T) {
@@ -918,8 +918,8 @@ func TestVendedCredsRefreshClearsStaleADLSAuth(t *testing.T) {
 	r.props = iceberg.Properties{
 		iceio.ADLSSharedKeyAccountName:       "acct",
 		iceio.ADLSSharedKeyAccountKey:        "stale-key",
-		iceio.ADLSSasTokenPrefix + host:      "stale-sas",
-		iceio.ADLSSasTokenPrefix + otherHost: "other-sas",
+		iceio.ADLSSASTokenPrefix + host:      "stale-sas",
+		iceio.ADLSSASTokenPrefix + otherHost: "other-sas",
 	}
 	// Force the refresh branch: a cached IO whose credentials have expired.
 	r.cachedIO = iceio.LocalFS{}
@@ -933,8 +933,8 @@ func TestVendedCredsRefreshClearsStaleADLSAuth(t *testing.T) {
 	assert.Equal(t, "fresh-token", captured[iceio.ADLSToken])
 	assert.NotContains(t, captured, iceio.ADLSSharedKeyAccountName)
 	assert.NotContains(t, captured, iceio.ADLSSharedKeyAccountKey)
-	assert.NotContains(t, captured, iceio.ADLSSasTokenPrefix+host)
-	assert.Equal(t, "other-sas", captured[iceio.ADLSSasTokenPrefix+otherHost])
+	assert.NotContains(t, captured, iceio.ADLSSASTokenPrefix+host)
+	assert.Equal(t, "other-sas", captured[iceio.ADLSSASTokenPrefix+otherHost])
 }
 
 // TestVendedCredsRefreshedADLSTokenExpiry checks that a vended adls.token gets
@@ -988,14 +988,14 @@ func TestVendedCredsRefreshedADLSTokenExpiry(t *testing.T) {
 			r.nowFunc = func() time.Time { return now }
 			r.location = scheme + "://container@" + host + "/table/metadata.json"
 			r.props = iceberg.Properties{
-				iceio.ADLSSasTokenPrefix + host:    "stale-sas",
+				iceio.ADLSSASTokenPrefix + host:    "stale-sas",
 				keyAdlsSasExpiresAtMs + "." + host: staleExpiry,
 				keyAdlsSasExpiresAtMs:              staleExpiry,
 				keyS3TokenExpiresAtMs:              staleExpiry,
 				keyGcsOAuthExpiresAt:               staleExpiry,
 				// Overwritten when the token is vended with its own expiration-time.
 				keyExpirationTime:                       staleExpiry,
-				iceio.ADLSSasTokenPrefix + otherHost:    "other-sas",
+				iceio.ADLSSASTokenPrefix + otherHost:    "other-sas",
 				keyAdlsSasExpiresAtMs + "." + otherHost: staleExpiry,
 			}
 			// Force the refresh branch: a cached IO whose credentials have expired.
@@ -1251,7 +1251,7 @@ func TestPrefixScopedIOKeysFilesystemsByContainer(t *testing.T) {
 		{name: "no matching credential"},
 		{name: "one credential covering both containers", credentials: []StorageCredential{{
 			Prefix: scheme + "://",
-			Config: iceberg.Properties{iceio.ADLSSasTokenPrefix + "acct.dfs.core.windows.net": "sig=sas"},
+			Config: iceberg.Properties{iceio.ADLSSASTokenPrefix + "acct.dfs.core.windows.net": "sig=sas"},
 		}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

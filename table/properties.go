@@ -246,9 +246,9 @@ func IsGCEnabled(props iceberg.Properties) bool {
 // Reserved properties
 const (
 	PropertyFormatVersion            = "format-version"
-	PropertyUuid                     = "uuid"
+	PropertyUUID                     = "uuid"
 	PropertySnapshotCount            = "snapshot-count"
-	PropertyCurrentSnapshotId        = "current-snapshot-id"
+	PropertyCurrentSnapshotID        = "current-snapshot-id"
 	PropertyCurrentSnapshotSummary   = "current-snapshot-summary"
 	PropertyCurrentSnapshotTimestamp = "current-snapshot-timestamp-ms"
 	PropertyCurrentSchema            = "current-schema"
@@ -258,9 +258,9 @@ const (
 
 var reservedProperties = [...]string{
 	PropertyFormatVersion,
-	PropertyUuid,
+	PropertyUUID,
 	PropertySnapshotCount,
-	PropertyCurrentSnapshotId,
+	PropertyCurrentSnapshotID,
 	PropertyCurrentSnapshotSummary,
 	PropertyCurrentSnapshotTimestamp,
 	PropertyCurrentSchema,

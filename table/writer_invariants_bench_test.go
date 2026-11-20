@@ -82,7 +82,7 @@ func BenchmarkDefaultDataFileWriter(b *testing.B) {
 	for i := 0; b.Loop(); i++ {
 		record.Retain()
 		_, err := writer.writeFile(b.Context(), nil, WriteTask{
-			Uuid: writeUUID, ID: i, FileCount: 1, Schema: schema,
+			UUID: writeUUID, ID: i, FileCount: 1, Schema: schema,
 			Batches: []arrow.RecordBatch{record},
 		})
 		if err != nil {

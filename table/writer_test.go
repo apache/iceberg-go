@@ -38,7 +38,7 @@ func TestGenerateDataFileName(t *testing.T) {
 		{
 			name: "unpartitioned table first file",
 			task: WriteTask{
-				Uuid:        uuid.MustParse("12345678-1234-1234-1234-123456789abc"),
+				UUID:        uuid.MustParse("12345678-1234-1234-1234-123456789abc"),
 				ID:          0,
 				PartitionID: 0,
 				FileCount:   1,
@@ -49,7 +49,7 @@ func TestGenerateDataFileName(t *testing.T) {
 		{
 			name: "unpartitioned table multiple files",
 			task: WriteTask{
-				Uuid:        uuid.MustParse("12345678-1234-1234-1234-123456789abc"),
+				UUID:        uuid.MustParse("12345678-1234-1234-1234-123456789abc"),
 				ID:          0,
 				PartitionID: 0,
 				FileCount:   42,
@@ -60,7 +60,7 @@ func TestGenerateDataFileName(t *testing.T) {
 		{
 			name: "partitioned table first partition",
 			task: WriteTask{
-				Uuid:        uuid.MustParse("87654321-4321-4321-4321-cba987654321"),
+				UUID:        uuid.MustParse("87654321-4321-4321-4321-cba987654321"),
 				ID:          1,
 				PartitionID: 0,
 				FileCount:   1,
@@ -71,7 +71,7 @@ func TestGenerateDataFileName(t *testing.T) {
 		{
 			name: "partitioned table second partition",
 			task: WriteTask{
-				Uuid:        uuid.MustParse("87654321-4321-4321-4321-cba987654321"),
+				UUID:        uuid.MustParse("87654321-4321-4321-4321-cba987654321"),
 				ID:          2,
 				PartitionID: 1,
 				FileCount:   1,
@@ -82,7 +82,7 @@ func TestGenerateDataFileName(t *testing.T) {
 		{
 			name: "partitioned table multiple files in partition",
 			task: WriteTask{
-				Uuid:        uuid.MustParse("87654321-4321-4321-4321-cba987654321"),
+				UUID:        uuid.MustParse("87654321-4321-4321-4321-cba987654321"),
 				ID:          3,
 				PartitionID: 2,
 				FileCount:   15,
@@ -93,7 +93,7 @@ func TestGenerateDataFileName(t *testing.T) {
 		{
 			name: "large partition ID",
 			task: WriteTask{
-				Uuid:        uuid.MustParse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"),
+				UUID:        uuid.MustParse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"),
 				ID:          100,
 				PartitionID: 12345,
 				FileCount:   99999,
@@ -104,7 +104,7 @@ func TestGenerateDataFileName(t *testing.T) {
 		{
 			name: "more than 5 digits",
 			task: WriteTask{
-				Uuid:        uuid.MustParse("ffffffff-ffff-ffff-ffff-ffffffffffff"),
+				UUID:        uuid.MustParse("ffffffff-ffff-ffff-ffff-ffffffffffff"),
 				ID:          123456,
 				PartitionID: 567890,
 				FileCount:   123456,
@@ -127,7 +127,7 @@ func TestGenerateDataFileNameFormat(t *testing.T) {
 	// {partitionId:05d}-{taskId}-{operationId}-{fileCount:05d}.{extension}
 
 	task := WriteTask{
-		Uuid:        uuid.MustParse("12345678-1234-1234-1234-123456789abc"),
+		UUID:        uuid.MustParse("12345678-1234-1234-1234-123456789abc"),
 		ID:          5,
 		PartitionID: 3,
 		FileCount:   7,
@@ -150,10 +150,10 @@ func TestGenerateDataFileNameUniqueness(t *testing.T) {
 	// Test that different tasks generate different filenames
 	baseUUID := uuid.MustParse("12345678-1234-1234-1234-123456789abc")
 
-	task1 := WriteTask{Uuid: baseUUID, ID: 0, PartitionID: 0, FileCount: 1}
-	task2 := WriteTask{Uuid: baseUUID, ID: 0, PartitionID: 0, FileCount: 2}
-	task3 := WriteTask{Uuid: baseUUID, ID: 1, PartitionID: 0, FileCount: 1}
-	task4 := WriteTask{Uuid: baseUUID, ID: 0, PartitionID: 1, FileCount: 1}
+	task1 := WriteTask{UUID: baseUUID, ID: 0, PartitionID: 0, FileCount: 1}
+	task2 := WriteTask{UUID: baseUUID, ID: 0, PartitionID: 0, FileCount: 2}
+	task3 := WriteTask{UUID: baseUUID, ID: 1, PartitionID: 0, FileCount: 1}
+	task4 := WriteTask{UUID: baseUUID, ID: 0, PartitionID: 1, FileCount: 1}
 
 	file1 := task1.GenerateDataFileName("parquet")
 	file2 := task2.GenerateDataFileName("parquet")
@@ -210,7 +210,7 @@ func TestWriteFileHonorsExplicitSortOrderID(t *testing.T) {
 		rb := mustLoadRecordBatchFromJSON(arrowSc, `[{"id": 2}, {"id": 1}]`)
 
 		return WriteTask{
-			Uuid:        uuid.New(),
+			UUID:        uuid.New(),
 			ID:          id,
 			FileCount:   1,
 			Schema:      schema,
@@ -252,7 +252,7 @@ func TestWriteFileRejectsPosDeleteSortOrderClaim(t *testing.T) {
 	rb := mustLoadRecordBatchFromJSON(PositionalDeleteArrowSchema,
 		`[{"file_path": "file://t/data.parquet", "pos": 0}]`)
 	task := WriteTask{
-		Uuid:        uuid.New(),
+		UUID:        uuid.New(),
 		ID:          0,
 		FileCount:   1,
 		Schema:      iceberg.PositionalDeleteSchema,

@@ -89,7 +89,7 @@ func writeStatsSettingsFile(t *testing.T, mode string, props iceberg.Properties)
 		writer, err := newDataFileWriter(loc, iceio.LocalFS{}, builder, props, withFileSchema(fileSchema))
 		require.NoError(t, err)
 		dataFile, err := writer.writeFile(t.Context(), nil, WriteTask{
-			Uuid: uuid.New(), Schema: schema, FileCount: 1, Batches: []arrow.RecordBatch{record},
+			UUID: uuid.New(), Schema: schema, FileCount: 1, Batches: []arrow.RecordBatch{record},
 		})
 		require.NoError(t, err)
 
@@ -242,7 +242,7 @@ func writeStatsSettingsDeleteFile(t *testing.T, mode string, content iceberg.Man
 		}
 		require.NoError(t, err)
 		dataFile, err := writer.writeFile(t.Context(), nil, WriteTask{
-			Uuid: uuid.New(), Schema: fileSchema, FileCount: 1, Batches: []arrow.RecordBatch{record},
+			UUID: uuid.New(), Schema: fileSchema, FileCount: 1, Batches: []arrow.RecordBatch{record},
 		})
 		require.NoError(t, err)
 
