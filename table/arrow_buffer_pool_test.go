@@ -23,6 +23,7 @@ import (
 	"iter"
 	"math/bits"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 
@@ -149,6 +150,36 @@ func TestReadTasksClosesArrowBufferPoolOnSetupError(t *testing.T) {
 	require.True(t, pool.closed)
 	require.Zero(t, pool.cachedBytes)
 	require.Zero(t, pool.buckets)
+}
+
+func TestReadTasksArrowBufferReuseKeepsRetainedParquetBatch(t *testing.T) {
+	const rowsPerFile = 32
+	tbl, tasks := newReorderScanFixture(t, t.TempDir(), 3, rowsPerFile, iceio.LocalFS{})
+	scan := tbl.Scan(WithArrowBufferReuse(), WithMaxConcurrency(2), WithArrowBatchSize(16))
+	t.Cleanup(func() { require.NoError(t, scan.Close()) })
+
+	_, records, err := scan.ReadTasks(t.Context(), tasks)
+	require.NoError(t, err)
+	var retained arrow.RecordBatch
+	var ids []int64
+	for batch, err := range records {
+		require.NoError(t, err)
+		ids = append(ids, batch.Column(0).(*array.Int64).Int64Values()...)
+		if retained == nil {
+			retained = batch
+			t.Cleanup(retained.Release)
+
+			continue
+		}
+		batch.Release()
+	}
+	require.Len(t, ids, len(tasks)*rowsPerFile)
+	for i, id := range ids {
+		require.Equal(t, int64(i), id)
+	}
+	require.NotNil(t, retained)
+	require.Equal(t, ids[:retained.NumRows()], retained.Column(0).(*array.Int64).Int64Values())
+	require.Equal(t, strings.Repeat("x", 256), retained.Column(1).(*array.String).Value(0))
 }
 
 func BenchmarkReadTasksArrowBufferReuse(b *testing.B) {
