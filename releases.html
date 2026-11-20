@@ -270,6 +270,9 @@
 <p><strong>New partition specs reject multiple sources for built-in transforms.</strong> Create-table and add-spec payloads with this shape return <code>ErrInvalidPartitionSpec</code>. Historical metadata with such a field still loads and round-trips, but the field is skipped during partition pruning and residual simplification. Multi-source unknown transforms remain supported.</p>
 </li>
 <li>
+<p><strong>Unsigned partition values no longer wrap.</strong> Partitioned writes accept the full Arrow <code>uint32</code> range for Iceberg <code>long</code> sources and return <code>iceberg.ErrInvalidArgument</code> when an unsigned value exceeds the destination’s signed range.</p>
+</li>
+<li>
 <p><strong>Invalid name mappings now stop scans and add-files.</strong> Tables with an unparseable <code>schema.name-mapping.default</code> now return <code>ErrInvalidMetadata</code> on scans and add-files instead of ignoring the mapping. Fix the property with a valid mapping or remove it.</p>
 </li>
 <li>
