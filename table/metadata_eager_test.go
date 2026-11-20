@@ -218,7 +218,7 @@ func TestMetadataJSONCursorIntegerBoundaries(t *testing.T) {
 }
 
 func TestPlainMetadataStringChecksEachByteLane(t *testing.T) {
-	for length := 0; length <= 64; length++ {
+	for length := range 65 {
 		plain := bytes.Repeat([]byte{'a'}, length)
 		if !plainMetadataString(plain) {
 			t.Fatalf("plain ASCII of length %d rejected", length)
@@ -235,4 +235,3 @@ func TestPlainMetadataStringChecksEachByteLane(t *testing.T) {
 		}
 	}
 }
-
