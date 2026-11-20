@@ -267,6 +267,39 @@ func TestPlanOrphanFilesRejectsRefsOnlySnapshotHistory(t *testing.T) {
 	}
 }
 
+func TestPlanOrphanFilesAllowsFullHistoryOnEmptyTable(t *testing.T) {
+	ctx := t.Context()
+	fs := iceio.NewMemFS()
+	const location = "mem://full-history/empty"
+	const metadataLocation = location + "/metadata/v1.metadata.json"
+	const orphanPath = location + "/data/orphan.parquet"
+
+	meta, err := table.NewMetadata(iceberg.NewSchema(0), nil, table.UnsortedSortOrder, location, nil)
+	require.NoError(t, err)
+	require.NoError(t, fs.WriteFile(ctx, metadataLocation, []byte("metadata")))
+	require.NoError(t, fs.WriteFile(ctx, orphanPath, []byte("orphan")))
+
+	var fsCalls atomic.Int32
+	tbl := table.New(
+		table.Identifier{"db", "full_history"},
+		meta,
+		metadataLocation,
+		func(context.Context) (iceio.IO, error) {
+			fsCalls.Add(1)
+
+			return fs, nil
+		},
+		nil,
+		table.WithSnapshotHistoryLimitedToRefs(false),
+	)
+	require.False(t, tbl.SnapshotHistoryLimitedToRefs())
+
+	plan, err := PlanOrphanFiles(ctx, tbl, WithCleanupFilesOlderThan(0))
+	require.NoError(t, err, "full-history loads must be allowed even when a table has no snapshots")
+	require.Equal(t, []string{orphanPath}, plan.Files())
+	require.Positive(t, fsCalls.Load(), "full-history planning must reach the filesystem")
+}
+
 func TestOrphanCleanupChecksGCBeforeRefsOnlyHistory(t *testing.T) {
 	ctx := t.Context()
 	location := "mem://refs-only-gc-disabled/table"
