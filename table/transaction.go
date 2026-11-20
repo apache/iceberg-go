@@ -370,6 +370,20 @@ func (t *Transaction) planningSnapshot(meta *MetadataBuilder) *Snapshot {
 	return meta.currentSnapshotForRef(t.branch)
 }
 
+// checkRewriteParentLocked keeps the inspected parent stable through manifest
+// writing and staging. The caller holds t.mx.
+func (t *Transaction) checkRewriteParentLocked(expected *Snapshot) error {
+	if err := t.checkUsable(); err != nil {
+		return err
+	}
+	head := t.planningSnapshot(t.meta)
+	if head == nil || head.SnapshotID != expected.SnapshotID {
+		return fmt.Errorf("%w: transaction head changed while staging the rewrite; replan from the target branch", ErrCommitFailed)
+	}
+
+	return nil
+}
+
 // transactionRequirements returns the requirements a commit on branch must carry.
 // The result is always a fresh allocation, never aliasing reqs, so callers may append to it
 // while holding the transaction lock.
@@ -1956,10 +1970,20 @@ func (t *Transaction) ReplaceDataFiles(ctx context.Context, filesToDelete, files
 // applied are removed. On v3 a removed data file's live deletion vector is
 // removed with it, whether or not it is in deleteFilesToRemove.
 func (t *Transaction) ReplaceFiles(ctx context.Context, dataFilesToDelete, dataFilesToAdd, deleteFilesToRemove []iceberg.DataFile, snapshotProps iceberg.Properties, opts ...WriteOption) error {
-	return t.replaceFiles(ctx, dataFilesToDelete, dataFilesToAdd, deleteFilesToRemove, nil, nil, snapshotProps, opts...)
+	return t.replaceFiles(ctx, dataFilesToDelete, dataFilesToAdd, nil, deleteFilesToRemove, nil, nil, snapshotProps, opts...)
 }
 
-func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataFilesToAdd, deleteFilesToRemove, autoDeleteFilesToRemove []iceberg.DataFile, deleteFilesToAdd []rewriteDeleteFileAddition, snapshotProps iceberg.Properties, opts ...WriteOption) error {
+// deleteParent identifies the snapshot used to select automatic position-delete
+// removals. Pass nil when there are no such removals.
+func (t *Transaction) replaceFiles(
+	ctx context.Context,
+	dataFilesToDelete, dataFilesToAdd []iceberg.DataFile,
+	deleteParent *Snapshot,
+	deleteFilesToRemove, autoDeleteFilesToRemove []iceberg.DataFile,
+	deleteFilesToAdd []rewriteDeleteFileAddition,
+	snapshotProps iceberg.Properties,
+	opts ...WriteOption,
+) error {
 	meta, err := t.txnMeta()
 	if err != nil {
 		return err
@@ -2086,6 +2110,10 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 	wfs, err := requireWriteFileIO(fs)
 	if err != nil {
 		return err
+	}
+
+	if deleteParent != nil && deleteParent.SnapshotID != s.SnapshotID {
+		return fmt.Errorf("%w: transaction head changed while selecting automatic delete removals; replan from the target branch", ErrCommitFailed)
 	}
 
 	// Scan all entries (data + delete files) in a single pass to validate
@@ -2319,6 +2347,12 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 		op = OpReplace
 	}
 
+	t.mx.Lock()
+	defer t.mx.Unlock()
+	if err := t.checkRewriteParentLocked(s); err != nil {
+		return err
+	}
+
 	commitUUID := uuid.New()
 	updater := t.updateSnapshot(wfs, snapshotProps, op).mergeOverwrite(&commitUUID, nil)
 	if cfg.rewriteSemantics {
@@ -2366,10 +2400,6 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 		validator = rewriteValidator(markedDataForDeletion)
 	}
 
-	// Keep validator registration atomic with staging so Commit cannot run
-	// between the two.
-	t.mx.Lock()
-	defer t.mx.Unlock()
 	if err := t.applyLocked(updates, reqs); err != nil {
 		return err
 	}

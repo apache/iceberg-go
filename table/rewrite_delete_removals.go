@@ -53,9 +53,11 @@ func (r *RewriteFiles) removeAutomaticDeleteFile(df iceberg.DataFile, deletionVe
 }
 
 // automaticDeleteRemovals checks the worker candidates against the final rewrite set.
-func (r *RewriteFiles) automaticDeleteRemovals(ctx context.Context) ([]iceberg.DataFile, error) {
+// When it selects a position-delete removal, it returns the snapshot used
+// for that decision so staging can reject a change to the parent.
+func (r *RewriteFiles) automaticDeleteRemovals(ctx context.Context) ([]iceberg.DataFile, *Snapshot, error) {
 	if len(r.autoDeleteFilesToRemove) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	rewrittenPaths := make(map[string]struct{}, len(r.dataFilesToDelete))
@@ -70,11 +72,15 @@ func (r *RewriteFiles) automaticDeleteRemovals(ctx context.Context) ([]iceberg.D
 		}
 	}
 	var deadPositionPaths map[string]struct{}
+	var checkedParent *Snapshot
 	if len(rewrittenPaths) > 0 && len(positionPaths) > 0 {
 		var err error
-		deadPositionPaths, err = r.deadPositionDeletePaths(ctx, rewrittenPaths, positionPaths)
+		deadPositionPaths, checkedParent, err = r.deadPositionDeletePaths(ctx, rewrittenPaths, positionPaths)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
+		}
+		if len(deadPositionPaths) == 0 {
+			checkedParent = nil
 		}
 	}
 
@@ -85,18 +91,18 @@ func (r *RewriteFiles) automaticDeleteRemovals(ctx context.Context) ([]iceberg.D
 		case IsDeletionVector(df):
 			ref := iceberginternal.BorrowedDataFileReferencedDataFile(df)
 			if ref == nil || *ref == "" {
-				return nil, fmt.Errorf("%w: automatic deletion vector %q has no referenced data file", ErrInvalidOperation, df.FilePath())
+				return nil, nil, fmt.Errorf("%w: automatic deletion vector %q has no referenced data file", ErrInvalidOperation, df.FilePath())
 			}
 			if _, rewritten := rewrittenPaths[*ref]; !rewritten {
 				continue
 			}
 			key, err := snapshotFileDiffKey(df)
 			if err != nil {
-				return nil, fmt.Errorf("%w: %w", ErrInvalidOperation, err)
+				return nil, nil, fmt.Errorf("%w: %w", ErrInvalidOperation, err)
 			}
 			if prior, seen := seenDVs[*ref]; seen {
 				if prior != key {
-					return nil, fmt.Errorf("%w: conflicting automatic deletion vectors for data file %q", ErrInvalidOperation, *ref)
+					return nil, nil, fmt.Errorf("%w: conflicting automatic deletion vectors for data file %q", ErrInvalidOperation, *ref)
 				}
 
 				continue
@@ -112,27 +118,27 @@ func (r *RewriteFiles) automaticDeleteRemovals(ctx context.Context) ([]iceberg.D
 		retained = append(retained, df)
 	}
 
-	return retained, nil
+	return retained, checkedParent, nil
 }
 
 func (r *RewriteFiles) deadPositionDeletePaths(
 	ctx context.Context, rewrittenPaths, expectedDeletePaths map[string]struct{},
-) (map[string]struct{}, error) {
+) (map[string]struct{}, *Snapshot, error) {
 	meta, err := r.txn.txnMeta()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	snapshot := r.txn.planningSnapshot(meta)
 	if snapshot == nil {
-		return nil, nil
+		return nil, nil, nil
 	}
 	fs, err := r.txn.tbl.fsF(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("open table IO for position-delete cleanup: %w", err)
+		return nil, nil, fmt.Errorf("open table IO for position-delete cleanup: %w", err)
 	}
 	dead, err := collectDeadPositionDeletes(ctx, fs, snapshot, rewrittenPaths, expectedDeletePaths)
 	if err != nil {
-		return nil, fmt.Errorf("validate automatic position-delete removals: %w", err)
+		return nil, nil, fmt.Errorf("validate automatic position-delete removals: %w", err)
 	}
 
 	paths := make(map[string]struct{}, len(dead))
@@ -140,5 +146,5 @@ func (r *RewriteFiles) deadPositionDeletePaths(
 		paths[df.FilePath()] = struct{}{}
 	}
 
-	return paths, nil
+	return paths, snapshot, nil
 }

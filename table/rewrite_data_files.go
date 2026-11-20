@@ -505,8 +505,6 @@ func (t *Transaction) RewriteDataFiles(ctx context.Context, groups []CompactionT
 		}
 
 		rewrite.ApplyResult(gr)
-		// A shared position delete is not safe until the coordinator checks
-		// every surviving file, so do not count worker hints as removals.
 		accumulateGroupMetrics(result, gr)
 		for _, df := range gr.SafePosDeletes {
 			stagedDeleteFiles[df.FilePath()] = struct{}{}
@@ -1101,8 +1099,8 @@ func (d *deletesSincePlanning) validate(ctx context.Context, current Metadata, f
 	return nil
 }
 
-// CollectSafePositionDeletes returns distinct position-delete candidates from
-// the tasks. A delete may still apply to data files outside the tasks.
+// CollectSafePositionDeletes returns position delete files from the
+// tasks as removal candidates. A delete may still apply to other data files.
 // [RewriteFiles.Commit] checks those candidates against the full rewrite set
 // and the staged snapshot. Other coordinators must make the same check.
 func CollectSafePositionDeletes(tasks []FileScanTask) []iceberg.DataFile {

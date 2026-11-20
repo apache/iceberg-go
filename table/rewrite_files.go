@@ -296,13 +296,15 @@ func (r *RewriteFiles) Commit(ctx context.Context) error {
 	if r.err != nil {
 		return r.err
 	}
-	removals, err := r.automaticDeleteRemovals(ctx)
+	removals, deleteParent, err := r.automaticDeleteRemovals(ctx)
 	if err != nil {
 		return err
 	}
+	r.autoDeleteFilesToRemove = removals
+
 	if len(r.dataFilesToDelete) == 0 && len(r.dataFilesToAdd) == 0 &&
 		len(r.deleteFilesToAdd) == 0 && len(r.deleteFilesToRemove) == 0 &&
-		len(removals) == 0 {
+		len(r.autoDeleteFilesToRemove) == 0 {
 		return fmt.Errorf("%w: rewrite must have at least one file change", ErrInvalidOperation)
 	}
 	// Adds-without-deletes would route through ReplaceFiles →
@@ -320,13 +322,11 @@ func (r *RewriteFiles) Commit(ctx context.Context) error {
 		opts = append(opts, withDataSequenceNumber(*r.dataSequenceNumber))
 	}
 	if err := r.txn.replaceFiles(ctx, r.dataFilesToDelete, r.dataFilesToAdd,
-		r.deleteFilesToRemove, removals, r.deleteFilesToAdd,
+		deleteParent,
+		r.deleteFilesToRemove, r.autoDeleteFilesToRemove, r.deleteFilesToAdd,
 		r.snapshotProps, opts...); err != nil {
 		return err
 	}
-
-	// Keep the staged removals for the compaction result's metrics.
-	r.autoDeleteFilesToRemove = removals
 
 	return nil
 }

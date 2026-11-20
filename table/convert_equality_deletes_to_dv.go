@@ -387,7 +387,7 @@ func (t *Transaction) ConvertEqualityDeletesToDeletionVectors(ctx context.Contex
 		result.AddedDeletionVectors = len(deletionVectors)
 	}
 
-	if err := t.replaceFiles(ctx, nil, nil, deleteFilesToRemove, nil, additions, nil,
+	if err := t.replaceFiles(ctx, nil, nil, nil, deleteFilesToRemove, nil, additions, nil,
 		withRewriteSemantics(), withEqualityDeleteToDVConversion(), WithoutAutoNameMapping()); err != nil {
 		return nil, err
 	}

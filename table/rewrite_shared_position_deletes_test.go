@@ -18,10 +18,12 @@
 package table_test
 
 import (
+	"context"
 	"fmt"
 	"testing"
 
 	"github.com/apache/iceberg-go"
+	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
 	"github.com/stretchr/testify/require"
 )
@@ -221,6 +223,57 @@ func TestRewriteFilesWithAutomaticPositionRemovalRejectsStaleCommit(t *testing.T
 	require.NoError(t, err)
 	require.Equal(t, latest.CurrentSnapshot().SnapshotID, current.CurrentSnapshot().SnapshotID)
 	require.ElementsMatch(t, []int64{2, 4, 5}, scanIDs(t, current))
+}
+
+type deleteSelectionManifestHook struct {
+	iceio.LocalFS
+	manifestList string
+	onOpen       func()
+}
+
+func (h *deleteSelectionManifestHook) Open(ctx context.Context, name string) (iceio.File, error) {
+	if name == h.manifestList && h.onOpen != nil {
+		hook := h.onOpen
+		h.onOpen = nil
+		hook()
+	}
+
+	return h.LocalFS.Open(ctx, name)
+}
+
+func TestRewriteFilesRejectsParentChangeDuringAutomaticDeleteSelection(t *testing.T) {
+	ctx := t.Context()
+	tbl, catalog := newConcurrentRewriteTestTable(t)
+	tbl, groups := setupSharedPositionDeleteRewrite(t, tbl)
+	hook := &deleteSelectionManifestHook{manifestList: tbl.CurrentSnapshot().ManifestList}
+	wrapped := table.New(tbl.Identifier(), tbl.Metadata(), tbl.MetadataLocation(),
+		func(context.Context) (iceio.IO, error) { return hook, nil }, catalog)
+	tx := wrapped.NewTransaction()
+	rewrite := tx.NewRewrite(nil)
+	for _, group := range groups {
+		result, err := table.ExecuteCompactionGroup(ctx, tbl, group)
+		require.NoError(t, err)
+		rewrite.ApplyResult(result)
+	}
+
+	var appendedSnapshotID int64
+	hook.onOpen = func() {
+		reader := rowsReader(t, tbl, `[{"id":5,"data":"visible"}]`)
+		defer reader.Release()
+		require.NoError(t, tx.Append(ctx, reader, nil))
+		staged, err := tx.StagedTable()
+		require.NoError(t, err)
+		appendedSnapshotID = staged.CurrentSnapshot().SnapshotID
+	}
+
+	err := rewrite.Commit(ctx)
+	require.NotZero(t, appendedSnapshotID)
+	require.ErrorIs(t, err, table.ErrCommitFailed)
+	require.ErrorContains(t, err, "selecting automatic delete removals")
+	committed, err := tx.Commit(ctx)
+	require.NoError(t, err)
+	require.Equal(t, appendedSnapshotID, committed.CurrentSnapshot().SnapshotID)
+	require.ElementsMatch(t, []int64{2, 4, 5}, scanIDs(t, committed))
 }
 
 func TestRewriteFilesValidatesWorkerDeletionVectors(t *testing.T) {
