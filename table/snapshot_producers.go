@@ -172,7 +172,9 @@ func (fa *fastAppendFiles) parentDependentManifests(ctx context.Context, parent 
 // resulting manifest list. Two concurrent fast-appends adding the
 // same file path is a writer-side error (paths are expected to be
 // unique, normally via UUID-stamped filenames); detecting it here
-// is out of Java parity scope.
+// is out of Java parity scope. AddDataFiles and AddDataFilesByPath,
+// which take caller-supplied paths, recheck them against the fresh
+// parent when a commit retry rebuilds the snapshot.
 func (fa *fastAppendFiles) validate(_ *conflictContext) error {
 	return nil
 }
@@ -818,6 +820,7 @@ type snapshotProducer struct {
 	deletedFiles            map[string]iceberg.DataFile
 	deletedDeleteFiles      map[string]iceberg.DataFile
 	deletedDVsByRef         map[string]iceberg.DataFile
+	duplicateCheckPaths     map[string]struct{}
 	snapshotProps           iceberg.Properties
 	written                 writtenManifests
 }
@@ -1488,6 +1491,36 @@ func (p *removedFilePresence) counts(df iceberg.DataFile) bool {
 	return ok
 }
 
+// checkDuplicatePaths fails if a data file live on parent has a path in
+// duplicateCheckPaths. The retry rebuild calls it so that a path another writer
+// committed after this producer planned is not added a second time.
+func (sp *snapshotProducer) checkDuplicatePaths(ctx context.Context, parent *Snapshot) error {
+	if len(sp.duplicateCheckPaths) == 0 || parent == nil {
+		return nil
+	}
+
+	manifests, err := parent.Manifests(ctx, sp.io)
+	if err != nil {
+		return err
+	}
+	for _, m := range manifests {
+		if m.ManifestContent() != iceberg.ManifestContentData {
+			continue
+		}
+		for entry, err := range sp.iterManifestEntries(ctx, m, true) {
+			if err != nil {
+				return err
+			}
+			if _, ok := sp.duplicateCheckPaths[entry.DataFile().FilePath()]; ok {
+				return fmt.Errorf("%w: %w: data file %s is already present in snapshot %d",
+					ErrTransactionUnusable, ErrDuplicateDataFiles, entry.DataFile().FilePath(), parent.SnapshotID)
+			}
+		}
+	}
+
+	return nil
+}
+
 // checkRemovedFiles scans parent once and (1) fails terminally if any data file
 // this producer intends to rewrite is no longer live — a concurrent writer
 // already removed it, so proceeding would leave our replacement beside the
@@ -1756,6 +1789,9 @@ func (sp *snapshotProducer) commitManifests(ctx context.Context, newManifests, a
 		// so the summary below does not double-subtract a peer's prior removal.
 		present, err := sp.checkRemovedFiles(rebuildCtx, freshParent)
 		if err != nil {
+			return nil, err
+		}
+		if err := sp.checkDuplicatePaths(rebuildCtx, freshParent); err != nil {
 			return nil, err
 		}
 
