@@ -343,6 +343,16 @@ rep, err := otel.NewReporter(
 <code>iceberg.commit.*</code> instrument names (e.g. <code>iceberg.scan.planning.duration</code>,
 <code>iceberg.scan.result.data_files</code>, <code>iceberg.commit.duration</code>,
 <code>iceberg.commit.data_files.added</code>).</p>
+<p>Instrument types follow the meaning of each field. Durations are histograms (in
+milliseconds). The commit <code>*.total</code> fields (<code>iceberg.commit.records.total</code>,
+<code>iceberg.commit.data_files.total</code>, <code>iceberg.commit.delete_files.total</code>,
+<code>iceberg.commit.file_size.total_bytes</code>, <code>iceberg.commit.positional_deletes.total</code>
+and <code>iceberg.commit.equality_deletes.total</code>) describe the table after the commit,
+so they are gauges that hold the last reported value; do not sum them over time.
+Everything else (added/removed deltas, attempts, manifest stats and all scan
+fields) is a monotonic counter. Gauges are last-write-wins per attribute set, so
+dropping the table name from <code>WithAttributes</code> makes different tables overwrite
+each other's totals.</p>
 <p><code>WithAttributes</code> bounds label cardinality by allowlist. The default set is table
 name + operation; schema id (<code>otel.AttrSchemaID</code>) is opt-in. The snapshot id is
 <strong>never</strong> attached as a metric attribute because it is unbounded — per-snapshot
