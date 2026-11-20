@@ -297,28 +297,40 @@ func (u *UpdateSchema) findParentID(fieldID int) int {
 	return parentID
 }
 
-// checkNameAvailable returns an error if the struct with the given parent ID
-// already has a column called name, or will have one after this update. A
-// column that is deleted, or renamed to another name, in this update gives up
-// its name, so a new column may take it.
-func (u *UpdateSchema) checkNameAvailable(parentID int, name, fullName string) error {
+// nameTaken reports whether the struct with the given parent ID already has a
+// column called name, or will have one after this update. selfID is the column
+// being renamed, which may keep its own name with different case, or
+// TableRootID when adding a column. A column that is deleted, or renamed to
+// another name, in this update gives up its name, so another column may take
+// it. Java rejects the renamed-away case; we allow it because the resulting
+// schema is valid.
+func (u *UpdateSchema) nameTaken(parentID int, name, fullName string, selfID int) bool {
 	for _, add := range u.adds[parentID] {
 		if u.sameName(add.Name, name) {
-			return fmt.Errorf("field already exists in adds: %s", fullName)
+			return true
 		}
 	}
 
-	if field, ok := u.findField(fullName); ok && !u.isDeleted(field.ID) {
+	if field, ok := u.findField(fullName); ok && field.ID != selfID && !u.isDeleted(field.ID) {
 		if upd, updated := u.updates[parentID][field.ID]; !updated || u.sameName(upd.Name, name) {
-			return fmt.Errorf("cannot add column, name already exists: %s", fullName)
+			return true
 		}
 	}
 
 	// Another column in the same struct may be renamed to this name.
 	for _, upd := range u.updates[parentID] {
-		if u.sameName(upd.Name, name) {
-			return fmt.Errorf("field already exists: %s", fullName)
+		if upd.ID != selfID && u.sameName(upd.Name, name) {
+			return true
 		}
+	}
+
+	return false
+}
+
+// checkNameAvailable returns an error if a new column cannot be called name.
+func (u *UpdateSchema) checkNameAvailable(parentID int, name, fullName string) error {
+	if u.nameTaken(parentID, name, fullName, TableRootID) {
+		return fmt.Errorf("%w: cannot add column, name already exists: %s", iceberg.ErrInvalidSchema, fullName)
 	}
 
 	return nil
@@ -503,22 +515,8 @@ func (u *UpdateSchema) updateColumn(path []string, update ColumnUpdate) error {
 		}
 
 		newFullName := strings.Join(append(slices.Clone(path[:len(path)-1]), update.Name.Val), ".")
-		if existingField, ok := u.findField(newFullName); ok {
-			if !u.isDeleted(existingField.ID) {
-				return fmt.Errorf("field already exists: %s", newFullName)
-			}
-		}
-
-		for _, add := range u.adds[parentID] {
-			if add.Name == update.Name.Val {
-				return fmt.Errorf("cannot rename field to added field: %s", newFullName)
-			}
-		}
-
-		for _, upd := range u.updates[parentID] {
-			if upd.Name == update.Name.Val && upd.ID != field.ID {
-				return fmt.Errorf("cannot rename field to renamed field: %s", newFullName)
-			}
+		if u.nameTaken(parentID, update.Name.Val, newFullName, field.ID) {
+			return fmt.Errorf("%w: cannot rename column, name already exists: %s", iceberg.ErrInvalidSchema, newFullName)
 		}
 
 		if _, ok := u.identifierFieldNames[fullName]; ok {
