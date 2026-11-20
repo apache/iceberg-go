@@ -607,10 +607,12 @@ func marshalScanFilter(req table.ScanPlanningRequest) ([]byte, error) {
 // bypasses the response UnmarshalJSON validation — returns an ErrRESTError so a
 // malformed response cannot masquerade as an empty completed plan.
 //
-// Transient HTTP responses (408, 429, 500, 502, 503, 504) are retried up to
-// three times with jittered backoff and the same idempotency key. Retry-After
-// is honored, capped at five seconds when ctx has no deadline. Transport
-// failures and malformed successful responses are not retried.
+// The POST is keyed and resent like a REST mutation (see the REST catalog
+// configuration docs): after a 500, 502, 503 or 504, a timeout or a connection
+// error, up to three times, with the same key and body, jittered backoff and
+// Retry-After (capped at five seconds when ctx has no deadline), only while the
+// advertised idempotency-key-lifetime allows it. 4xx responses, including 408
+// and 429, and malformed successful responses are not resent.
 func (r *Catalog) PlanTableScan(ctx context.Context, ident table.Identifier, req PlanTableScanRequest) (result PlanTableScanResponse, err error) {
 	ctx, finish := scanmetrics.Start(ctx, "plan")
 	defer func() {
@@ -626,17 +628,11 @@ func (r *Catalog) PlanTableScan(ctx context.Context, ident table.Identifier, req
 		return PlanTableScanResponse{}, err
 	}
 
-	headers, err := scanPlanningHeaders(req.IdempotencyKey, req.AccessDelegation, true)
-	if err != nil {
-		return PlanTableScanResponse{}, err
-	}
-
-	resp, err := retryScanPlanning(ctx, "plan", func() (PlanTableScanResponse, error) {
-		return doPost[PlanTableScanRequest, PlanTableScanResponse](
-			ctx, r.baseURI, path, req, r.cl,
-			map[int]error{http.StatusNotFound: ErrRESTError},
-			withHeaders(headers), withErrorTypeOverride(planTableScanErrorTypes))
-	})
+	resp, err := doPost[PlanTableScanRequest, PlanTableScanResponse](
+		ctx, r.baseURI, path, req, r.cl,
+		map[int]error{http.StatusNotFound: ErrRESTError},
+		withHeaders(scanPlanningHeaders(req.AccessDelegation)), withErrorTypeOverride(planTableScanErrorTypes),
+		r.scanKey(ctx, "plan", req.IdempotencyKey))
 	if err != nil {
 		return PlanTableScanResponse{}, err
 	}
@@ -683,15 +679,10 @@ func (r *Catalog) FetchPlanningResult(ctx context.Context, ident table.Identifie
 		return FetchPlanningResultResponse{}, err
 	}
 
-	headers, err := scanPlanningHeaders(nil, opts.AccessDelegation, false)
-	if err != nil {
-		return FetchPlanningResultResponse{}, err
-	}
-
 	resp, err := doGet[FetchPlanningResultResponse](
 		ctx, r.baseURI, path, r.cl,
 		map[int]error{http.StatusNotFound: ErrRESTError},
-		withHeaders(headers), withErrorTypeOverride(fetchPlanningResultErrorTypes))
+		withHeaders(scanPlanningHeaders(opts.AccessDelegation)), withErrorTypeOverride(fetchPlanningResultErrorTypes))
 	if err != nil {
 		return FetchPlanningResultResponse{}, err
 	}
@@ -758,18 +749,12 @@ func (r *Catalog) FetchScanTasks(ctx context.Context, ident table.Identifier, re
 		return FetchScanTasksResponse{}, err
 	}
 
-	headers, err := scanPlanningHeaders(req.IdempotencyKey, nil, true)
-	if err != nil {
-		return FetchScanTasksResponse{}, err
-	}
-
-	return retryScanPlanning(ctx, "fetch-tasks", func() (FetchScanTasksResponse, error) {
-		return doPost[FetchScanTasksRequest, FetchScanTasksResponse](
-			ctx, r.baseURI, path, req, r.cl,
-			map[int]error{http.StatusNotFound: ErrRESTError},
-			withHeaders(headers), withSuppressedHeaders(headerIcebergAccessDelegation),
-			withErrorTypeOverride(fetchScanTasksErrorTypes), requireBody())
-	})
+	return doPost[FetchScanTasksRequest, FetchScanTasksResponse](
+		ctx, r.baseURI, path, req, r.cl,
+		map[int]error{http.StatusNotFound: ErrRESTError},
+		withSuppressedHeaders(headerIcebergAccessDelegation),
+		withErrorTypeOverride(fetchScanTasksErrorTypes), requireBody(),
+		r.scanKey(ctx, "fetch-tasks", req.IdempotencyKey))
 }
 
 // WaitForPlan polls a submitted plan to completion using jittered backoff. It
@@ -1052,23 +1037,19 @@ func (r *Catalog) scanPlanningPath(ep endpoint, ident table.Identifier, rawExtra
 	return identPath.objectReqPath(ep, rawExtra...)
 }
 
-func scanPlanningHeaders(idempotencyKey, accessDelegation *string, includeIdempotency bool) (map[string]string, error) {
-	headers := make(map[string]string, 2)
-	if includeIdempotency {
-		key, err := idempotencyHeaderValue(idempotencyKey)
-		if err != nil {
-			return nil, err
-		}
-		headers[headerIdempotencyKey] = key
-	}
-	if accessDelegation != nil {
-		headers[headerIcebergAccessDelegation] = *accessDelegation
-	}
-	if len(headers) == 0 {
-		return nil, nil
+func scanPlanningHeaders(accessDelegation *string) map[string]string {
+	if accessDelegation == nil {
+		return nil
 	}
 
-	return headers, nil
+	return map[string]string{headerIcebergAccessDelegation: *accessDelegation}
+}
+
+// scanKey keys a plan or tasks POST, resent under the same rules as a mutation.
+// Generated keys are sent only when the server advertises a lifetime; a
+// caller-supplied key is always sent.
+func (r *Catalog) scanKey(ctx context.Context, operation string, key *string) reqOption {
+	return withIdempotency(r.idempotencyKeyLifetime, key, func() { scanmetrics.Retry(ctx, operation) })
 }
 
 func idempotencyHeaderValue(idempotencyKey *string) (string, error) {
@@ -1164,9 +1145,12 @@ type CompletedPlanningResult struct {
 // wire type and the seam stay in agreement.
 type PlanTableScanRequest struct {
 	// IdempotencyKey is sent as the Idempotency-Key header, not in the JSON body.
-	// If set, it must be a UUIDv7 string (RFC 9562). If nil, a fresh UUIDv7 is
-	// generated per call and reused for automatic retries. Supply an explicit
-	// key to preserve idempotency across separate calls.
+	// If set, it must be a UUIDv7 string (RFC 9562) and is always sent. If nil, a
+	// fresh UUIDv7 is generated per call, reused for resends, and sent only when
+	// the server advertises idempotency-key-lifetime. Resends happen only within
+	// that lifetime, which counts from the key's timestamp for a supplied key, so
+	// an old key is sent once and not resent. Supply an explicit key to preserve
+	// idempotency across separate calls.
 	IdempotencyKey *string `json:"-"`
 	// AccessDelegation is sent as the X-Iceberg-Access-Delegation header, not
 	// in the JSON body. Nil uses the catalog default.
@@ -1304,9 +1288,12 @@ func decodePlanningError(raw json.RawMessage) *PlanningError {
 // FetchScanTasksRequest is the POST .../tasks request body.
 type FetchScanTasksRequest struct {
 	// IdempotencyKey is sent as the Idempotency-Key header, not in the JSON body.
-	// If set, it must be a UUIDv7 string (RFC 9562). If nil, a fresh UUIDv7 is
-	// generated per call and reused for automatic retries. Supply an explicit
-	// key to preserve idempotency across separate calls.
+	// If set, it must be a UUIDv7 string (RFC 9562) and is always sent. If nil, a
+	// fresh UUIDv7 is generated per call, reused for resends, and sent only when
+	// the server advertises idempotency-key-lifetime. Resends happen only within
+	// that lifetime, which counts from the key's timestamp for a supplied key, so
+	// an old key is sent once and not resent. Supply an explicit key to preserve
+	// idempotency across separate calls.
 	IdempotencyKey *string `json:"-"`
 
 	PlanTask string `json:"plan-task"`

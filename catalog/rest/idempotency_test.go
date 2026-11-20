@@ -21,11 +21,14 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	iceberg "github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/table"
@@ -182,10 +185,12 @@ func TestMutationTransportReplay(t *testing.T) {
 	for _, tc := range []struct {
 		name, config string
 		advertised   bool
+		replays      bool
 	}{
-		{"advertised", `{"idempotency-key-lifetime":"PT30M"}`, true},
-		{"zero lifetime", `{"idempotency-key-lifetime":"PT0S"}`, true},
-		{"absent", `{}`, false},
+		{"advertised", `{"idempotency-key-lifetime":"PT30M"}`, true, true},
+		{"zero lifetime", `{"idempotency-key-lifetime":"PT0S"}`, true, false},
+		{"malformed lifetime", `{"idempotency-key-lifetime":"soon"}`, true, false},
+		{"absent", `{}`, false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			type attempt struct {
@@ -229,11 +234,11 @@ func TestMutationTransportReplay(t *testing.T) {
 			mu.Lock()
 			got := append([]attempt(nil), attempts...)
 			mu.Unlock()
-			if !tc.advertised {
+			if !tc.replays {
 				require.Error(t, err)
 				require.Len(t, got, 1)
 				require.NoError(t, got[0].err)
-				require.Empty(t, got[0].key)
+				require.Equal(t, tc.advertised, got[0].key != "")
 				require.NotEmpty(t, got[0].body)
 
 				return
@@ -247,5 +252,392 @@ func TestMutationTransportReplay(t *testing.T) {
 			require.Equal(t, got[0].key, got[1].key)
 			require.Equal(t, got[0].body, got[1].body)
 		})
+	}
+}
+
+type keyedAttempt struct {
+	method, path, key, body string
+}
+
+// newKeyedTestCatalog serves /v1/config with every endpoint plus config (a JSON
+// object fragment such as `"idempotency-key-lifetime":"PT30M"`) and sends all
+// other requests to h with their 1-based count.
+func newKeyedTestCatalog(t *testing.T, config string, h func(n int, w http.ResponseWriter, r *http.Request)) (*Catalog, func() []keyedAttempt) {
+	t.Helper()
+	var endpoints []string
+	for _, ep := range allEndpoints {
+		endpoints = append(endpoints, ep.String())
+	}
+	eps, err := json.Marshal(endpoints)
+	require.NoError(t, err)
+	if config != "" {
+		config = "," + config
+	}
+	var mu sync.Mutex
+	var got []keyedAttempt
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/config" {
+			_, _ = io.WriteString(w, `{"endpoints":`+string(eps)+config+`}`)
+
+			return
+		}
+		body, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		got = append(got, keyedAttempt{r.Method, r.URL.Path, r.Header.Get(headerIdempotencyKey), string(body)})
+		n := len(got)
+		mu.Unlock()
+		h(n, w, r)
+	}))
+	t.Cleanup(server.Close)
+	c, err := newCatalogFromProps(t.Context(), "test", server.URL, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = c.Close() })
+
+	return c, func() []keyedAttempt {
+		mu.Lock()
+		defer mu.Unlock()
+
+		return append([]keyedAttempt(nil), got...)
+	}
+}
+
+func lifetimeConfig(v string) string { return `"idempotency-key-lifetime":"` + v + `"` }
+
+func dropConnection(w http.ResponseWriter) {
+	if conn, _, err := w.(http.Hijacker).Hijack(); err == nil {
+		_ = conn.Close()
+	}
+}
+
+func uuidV7At(created time.Time) string {
+	var id uuid.UUID
+	ms := created.UnixMilli()
+	for i := range 6 {
+		id[i] = byte(ms >> (8 * (5 - i)))
+	}
+	id[6], id[8] = 0x70, 0x80
+
+	return id.String()
+}
+
+func TestKeyedResendReusesKeyAndBody(t *testing.T) {
+	t.Parallel()
+	ns := table.Identifier{"ns"}
+	for _, status := range []int{500, 502, 503, 504} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			t.Parallel()
+			c, attempts := newKeyedTestCatalog(t, lifetimeConfig("PT30M"), func(n int, w http.ResponseWriter, _ *http.Request) {
+				if n == 1 {
+					w.WriteHeader(status)
+
+					return
+				}
+				_, _ = io.WriteString(w, `{}`)
+			})
+			require.NoError(t, c.CreateNamespace(t.Context(), ns, nil))
+			got := attempts()
+			require.Len(t, got, 2)
+			require.NotEmpty(t, got[0].key)
+			require.Equal(t, got[0], got[1])
+			require.NotEmpty(t, got[0].body)
+		})
+	}
+	t.Run("delete", func(t *testing.T) {
+		t.Parallel()
+		c, attempts := newKeyedTestCatalog(t, lifetimeConfig("PT30M"), func(n int, w http.ResponseWriter, _ *http.Request) {
+			if n == 1 {
+				w.WriteHeader(http.StatusServiceUnavailable)
+
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+		})
+		require.NoError(t, c.DropNamespace(t.Context(), ns))
+		got := attempts()
+		require.Len(t, got, 2)
+		require.NotEmpty(t, got[0].key)
+		require.Equal(t, got[0], got[1])
+	})
+	t.Run("connection error", func(t *testing.T) {
+		t.Parallel()
+		// No warm connection, so net/http does not replay: this is the explicit resend.
+		c, attempts := newKeyedTestCatalog(t, lifetimeConfig("PT30M"), func(n int, w http.ResponseWriter, _ *http.Request) {
+			if n == 1 {
+				dropConnection(w)
+
+				return
+			}
+			_, _ = io.WriteString(w, `{}`)
+		})
+		require.NoError(t, c.CreateNamespace(t.Context(), ns, nil))
+		got := attempts()
+		require.Len(t, got, 2)
+		require.NotEmpty(t, got[0].key)
+		require.Equal(t, got[0], got[1])
+	})
+}
+
+func TestKeyedSeparateCallsUseNewKeys(t *testing.T) {
+	t.Parallel()
+	id := table.Identifier{"ns", "name"}
+	c, attempts := newKeyedTestCatalog(t, lifetimeConfig("PT30M"), func(_ int, w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusConflict)
+	})
+	// A transaction refreshed after a 409 is a new call: it must not reuse the key.
+	for range 2 {
+		_, _, err := c.CommitTable(t.Context(), id, nil, nil)
+		require.ErrorIs(t, err, ErrCommitFailed)
+	}
+	got := attempts()
+	require.Len(t, got, 2)
+	require.NotEmpty(t, got[0].key)
+	require.NotEqual(t, got[0].key, got[1].key)
+}
+
+func TestKeyedNoResendOn4xx(t *testing.T) {
+	t.Parallel()
+	for _, status := range []int{400, 401, 403, 404, 408, 409, 429} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			t.Parallel()
+			c, attempts := newKeyedTestCatalog(t, lifetimeConfig("PT30M"), func(_ int, w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(status)
+			})
+			require.Error(t, c.CreateNamespace(t.Context(), table.Identifier{"ns"}, nil))
+			require.Len(t, attempts(), 1)
+		})
+	}
+}
+
+func TestKeyedNoResendWithoutUsableLifetime(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name, config string
+		keyed        bool
+	}{
+		{"absent", ``, false},
+		{"null", `"idempotency-key-lifetime":null`, false},
+		{"zero", lifetimeConfig("PT0S"), true},
+		{"negative", lifetimeConfig("-PT1S"), true},
+		{"malformed", lifetimeConfig("soon"), true},
+		{"empty", lifetimeConfig(""), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			c, attempts := newKeyedTestCatalog(t, tc.config, func(_ int, w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusServiceUnavailable)
+			})
+			require.Error(t, c.CreateNamespace(t.Context(), table.Identifier{"ns"}, nil))
+			got := attempts()
+			require.Len(t, got, 1)
+			require.Equal(t, tc.keyed, got[0].key != "")
+		})
+	}
+}
+
+func TestKeyedResendBudget(t *testing.T) {
+	t.Parallel()
+	c, attempts := newKeyedTestCatalog(t, lifetimeConfig("PT30M"), func(_ int, w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	})
+	err := c.CreateNamespace(t.Context(), table.Identifier{"ns"}, nil)
+	require.ErrorIs(t, err, ErrServiceUnavailable)
+	require.Len(t, attempts(), 1+keyedMaxRetries)
+}
+
+func TestKeyedResendStopsAtExpiry(t *testing.T) {
+	t.Parallel()
+	ns, id := table.Identifier{"ns"}, table.Identifier{"ns", "name"}
+	t.Run("next delay would exceed the window", func(t *testing.T) {
+		t.Parallel()
+		c, attempts := newKeyedTestCatalog(t, lifetimeConfig("PT1S"), func(_ int, w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Retry-After", "2")
+			w.WriteHeader(http.StatusServiceUnavailable)
+		})
+		start := time.Now()
+		err := c.CreateNamespace(t.Context(), ns, nil)
+		require.ErrorIs(t, err, ErrServiceUnavailable)
+		require.Len(t, attempts(), 1)
+		require.Less(t, time.Since(start), time.Second)
+	})
+	t.Run("slow first attempt", func(t *testing.T) {
+		t.Parallel()
+		c, attempts := newKeyedTestCatalog(t, lifetimeConfig("PT1S"), func(_ int, w http.ResponseWriter, _ *http.Request) {
+			time.Sleep(1100 * time.Millisecond)
+			w.WriteHeader(http.StatusServiceUnavailable)
+		})
+		err := c.CreateNamespace(t.Context(), ns, nil)
+		require.ErrorIs(t, err, ErrServiceUnavailable)
+		require.Len(t, attempts(), 1)
+	})
+	t.Run("commit reports unknown state", func(t *testing.T) {
+		t.Parallel()
+		c, attempts := newKeyedTestCatalog(t, lifetimeConfig("PT1S"), func(_ int, w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Retry-After", "2")
+			w.WriteHeader(http.StatusServiceUnavailable)
+		})
+		_, _, err := c.CommitTable(t.Context(), id, nil, nil)
+		require.ErrorIs(t, err, ErrCommitStateUnknown)
+		require.Len(t, attempts(), 1)
+	})
+	t.Run("commit connection error reports unknown state", func(t *testing.T) {
+		t.Parallel()
+		for _, config := range []string{lifetimeConfig("PT0S"), lifetimeConfig("PT1S")} {
+			c, attempts := newKeyedTestCatalog(t, config, func(_ int, w http.ResponseWriter, _ *http.Request) {
+				dropConnection(w)
+			})
+			_, _, err := c.CommitTable(t.Context(), id, nil, nil)
+			require.ErrorIs(t, err, ErrCommitStateUnknown)
+			require.NotEmpty(t, attempts()[0].key)
+		}
+	})
+	t.Run("unkeyed commit connection error is unchanged", func(t *testing.T) {
+		t.Parallel()
+		c, attempts := newKeyedTestCatalog(t, ``, func(_ int, w http.ResponseWriter, _ *http.Request) {
+			dropConnection(w)
+		})
+		_, _, err := c.CommitTable(t.Context(), id, nil, nil)
+		require.Error(t, err)
+		require.NotErrorIs(t, err, ErrCommitStateUnknown)
+		require.Len(t, attempts(), 1)
+	})
+}
+
+func TestKeyedResendHonorsCancellation(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	c, attempts := newKeyedTestCatalog(t, lifetimeConfig("PT2H"), func(_ int, w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", "3600")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		cancel()
+	})
+	start := time.Now()
+	require.ErrorIs(t, c.CreateNamespace(ctx, table.Identifier{"ns"}, nil), context.Canceled)
+	require.Less(t, time.Since(start), time.Second)
+	require.Len(t, attempts(), 1)
+}
+
+func TestKeyedTransportReplayWindow(t *testing.T) {
+	t.Parallel()
+	ns := table.Identifier{"ns"}
+	// replayHandler drops the first POST on a warmed connection, which net/http
+	// replays by itself unless GetBody refuses.
+	replayHandler := func(delay time.Duration) func(int, http.ResponseWriter, *http.Request) {
+		return func(n int, w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodGet {
+				_, _ = io.WriteString(w, `{"namespaces":[]}`)
+
+				return
+			}
+			if n == 2 { // n counts the warm-up GET
+				time.Sleep(delay)
+				dropConnection(w)
+
+				return
+			}
+			_, _ = io.WriteString(w, `{}`)
+		}
+	}
+	run := func(t *testing.T, lifetime string, delay time.Duration) ([]keyedAttempt, error) {
+		c, attempts := newKeyedTestCatalog(t, lifetimeConfig(lifetime), replayHandler(delay))
+		_, err := c.ListNamespaces(t.Context(), nil)
+		require.NoError(t, err)
+
+		err = c.CreateNamespace(t.Context(), ns, nil)
+
+		return attempts()[1:], err
+	}
+	t.Run("inside the window", func(t *testing.T) {
+		t.Parallel()
+		got, err := run(t, "PT30M", 0)
+		require.NoError(t, err)
+		require.Len(t, got, 2)
+		require.Equal(t, got[0], got[1])
+	})
+	t.Run("after a slow first attempt", func(t *testing.T) {
+		t.Parallel()
+		got, err := run(t, "PT1S", 1100*time.Millisecond)
+		require.Error(t, err)
+		require.Len(t, got, 1)
+	})
+	t.Run("zero lifetime", func(t *testing.T) {
+		t.Parallel()
+		got, err := run(t, "PT0S", 0)
+		require.Error(t, err)
+		require.Len(t, got, 1)
+	})
+}
+
+func TestKeyedRedirectReplayWindow(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		lifetime string
+		followed bool
+	}{{"PT30M", true}, {"PT0S", false}} {
+		t.Run(tc.lifetime, func(t *testing.T) {
+			t.Parallel()
+			c, attempts := newKeyedTestCatalog(t, lifetimeConfig(tc.lifetime), func(_ int, w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/v1/namespaces" {
+					w.Header().Set("Location", "/v1/namespaces/moved")
+					w.WriteHeader(http.StatusTemporaryRedirect)
+
+					return
+				}
+				_, _ = io.WriteString(w, `{}`)
+			})
+			err := c.CreateNamespace(t.Context(), table.Identifier{"ns"}, nil)
+			got := attempts()
+			if !tc.followed {
+				require.Error(t, err)
+				require.Len(t, got, 1)
+
+				return
+			}
+			require.NoError(t, err)
+			require.Len(t, got, 2)
+			require.Equal(t, got[0].key, got[1].key)
+			require.Equal(t, got[0].body, got[1].body)
+		})
+	}
+}
+
+// A keyed DELETE has no body, so net/http replays it on a warmed connection
+// without consulting GetBody and the window cannot bound it. This test records
+// that documented gap.
+func TestKeyedDeleteTransportReplayIsNotBounded(t *testing.T) {
+	t.Parallel()
+	c, attempts := newKeyedTestCatalog(t, lifetimeConfig("PT0S"), func(n int, w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet:
+			_, _ = io.WriteString(w, `{"namespaces":[]}`)
+		case n == 2:
+			dropConnection(w)
+		default:
+			w.WriteHeader(http.StatusNoContent)
+		}
+	})
+	_, err := c.ListNamespaces(t.Context(), nil)
+	require.NoError(t, err)
+	require.NoError(t, c.DropNamespace(t.Context(), table.Identifier{"ns"}))
+	require.Len(t, attempts()[1:], 2)
+}
+
+func TestParseKeyLifetime(t *testing.T) {
+	t.Parallel()
+	for in, want := range map[string]time.Duration{
+		"PT30M":                 30 * time.Minute,
+		"PT1H30M":               90 * time.Minute,
+		"P1DT2H3M4.5S":          26*time.Hour + 3*time.Minute + 4500*time.Millisecond,
+		"P2D":                   48 * time.Hour,
+		"PT0.25S":               250 * time.Millisecond,
+		"PT999999999999999999H": math.MaxInt64,
+	} {
+		got, ok := parseKeyLifetime(in)
+		require.True(t, ok, in)
+		require.Equal(t, want, got, in)
+	}
+	for _, in := range []string{"", "P", "PT", "P1DT", "PT0S", "P0D", "-PT1S", "PT-1S", "30m", "PT1.5H", "pt30m", "PT30", "soon"} {
+		_, ok := parseKeyLifetime(in)
+		require.False(t, ok, in)
 	}
 }

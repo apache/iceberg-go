@@ -377,7 +377,7 @@ func TestFetchPlanningResultResponseValidation(t *testing.T) {
 func TestPlanTableScanGeneratesIdempotencyKeyAndUsesDefaultAccessDelegation(t *testing.T) {
 	t.Parallel()
 
-	cat := newScanPlanningTestCatalog(t, []endpoint{endpointPlanTableScan}, func(mux *http.ServeMux) {
+	cat := newKeyedScanPlanningTestCatalog(t, "PT30M", []endpoint{endpointPlanTableScan}, func(mux *http.ServeMux) {
 		mux.HandleFunc("/v1/namespaces/db/tables/tbl/plan", func(w http.ResponseWriter, req *http.Request) {
 			got := req.Header.Get(headerIdempotencyKey)
 			if !assert.NotEmpty(t, got) {
@@ -970,16 +970,28 @@ func TestScanPlanningEndpointGating(t *testing.T) {
 func newScanPlanningTestCatalog(t *testing.T, endpoints []endpoint, register func(*http.ServeMux), opts ...Option) *Catalog {
 	t.Helper()
 
+	return newKeyedScanPlanningTestCatalog(t, "", endpoints, register, opts...)
+}
+
+// newKeyedScanPlanningTestCatalog is newScanPlanningTestCatalog with the server
+// advertising idempotency-key-lifetime, unless lifetime is empty.
+func newKeyedScanPlanningTestCatalog(t *testing.T, lifetime string, endpoints []endpoint, register func(*http.ServeMux), opts ...Option) *Catalog {
+	t.Helper()
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/config", func(w http.ResponseWriter, req *http.Request) {
 		if !assert.Equal(t, http.MethodGet, req.Method) {
 			return
 		}
-		err := json.NewEncoder(w).Encode(map[string]any{
+		config := map[string]any{
 			"defaults":  map[string]any{},
 			"overrides": map[string]any{},
 			"endpoints": endpointStrings(endpoints),
-		})
+		}
+		if lifetime != "" {
+			config["idempotency-key-lifetime"] = lifetime
+		}
+		err := json.NewEncoder(w).Encode(config)
 		if !assert.NoError(t, err) {
 			return
 		}
