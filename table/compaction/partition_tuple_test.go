@@ -192,4 +192,3 @@ func TestCanonicalPartitionKeyNormalizesTemporalRepresentations(t *testing.T) {
 		})
 	}
 }
-
