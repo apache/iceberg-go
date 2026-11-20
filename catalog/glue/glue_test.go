@@ -2983,7 +2983,7 @@ func TestGlueCreateTableS3TablesFederatedIntegration(t *testing.T) {
 	ctx := context.Background()
 	awsCfg, err := config.LoadDefaultConfig(ctx)
 	assert.NoError(err)
-	ctlg, err := NewCatalog(WithAWSConfig(awsCfg), WithAWSProperties(AWSProperties{CatalogIdKey: catalogID}))
+	ctlg, err := NewCatalog(WithAWSConfig(awsCfg), WithAWSProperties(AWSProperties{CatalogIDKey: catalogID}))
 	assert.NoError(err)
 
 	tableName := fmt.Sprintf("it_%d", time.Now().UnixNano())

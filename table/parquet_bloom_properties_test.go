@@ -91,7 +91,7 @@ func TestParquetBloomLogicalPathsOnDisk(t *testing.T) {
 				require.NoError(t, err)
 				batch.Retain()
 				df, err = writer.writeFile(t.Context(), nil, WriteTask{
-					Uuid: uuid.New(), Schema: fileSchema, Batches: []arrow.RecordBatch{batch}, FileCount: 1,
+					UUID: uuid.New(), Schema: fileSchema, Batches: []arrow.RecordBatch{batch}, FileCount: 1,
 				})
 				require.NoError(t, err)
 			}

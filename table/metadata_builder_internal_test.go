@@ -2322,10 +2322,10 @@ func TestSetReservedPropertiesFails(t *testing.T) {
 	// Test setting multiple properties where one is reserved
 	err = builder.SetProperties(iceberg.Properties{
 		"custom-property":         "allowed",
-		PropertyCurrentSnapshotId: "12345",
+		PropertyCurrentSnapshotID: "12345",
 		"another-custom-property": "also-allowed",
 	})
-	require.ErrorContains(t, err, "can't set reserved property "+PropertyCurrentSnapshotId)
+	require.ErrorContains(t, err, "can't set reserved property "+PropertyCurrentSnapshotID)
 }
 
 func TestSnapshotTimestampReservedPropertyKey(t *testing.T) {
@@ -2383,10 +2383,10 @@ func TestRemoveReservedPropertiesFails(t *testing.T) {
 	// Test removing multiple properties where one is reserved
 	err := builder.RemoveProperties([]string{
 		"custom-property",
-		PropertyUuid,
+		PropertyUUID,
 		"another-custom-property",
 	})
-	require.ErrorContains(t, err, "can't remove reserved property "+PropertyUuid)
+	require.ErrorContains(t, err, "can't remove reserved property "+PropertyUUID)
 
 	// Add some custom properties first, then test that removing non-reserved properties works
 	require.NoError(t, builder.SetProperties(iceberg.Properties{

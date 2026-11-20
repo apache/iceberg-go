@@ -134,7 +134,7 @@ func TestWriteGeometryColumnPopulatesBounds(t *testing.T) {
 	require.NoError(t, err)
 
 	df, err := writer.writeFile(t.Context(), nil, WriteTask{
-		Uuid:      uuid.New(),
+		UUID:      uuid.New(),
 		ID:        0,
 		FileCount: 1,
 		Schema:    schema,
@@ -194,7 +194,7 @@ func TestWriteGeometryColumnAllNull(t *testing.T) {
 	require.NoError(t, err)
 
 	df, err := writer.writeFile(t.Context(), nil, WriteTask{
-		Uuid:      uuid.New(),
+		UUID:      uuid.New(),
 		ID:        0,
 		FileCount: 1,
 		Schema:    schema,
@@ -241,7 +241,7 @@ func TestWriteGeometryColumnMetricsNone(t *testing.T) {
 	require.NoError(t, err)
 
 	df, err := writer.writeFile(t.Context(), nil, WriteTask{
-		Uuid:      uuid.New(),
+		UUID:      uuid.New(),
 		ID:        0,
 		FileCount: 1,
 		Schema:    schema,
@@ -286,7 +286,7 @@ func TestWriteGeometryColumnCheckedAllocator(t *testing.T) {
 	require.NoError(t, err)
 
 	df, err := writer.writeFile(ctx, nil, WriteTask{
-		Uuid:      uuid.New(),
+		UUID:      uuid.New(),
 		ID:        0,
 		FileCount: 1,
 		Schema:    schema,
@@ -332,7 +332,7 @@ func TestWriteGeoColumnMultiRowGroupStats(t *testing.T) {
 	defer second.Release()
 
 	df, err := writer.writeFile(t.Context(), nil, WriteTask{
-		Uuid:      uuid.New(),
+		UUID:      uuid.New(),
 		ID:        0,
 		FileCount: 1,
 		Schema:    schema,

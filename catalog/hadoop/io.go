@@ -39,4 +39,4 @@ type HadoopCatalogFS interface {
 var _ HadoopCatalogFS = (*icebergio.LocalFS)(nil)
 
 // BlobFileIO can be used to implement a Hadoop catalog with a blob storage bucket.
-var _ HadoopCatalogFS = (*blobfs.FileIO)(nil)
+var _ HadoopCatalogFS = blobfs.FileIO(nil)

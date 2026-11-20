@@ -53,7 +53,7 @@ const (
 
 // Constants for Azure configuration options
 const (
-	ADLSSasTokenPrefix         = "adls.sas-token."
+	ADLSSASTokenPrefix         = "adls.sas-token."
 	ADLSConnectionStringPrefix = "adls.connection-string."
 	ADLSSharedKeyAccountName   = "adls.auth.shared-key.account.name"
 	ADLSSharedKeyAccountKey    = "adls.auth.shared-key.account.key"
