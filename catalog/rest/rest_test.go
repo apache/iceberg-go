@@ -29,7 +29,9 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
@@ -1524,6 +1526,140 @@ func (r *RestCatalogSuite) TestCreateTableInvalidReporterDoesNotHitServer() {
 	r.False(serverHit, "create POST must not be sent when the reporter is invalid")
 }
 
+func (r *RestCatalogSuite) TestCreateTableRejectsMultiSourceBuiltInPartitionField() {
+	var serverHit bool
+	r.mux.HandleFunc("/v1/namespaces/fokko/tables", func(w http.ResponseWriter, req *http.Request) {
+		serverHit = true
+		w.Write([]byte(createTableRestExample))
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	spec := iceberg.NewPartitionSpecID(1, iceberg.PartitionField{
+		SourceIDs: []int{1, 2},
+		FieldID:   1000,
+		Name:      "id_bucket",
+		Transform: iceberg.BucketTransform{NumBuckets: 16},
+	})
+	_, err = cat.CreateTable(
+		context.Background(),
+		catalog.ToIdentifier("fokko", "fokko2"),
+		tableSchemaSimple,
+		catalog.WithPartitionSpec(&spec),
+	)
+
+	r.ErrorIs(err, iceberg.ErrInvalidPartitionSpec)
+	r.ErrorIs(err, iceberg.ErrInvalidArgument)
+	r.False(serverHit, "create POST must not be sent with a built-in transform that has multiple sources")
+}
+
+func (r *RestCatalogSuite) TestCreateTableRejectsIncompatiblePartitionSourceType() {
+	var serverHit bool
+	r.mux.HandleFunc("/v1/namespaces/fokko/tables", func(w http.ResponseWriter, req *http.Request) {
+		serverHit = true
+		w.Write([]byte(createTableRestExample))
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.String, Required: true},
+	)
+	spec := iceberg.NewPartitionSpecID(1, iceberg.PartitionField{
+		SourceIDs: []int{1},
+		FieldID:   1000,
+		Name:      "id_day",
+		Transform: iceberg.DayTransform{},
+	})
+	_, err = cat.CreateTable(
+		context.Background(),
+		catalog.ToIdentifier("fokko", "fokko2"),
+		schema,
+		catalog.WithPartitionSpec(&spec),
+	)
+
+	r.ErrorIs(err, iceberg.ErrInvalidPartitionSpec)
+	r.False(serverHit, "create POST must not be sent with an incompatible partition source type")
+}
+
+func (r *RestCatalogSuite) TestCreateTableRejectsDuplicatePartitionFieldIDs() {
+	var serverHit bool
+	r.mux.HandleFunc("/v1/namespaces/fokko/tables", func(w http.ResponseWriter, req *http.Request) {
+		serverHit = true
+		w.Write([]byte(createTableRestExample))
+	})
+
+	cat, err := rest.NewCatalog(r.T().Context(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	spec := iceberg.NewPartitionSpecID(1,
+		iceberg.PartitionField{SourceIDs: []int{1}, FieldID: 1000, Name: "first", Transform: iceberg.IdentityTransform{}},
+		iceberg.PartitionField{SourceIDs: []int{2}, FieldID: 1000, Name: "second", Transform: iceberg.IdentityTransform{}},
+	)
+	_, err = cat.CreateTable(r.T().Context(), table.Identifier{"fokko", "fokko2"}, tableSchemaSimple,
+		catalog.WithPartitionSpec(&spec))
+	r.Require().ErrorIs(err, iceberg.ErrInvalidPartitionSpec)
+	r.ErrorContains(err, "duplicate field ID")
+	r.False(serverHit)
+}
+
+func (r *RestCatalogSuite) TestCreateTableStagedInvalidAddSpecDoesNotCreateStagedTable() {
+	var createCalled bool
+	r.mux.HandleFunc("/v1/namespaces/db/tables", func(w http.ResponseWriter, req *http.Request) {
+		if req.Method == http.MethodPost {
+			createCalled = true
+		}
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{ID: 2, Name: "other_id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+	)
+	badSpec := iceberg.NewPartitionSpecID(1, iceberg.PartitionField{
+		SourceIDs: []int{1, 2},
+		FieldID:   1000,
+		Name:      "id_bucket",
+		Transform: iceberg.BucketTransform{NumBuckets: 16},
+	})
+
+	_, err = cat.CreateTable(context.Background(), table.Identifier{"db", "test_table"}, schema,
+		catalog.WithStagedUpdates(table.NewAddPartitionSpecUpdate(&badSpec, false)))
+	r.ErrorIs(err, iceberg.ErrInvalidPartitionSpec)
+	r.False(createCalled, "the initial create POST must not run when staged updates cannot be encoded")
+}
+
+func (r *RestCatalogSuite) TestCreateTableAllowsMultiSourceUnknownTransform() {
+	var createCalled bool
+	r.mux.HandleFunc("/v1/namespaces/fokko/tables", func(w http.ResponseWriter, req *http.Request) {
+		if req.Method != http.MethodPost {
+			return
+		}
+		createCalled = true
+		_, _ = w.Write([]byte(createTableRestExample))
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+	transform, err := iceberg.ParseTransform("custom_two_arg")
+	r.Require().NoError(err)
+	spec := iceberg.NewPartitionSpecID(1, iceberg.PartitionField{
+		SourceIDs: []int{1, 2},
+		FieldID:   1000,
+		Name:      "combined",
+		Transform: transform,
+	})
+
+	_, err = cat.CreateTable(context.Background(), catalog.ToIdentifier("fokko", "fokko2"), tableSchemaSimple,
+		catalog.WithPartitionSpec(&spec))
+	r.Require().NoError(err)
+	r.True(createCalled, "unknown multi-source transforms should still reach the REST server")
+}
+
 // TestServerVendedReporterImplIgnored pins that a metrics-reporter-impl vended by
 // the server via /v1/config cannot select — or, with an unregistered name, break
 // — the client's reporter. The client configured none, so the op must succeed and
@@ -1995,6 +2131,78 @@ func (r *RestCatalogSuite) TestCreateTableLabels() {
 	r.Require().NotNil(labels)
 	r.Equal(iceberg.Properties{"owner": "analytics"}, labels.Object())
 	r.Equal(iceberg.Properties{"classification": "pii"}, labels.Field(2))
+}
+
+func (r *RestCatalogSuite) TestExpireSnapshotsRequestsFullHistoryOnDemand() {
+	ctx := r.T().Context()
+	const location = "s3://warehouse/db/table"
+	const metadataLocation = location + "/metadata/v2.metadata.json"
+	meta, err := table.NewMetadata(tableSchemaSimple, iceberg.UnpartitionedSpec, table.UnsortedSortOrder, location, nil)
+	r.Require().NoError(err)
+	builder, err := table.MetadataBuilderFromBase(meta, "")
+	r.Require().NoError(err)
+	now := time.Now()
+	r.Require().NoError(builder.AddSnapshot(&table.Snapshot{
+		SnapshotID: 1, SequenceNumber: 1, TimestampMs: now.Add(-10 * time.Second).UnixMilli(),
+		ManifestList: location + "/metadata/old.avro", Summary: &table.Summary{Operation: table.OpAppend},
+	}))
+	r.Require().NoError(builder.AddSnapshot(&table.Snapshot{
+		SnapshotID: 2, ParentSnapshotID: new(int64(1)), SequenceNumber: 2, TimestampMs: now.Add(-5 * time.Second).UnixMilli(),
+		ManifestList: location + "/metadata/head.avro", Summary: &table.Summary{Operation: table.OpAppend},
+	}))
+	r.Require().NoError(builder.SetSnapshotRef(table.MainBranch, 2, table.BranchRef))
+	full, err := builder.Build()
+	r.Require().NoError(err)
+	partialBuilder, err := table.MetadataBuilderFromBase(full, "")
+	r.Require().NoError(err)
+	r.Require().NoError(partialBuilder.RemoveSnapshots([]int64{1}, false))
+	partial, err := partialBuilder.Build()
+	r.Require().NoError(err)
+
+	var refsLoads, fullLoads atomic.Int32
+	r.mux.HandleFunc("GET /v1/namespaces/db/tables/table", func(w http.ResponseWriter, req *http.Request) {
+		var metadata table.Metadata
+		switch req.URL.Query().Get("snapshots") {
+		case "refs":
+			refsLoads.Add(1)
+			metadata = partial
+		case "all":
+			fullLoads.Add(1)
+			metadata = full
+		default:
+			http.Error(w, "expected snapshots=refs or snapshots=all", http.StatusBadRequest)
+
+			return
+		}
+		r.NoError(json.NewEncoder(w).Encode(map[string]any{
+			"metadata-location": metadataLocation,
+			"metadata":          metadata,
+		}))
+	})
+	cat, err := rest.NewCatalog(ctx, "rest", r.srv.URL, rest.WithOAuthToken(TestToken),
+		rest.WithAdditionalProps(iceberg.Properties{"snapshot-loading-mode": "refs"}))
+	r.Require().NoError(err)
+
+	ident := catalog.ToIdentifier("db", "table")
+	tbl, err := cat.LoadTable(ctx, ident)
+	r.Require().NoError(err)
+	r.Len(tbl.Metadata().Snapshots(), 1)
+	r.Zero(fullLoads.Load())
+
+	tx := tbl.NewTransaction()
+	r.Require().NoError(tx.ExpireSnapshotsWithContext(ctx, table.WithOlderThan(0), table.WithRetainLast(1), table.WithPostCommit(false)))
+	commit, err := tx.TableCommit()
+	r.Require().NoError(err)
+	r.Len(commit.Updates, 1)
+	update, err := json.Marshal(commit.Updates[0])
+	r.Require().NoError(err)
+	r.JSONEq(`{"action":"remove-snapshots","snapshot-ids":[1]}`, string(update))
+	r.EqualValues(1, fullLoads.Load())
+
+	tbl, err = cat.LoadTable(ctx, ident)
+	r.Require().NoError(err)
+	r.Len(tbl.Metadata().Snapshots(), 1)
+	r.EqualValues(2, refsLoads.Load())
 }
 
 func (r *RestCatalogSuite) TestLoadTableWithSnapshotModeRefs() {

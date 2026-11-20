@@ -158,6 +158,17 @@ It exports a curated subset of the report fields under `iceberg.scan.*` /
 `iceberg.scan.result.data_files`, `iceberg.commit.duration`,
 `iceberg.commit.data_files.added`).
 
+Instrument types follow the meaning of each field. Durations are histograms (in
+milliseconds). The commit `*.total` fields (`iceberg.commit.records.total`,
+`iceberg.commit.data_files.total`, `iceberg.commit.delete_files.total`,
+`iceberg.commit.file_size.total_bytes`, `iceberg.commit.positional_deletes.total`
+and `iceberg.commit.equality_deletes.total`) describe the table after the commit,
+so they are gauges that hold the last reported value; do not sum them over time.
+Everything else (added/removed deltas, attempts, manifest stats and all scan
+fields) is a monotonic counter. Gauges are last-write-wins per attribute set, so
+dropping the table name from `WithAttributes` makes different tables overwrite
+each other's totals.
+
 `WithAttributes` bounds label cardinality by allowlist. The default set is table
 name + operation; schema id (`otel.AttrSchemaID`) is opt-in. The snapshot id is
 **never** attached as a metric attribute because it is unbounded — per-snapshot

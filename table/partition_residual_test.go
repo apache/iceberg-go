@@ -20,6 +20,7 @@ package table
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
@@ -137,6 +138,19 @@ func TestPartitionResidualEvaluatorLeavesMismatchedTransformsUnchanged(t *testin
 	evaluator, err := newPartitionResidualEvaluator(schema, &spec, bound, true)
 	require.NoError(t, err)
 	assert.Nil(t, evaluator)
+}
+
+func TestPartitionResidualEvaluatorSkipsInvalidBuiltInMultiSourceField(t *testing.T) {
+	schema := partitionResidualTestSchema()
+	var spec iceberg.PartitionSpec
+	require.NoError(t, json.Unmarshal([]byte(`{"spec-id":1,"fields":[{"source-ids":[1,2],"field-id":1000,"name":"tenant_bucket","transform":"bucket[16]"}]}`), &spec))
+	filter, err := iceberg.BindExpr(schema,
+		iceberg.EqualTo(iceberg.Reference("tenant_id"), "acme"), true)
+	require.NoError(t, err)
+
+	evaluator, err := newPartitionResidualEvaluator(schema, &spec, filter, true)
+	require.NoError(t, err)
+	assert.Nil(t, evaluator, "an invalid historical field must not simplify row filters")
 }
 
 func TestPartitionResidualEvaluatorSimplifiesBooleanCombinations(t *testing.T) {

@@ -1755,8 +1755,24 @@ func (r *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 	if cfg.SortOrder.Fields() == nil && cfg.SortOrder.OrderID() == 0 {
 		cfg.SortOrder = table.UnsortedSortOrder
 	}
+	if cfg.PartitionSpec != nil {
+		// REST create-table sends the caller's spec directly. Validate it against
+		// the schema in this request before encoding the payload, since ordinary
+		// PartitionSpec JSON must remain lenient for historical metadata.
+		if _, err := cfg.PartitionSpec.BindToSchema(schema, nil, nil); err != nil {
+			return nil, err
+		}
+	}
 
 	stagedCreate := len(cfg.StagedUpdates) > 0
+	if stagedCreate {
+		// Phase two runs after the server has created the staged table. Check
+		// that its updates can be encoded now, before the first POST can leave an
+		// orphaned staged table on a local serialization error.
+		if _, err := json.Marshal(cfg.StagedUpdates); err != nil {
+			return nil, fmt.Errorf("failed to encode staged create updates: %w", err)
+		}
+	}
 
 	payload := createTableRequest{
 		Name:          identPath.rawName,
@@ -2032,6 +2048,16 @@ func (r *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier
 // snapshot-loading-mode "all" or omit the property entirely.
 func (r *Catalog) LoadTable(ctx context.Context, identifier table.Identifier) (*table.Table, error) {
 	return r.loadTableWithMode(ctx, identifier, r.snapshotMode)
+}
+
+// LoadTableWithFullSnapshotHistory requests all valid snapshots for this load.
+// The catalog's configured mode still applies to regular LoadTable calls.
+func (r *Catalog) LoadTableWithFullSnapshotHistory(ctx context.Context, identifier table.Identifier) (*table.Table, error) {
+	if r.snapshotMode != SnapshotModeRefs {
+		return r.LoadTable(ctx, identifier)
+	}
+
+	return r.loadTableWithMode(ctx, identifier, SnapshotModeAll)
 }
 
 func (r *Catalog) loadTableWithMode(ctx context.Context, identifier table.Identifier, mode SnapshotMode) (*table.Table, error) {

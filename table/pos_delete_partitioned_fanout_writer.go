@@ -117,7 +117,7 @@ func (p *positionDeletePartitionedFanoutWriter) processBatch(ctx context.Context
 	if err != nil {
 		return err
 	}
-	rollingDataWriter, err := p.writerFactory.getOrCreateRollingDataWriter(writerCtx, partitionPath, partitionContext.partitionData, dataFilesChannel)
+	rollingDataWriter, err := p.writerFactory.getOrCreateRollingDataWriter(writerCtx, partitionPath, partitionContext.partitionData, dataFilesChannel, *p.metadata.PartitionSpecByID(int(partitionContext.specID)))
 	if err != nil {
 		return err
 	}

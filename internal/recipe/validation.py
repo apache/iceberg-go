@@ -30,7 +30,16 @@ def runSQL(sql):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--sql", type=str, required=True, help="Validation SQL statement to execute")
+    # Each invocation is a fresh session, so a SET in a separate call is lost.
+    parser.add_argument("--conf", action="append", default=[], metavar="KEY=VALUE",
+                        help="Spark SQL conf to set before running the statement; may be repeated")
     args = parser.parse_args()
+
+    for conf in args.conf:
+        key, sep, value = conf.partition("=")
+        if not sep:
+            parser.error(f"--conf expects KEY=VALUE, got {conf!r}")
+        spark.conf.set(key, value)
 
     if args.sql:
         runSQL(args.sql)

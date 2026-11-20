@@ -22,6 +22,7 @@ package table_test
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -1050,6 +1051,141 @@ func (s *SparkIntegrationTestSuite) TestOverwriteWithFilter() {
 |false|should_remain  |200|
 |true |new_replacement|999|
 +-----+---------------+---+`)
+}
+
+func (s *SparkIntegrationTestSuite) TestDynamicPartitionOverwrite() {
+	icebergSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32},
+		iceberg.NestedField{ID: 2, Name: "cat", Type: iceberg.PrimitiveTypes.String},
+		iceberg.NestedField{ID: 3, Name: "dt", Type: iceberg.PrimitiveTypes.Date},
+	)
+
+	// month(dt) puts (b, 2024-01-15) in the same partition as (b, 2024-01-01)
+	// and (b, 2024-02-01) in another, so the overwrite has to replace by
+	// transformed value, not by source column.
+	spec := iceberg.NewPartitionSpec(
+		iceberg.PartitionField{SourceIDs: []int{3}, FieldID: 1000, Name: "dt_month", Transform: iceberg.MonthTransform{}},
+		iceberg.PartitionField{SourceIDs: []int{2}, FieldID: 1001, Name: "cat", Transform: iceberg.IdentityTransform{}},
+	)
+	tbl, err := s.cat.CreateTable(s.ctx, catalog.ToIdentifier("default", "go_test_dynamic_partition_overwrite"), icebergSchema,
+		catalog.WithProperties(iceberg.Properties{table.PropertyFormatVersion: "2"}),
+		catalog.WithPartitionSpec(&spec),
+	)
+	s.Require().NoError(err)
+
+	arrowSchema, err := table.SchemaToArrowSchema(icebergSchema, nil, true, false)
+	s.Require().NoError(err)
+
+	initialTable, err := array.TableFromJSON(memory.DefaultAllocator, arrowSchema, []string{
+		`[
+			{"id": 1, "cat": "a", "dt": "2024-01-01"},
+			{"id": 2, "cat": "b", "dt": "2024-01-01"},
+			{"id": 3, "cat": "b", "dt": "2024-01-15"},
+			{"id": 4, "cat": "c", "dt": "2024-01-02"},
+			{"id": 5, "cat": null, "dt": "2024-01-01"},
+			{"id": 6, "cat": "b", "dt": "2024-02-01"}
+		]`,
+	})
+	s.Require().NoError(err)
+	defer initialTable.Release()
+
+	tx := tbl.NewTransaction()
+	s.Require().NoError(tx.AppendTable(s.ctx, initialTable, 6, nil))
+	tbl, err = tx.Commit(s.ctx)
+	s.Require().NoError(err)
+
+	// A Spark-written file in (b, 2024-01) that the Go overwrite must also replace.
+	_, err = recipe.ExecuteSpark(s.T(), "./validation.py", "--sql",
+		"INSERT INTO default.go_test_dynamic_partition_overwrite "+
+			"SELECT 7 AS id, 'b' AS cat, DATE '2024-01-20' AS dt")
+	s.Require().NoError(err)
+	s.Require().NoError(tbl.Refresh(s.ctx))
+
+	overwriteTable, err := array.TableFromJSON(memory.DefaultAllocator, arrowSchema, []string{
+		`[
+			{"id": 20, "cat": "b", "dt": "2024-01-01"},
+			{"id": 50, "cat": null, "dt": "2024-01-01"}
+		]`,
+	})
+	s.Require().NoError(err)
+	defer overwriteTable.Release()
+
+	tx = tbl.NewTransaction()
+	s.Require().NoError(tx.DynamicPartitionOverwriteTable(s.ctx, overwriteTable, 2, nil))
+	tbl, err = tx.Commit(s.ctx)
+	s.Require().NoError(err)
+
+	// coalesce keeps the output independent of how the Spark version prints nulls.
+	output, err := recipe.ExecuteSpark(s.T(), "./validation.py", "--sql",
+		"SELECT id, coalesce(cat, '-') AS cat, dt FROM default.go_test_dynamic_partition_overwrite ORDER BY id")
+	s.Require().NoError(err)
+	s.Require().Contains(output, `+---+---+----------+
+|id |cat|dt        |
++---+---+----------+
+|1  |a  |2024-01-01|
+|4  |c  |2024-01-02|
+|6  |b  |2024-02-01|
+|20 |b  |2024-01-01|
+|50 |-  |2024-01-01|
++---+---+----------+`)
+
+	output, err = recipe.ExecuteSpark(s.T(), "./validation.py", "--sql",
+		fmt.Sprintf("SELECT operation, summary['replace-partitions'] AS rp "+
+			"FROM default.go_test_dynamic_partition_overwrite.snapshots WHERE snapshot_id = %d",
+			tbl.CurrentSnapshot().SnapshotID))
+	s.Require().NoError(err)
+	s.Require().Contains(output, `+---------+----+
+|operation|rp  |
++---------+----+
+|overwrite|true|
++---------+----+`)
+
+	// Reverse direction: Spark's own dynamic INSERT OVERWRITE replaces only
+	// (c, 2024-01). Spark defaults to static mode, which would drop every row.
+	_, err = recipe.ExecuteSpark(s.T(), "./validation.py",
+		"--conf", "spark.sql.sources.partitionOverwriteMode=dynamic",
+		"--sql", "INSERT OVERWRITE default.go_test_dynamic_partition_overwrite "+
+			"SELECT 40 AS id, 'c' AS cat, DATE '2024-01-02' AS dt")
+	s.Require().NoError(err)
+
+	s.Require().NoError(tbl.Refresh(s.ctx))
+	snap := tbl.CurrentSnapshot()
+	s.Require().NotNil(snap)
+	s.Require().NotNil(snap.Summary)
+	s.Equal(table.OpOverwrite, snap.Summary.Operation)
+	s.Equal("true", snap.Summary.Properties["replace-partitions"])
+
+	results, err := tbl.Scan().ToArrowTable(s.ctx)
+	s.Require().NoError(err)
+	defer results.Release()
+
+	var rows []string
+	tr := array.NewTableReader(results, -1)
+	defer tr.Release()
+	for tr.Next() {
+		rec := tr.RecordBatch()
+		for i := range int(rec.NumRows()) {
+			cols := make([]string, rec.NumCols())
+			for c := range cols {
+				col := rec.Column(c)
+				if col.IsNull(i) {
+					cols[c] = "-"
+				} else {
+					cols[c] = col.ValueStr(i)
+				}
+			}
+			rows = append(rows, strings.Join(cols, "|"))
+		}
+	}
+	s.Require().NoError(tr.Err())
+	slices.Sort(rows)
+	s.Equal([]string{
+		"1|a|2024-01-01",
+		"20|b|2024-01-01",
+		"40|c|2024-01-02",
+		"50|-|2024-01-01",
+		"6|b|2024-02-01",
+	}, rows)
 }
 
 func (s *SparkIntegrationTestSuite) TestDelete() {

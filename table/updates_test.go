@@ -1471,6 +1471,24 @@ func TestAddPartitionSpecUpdate_UnmarshalVoidTombstone(t *testing.T) {
 	assert.IsType(t, iceberg.VoidTransform{}, spec.Field(0).Transform)
 }
 
+func TestAddPartitionSpecUpdateUnmarshalRejectsMultipleSourcesForBuiltInTransform(t *testing.T) {
+	data := []byte(`[{"action":"add-spec","spec":{"spec-id":1,"fields":[{"source-ids":[1,2],"field-id":1000,"transform":"bucket[16]","name":"id_bucket"}]}}]`)
+
+	var updates Updates
+	err := json.Unmarshal(data, &updates)
+	require.ErrorIs(t, err, iceberg.ErrInvalidPartitionSpec)
+	assert.ErrorContains(t, err, "requires exactly one source ID, got 2")
+
+	spec := iceberg.NewPartitionSpecID(1, iceberg.PartitionField{
+		SourceIDs: []int{1, 2},
+		FieldID:   1000,
+		Name:      "id_bucket",
+		Transform: iceberg.BucketTransform{NumBuckets: 16},
+	})
+	_, err = json.Marshal(NewAddPartitionSpecUpdate(&spec, false))
+	require.ErrorIs(t, err, iceberg.ErrInvalidPartitionSpec)
+}
+
 func TestAddPartitionSpecUpdate_UnmarshalUnresolvableSourceID(t *testing.T) {
 	// A non-void source ID that the current schema cannot resolve is still
 	// rejected, but by binding rather than by decoding.

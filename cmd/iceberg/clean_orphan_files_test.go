@@ -69,16 +69,18 @@ func TestRunCleanOrphanFilesPreviewsPlanBeforeDeletion(t *testing.T) {
 	require.NoError(t, memFS.WriteFile(context.Background(), metadataLocation, nil))
 	require.NoError(t, memFS.WriteFile(context.Background(), orphanPath, []byte("orphan")))
 
+	testCatalog := &cleanOrphanCatalog{}
 	tbl := table.New(
 		table.Identifier{"db", "preview"},
 		meta,
 		metadataLocation,
 		func(context.Context) (icebergio.IO, error) { return memFS, nil },
-		nil,
+		testCatalog,
 	)
+	testCatalog.table = tbl
 	output := &cleanOrphanOutput{}
 
-	runCleanOrphanFiles(ctx, output, cleanOrphanCatalog{table: tbl}, &CleanOrphanFilesCmd{
+	runCleanOrphanFiles(ctx, output, testCatalog, &CleanOrphanFilesCmd{
 		TableID:   "db.preview",
 		OlderThan: "1h",
 		Yes:       true,
