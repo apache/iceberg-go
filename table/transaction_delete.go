@@ -609,7 +609,8 @@ func (t *Transaction) rewriteFilesWithFilter(ctx context.Context, fs io.IO, upda
 	}
 
 	for _, entry := range entries {
-		task, err := fileScanTaskForDataEntry(entry, deletes.positional, deletes.dvs, deletes.equality)
+		task, err := fileScanTaskForDataEntry(
+			entry, deletes.positional, deletes.dvs, deletes.equality, meta.GetSpecByID, meta.CurrentSchema())
 		if err != nil {
 			return err
 		}

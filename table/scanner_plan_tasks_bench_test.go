@@ -190,8 +190,10 @@ func planBufferedDataManifestTasks(
 	}
 
 	tasks := make([]FileScanTask, 0, len(entries.dataEntries))
+	dvSpecByID := dvSpecLookupForMetadata(scan.metadata)
 	for _, entry := range entries.dataEntries {
-		task, err := fileScanTaskForDataEntry(entry, posDeleteIndex, dvIndex, eqDeleteIndex)
+		task, err := fileScanTaskForDataEntry(
+			entry, posDeleteIndex, dvIndex, eqDeleteIndex, dvSpecByID, schema)
 		if err != nil {
 			return nil, err
 		}

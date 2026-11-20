@@ -133,3 +133,31 @@ func TestEqualityDeletesAfterFloatPartitionSourcePromotion(t *testing.T) {
 		})
 	}
 }
+
+func TestCopyOnWriteDeleteUsesDeletionVectorAfterFloatPartitionSourcePromotion(t *testing.T) {
+	ctx := t.Context()
+	tbl := newPromotablePartitionTable(t, "3", iceberg.PrimitiveTypes.Float32)
+	tbl = appendRows(t, tbl, `[{"id": 1, "p": 1.5}, {"id": 2, "p": 1.5}, {"id": 3, "p": 1.5}]`)
+	tbl = promotePartitionSource(t, tbl, iceberg.PrimitiveTypes.Float64)
+
+	tbl, err := tbl.Delete(ctx, iceberg.EqualTo(iceberg.Reference("id"), int64(1)), nil)
+	require.NoError(t, err)
+	scan := tbl.Scan()
+	defer scan.Close()
+	tasks, err := scan.PlanFiles(ctx)
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	require.Len(t, tasks[0].DeletionVectorFiles, 1)
+	spec := tbl.Spec()
+	partitionID := spec.Field(0).FieldID
+	require.Equal(t, float32(1.5), tasks[0].File.Partition()[partitionID])
+	require.Equal(t, float64(1.5), tasks[0].DeletionVectorFiles[0].Partition()[partitionID])
+
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.SetProperties(iceberg.Properties{table.WriteDeleteModeKey: table.WriteModeCopyOnWrite}))
+	tbl, err = tx.Commit(ctx)
+	require.NoError(t, err)
+	tbl, err = tbl.Delete(ctx, iceberg.EqualTo(iceberg.Reference("id"), int64(2)), nil)
+	require.NoError(t, err)
+	require.Equal(t, []int64{3}, idsInTable(t, tbl))
+}

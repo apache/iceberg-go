@@ -33,7 +33,6 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/iceberg-go"
-	iceberginternal "github.com/apache/iceberg-go/internal"
 	"github.com/apache/iceberg-go/internal/scanmetrics"
 	"github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/metrics"
@@ -1014,53 +1013,6 @@ func widenPromotedPartitionValue(value any) any {
 	return value
 }
 
-// buildDVIndex indexes deletion vectors by the data file path they reference.
-// A missing reference must fail planning instead of silently exposing deleted
-// rows. The spec also requires at most one DV per data file.
-func buildDVIndex(dvEntries []iceberg.ManifestEntry) (map[string]iceberg.ManifestEntry, error) {
-	dvIndex := make(map[string]iceberg.ManifestEntry, len(dvEntries))
-	for _, del := range dvEntries {
-		file := del.DataFile()
-		ref := iceberginternal.BorrowedDataFileReferencedDataFile(file)
-		if ref == nil || *ref == "" {
-			return nil, fmt.Errorf("%w: deletion vector %q is missing referenced_data_file",
-				ErrInvalidMetadata, file.FilePath())
-		}
-		if _, exists := dvIndex[*ref]; exists {
-			return nil, fmt.Errorf("%w: can't index multiple deletion vectors for %s", ErrInvalidMetadata, *ref)
-		}
-		dvIndex[*ref] = del
-	}
-
-	return dvIndex, nil
-}
-
-// matchDVToData returns the deletion vector that applies to the given data
-// entry, if any. A DV applies when the data file's sequence number is less
-// than or equal to the DV's sequence number.
-//
-// SequenceNum reports the -1 sentinel when an entry's sequence number is
-// unset (see manifest.go). Entries arrive here already inherited, so a
-// committed ADDED entry always carries a real (>= 0) sequence number; an
-// unset value comes from an EXISTING/DELETED entry missing its required
-// explicit sequence number, or a not-yet-committed manifest. Such an
-// indeterminate sequence number — on either side — is treated as "applies":
-// comparing a real data sequence number against an unset DV sequence (-1)
-// would never satisfy dataSeq <= -1 and would silently drop the DV,
-// resurfacing deleted rows; an unset data sequence likewise satisfies
-// -1 <= dvSeq for any known DV sequence.
-func matchDVToData(dataEntry iceberg.ManifestEntry, dvIndex map[string]iceberg.ManifestEntry) []iceberg.DataFile {
-	dvEntry, ok := dvIndex[dataEntry.DataFile().FilePath()]
-	if !ok {
-		return nil
-	}
-	if dvSeq := dvEntry.DataSequenceNumber(); dvSeq < 0 || dataEntry.DataSequenceNumber() <= dvSeq {
-		return []iceberg.DataFile{dvEntry.DataFile()}
-	}
-
-	return nil
-}
-
 // fetchPartitionSpecFilteredManifests retrieves the table's current snapshot,
 // fetches its manifest files, and applies partition-spec filters to remove irrelevant manifests.
 func (scan *Scan) fetchPartitionSpecFilteredManifests(ctx context.Context) ([]iceberg.ManifestFile, error) {
@@ -1442,6 +1394,7 @@ func (scan *Scan) planDataManifestTasksWithOptions(
 		return nil, err
 	}
 
+	dvSpecByID := dvSpecLookupForMetadata(scan.metadata)
 	taskBatches := make([][]FileScanTask, len(manifestList))
 	skippedFiles := make([]int64, len(manifestList))
 	taskCapacities := make([]int, len(manifestList))
@@ -1526,7 +1479,7 @@ func (scan *Scan) planDataManifestTasksWithOptions(
 						ErrInvalidMetadata, dataFile.ContentType(), dataFile.FilePath())
 				}
 
-				task, err := fileScanTaskForDataEntry(entry, posDeleteIndex, dvIndex, eqDeleteIndex)
+				task, err := fileScanTaskForDataEntry(entry, posDeleteIndex, dvIndex, eqDeleteIndex, dvSpecByID, schema)
 				if err != nil {
 					return err
 				}
@@ -1617,6 +1570,8 @@ func fileScanTaskForDataEntry(
 	posDeleteIndex *positionalDeleteIndex,
 	dvIndex map[string]iceberg.ManifestEntry,
 	eqDeleteIndex *equalityDeleteIndex,
+	dvSpecByID dvSpecLookup,
+	schema *iceberg.Schema,
 ) (FileScanTask, error) {
 	// Spec §Scan Planning: when a deletion vector applies to a data file,
 	// positional-delete files must NOT be applied. The DV is guaranteed to
@@ -1624,7 +1579,10 @@ func fileScanTaskForDataEntry(
 	// would be wasteful I/O, and on a buggy writer whose DV omits prior
 	// positions, applying both would over-delete. Mirrors Java's
 	// DeleteFileIndex.forDataFile.
-	dvFiles := matchDVToData(entry, dvIndex)
+	dvFiles, err := matchDVToData(entry, dvIndex, dvSpecByID, schema)
+	if err != nil {
+		return FileScanTask{}, err
+	}
 	var deleteFiles []iceberg.DataFile
 	if len(dvFiles) == 0 {
 		var err error
