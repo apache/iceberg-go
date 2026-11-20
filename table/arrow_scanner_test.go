@@ -40,6 +40,88 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestAllPassRecordMaskSlicedValidity(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+	builder := array.NewBooleanBuilder(mem)
+	defer builder.Release()
+	builder.AppendValues([]bool{false, true, true, true, true}, []bool{false, true, true, false, true})
+	values := builder.NewBooleanArray()
+	defer values.Release()
+
+	for _, tc := range []struct {
+		name       string
+		start, end int64
+		want       bool
+	}{
+		{name: "valid before null", start: 1, end: 3, want: true},
+		{name: "includes null", start: 1, end: 4, want: false},
+		{name: "valid after null", start: 4, end: 5, want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sliced := array.NewSlice(values, tc.start, tc.end)
+			defer sliced.Release()
+			mask := compute.NewDatumWithoutOwning(sliced)
+			require.Equal(t, array.UnknownNullCount, sliced.Data().NullN())
+			require.Equal(t, tc.want, allPassRecordMask(mask, tc.end-tc.start))
+		})
+	}
+}
+
+func TestRecordFilterAllPassingBatch(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "keep", Type: iceberg.PrimitiveTypes.Bool},
+		iceberg.NestedField{ID: 2, Name: "value", Type: iceberg.PrimitiveTypes.Int64},
+	)
+	arrowSchema, err := SchemaToArrowSchema(schema, nil, true, false)
+	require.NoError(t, err)
+	filter, err := iceberg.BindExpr(schema, iceberg.EqualTo(iceberg.Reference("keep"), true), true)
+	require.NoError(t, err)
+	plan, err := compileFileFilterPlan(schema, filter, true, true, false)
+	require.NoError(t, err)
+
+	for _, tc := range []struct {
+		name        string
+		keep, valid []bool
+		start, end  int64
+		want        []int64
+		reuse       bool
+	}{
+		{name: "all pass", keep: []bool{true, true, true}, end: 3, want: []int64{0, 1, 2}, reuse: true},
+		{name: "sliced all pass", keep: []bool{false, true, true, false}, start: 1, end: 3, want: []int64{1, 2}, reuse: true},
+		{name: "mixed", keep: []bool{true, false, true}, end: 3, want: []int64{0, 2}},
+		{name: "null", keep: []bool{true, true, true}, valid: []bool{true, false, true}, end: 3, want: []int64{0, 2}},
+		{name: "none pass", keep: []bool{false}, end: 1},
+		{name: "empty", keep: []bool{true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+			defer mem.AssertSize(t, 0)
+			builder := array.NewRecordBuilder(mem, arrowSchema)
+			defer builder.Release()
+			builder.Field(0).(*array.BooleanBuilder).AppendValues(tc.keep, tc.valid)
+			for i := range tc.keep {
+				builder.Field(1).(*array.Int64Builder).Append(int64(i))
+			}
+
+			original := builder.NewRecordBatch()
+			input := original.NewSlice(tc.start, tc.end)
+			original.Release()
+			result, err := plan.recordProcessor(compute.WithAllocator(t.Context(), mem))(input)
+			require.NoError(t, err)
+			defer result.Release()
+			if tc.reuse {
+				require.Same(t, input, result)
+			}
+			values := result.Column(1).(*array.Int64)
+			require.EqualValues(t, len(tc.want), values.Len())
+			for i, value := range tc.want {
+				require.Equal(t, value, values.Value(i))
+			}
+		})
+	}
+}
+
 type failAfterGoodCloseFS struct {
 	*iceio.MemFS
 
@@ -491,5 +573,80 @@ func TestCreateIteratorReleasesEmptyRecordBatches(t *testing.T) {
 			rec.Release()
 		}
 		require.Fail(t, "empty record batch should not be yielded")
+	}
+}
+
+func TestAllPassRecordMaskRejectsIncorrectRowCountsAndTypes(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+
+	bools := array.NewBooleanBuilder(mem)
+	bools.AppendValues([]bool{true, true, true}, nil)
+	values := bools.NewBooleanArray()
+	bools.Release()
+	defer values.Release()
+
+	mask := compute.NewDatumWithoutOwning(values)
+	require.True(t, allPassRecordMask(mask, 3))
+	for _, rows := range []int64{0, 1, 2, 4} {
+		require.False(t, allPassRecordMask(mask, rows),
+			"a 3-row mask must not be reused for a %d-row batch", rows)
+	}
+
+	ints := array.NewInt64Builder(mem)
+	ints.AppendValues([]int64{1, 1, 1}, nil)
+	numericValues := ints.NewInt64Array()
+	ints.Release()
+	defer numericValues.Release()
+	require.False(t, allPassRecordMask(compute.NewDatumWithoutOwning(numericValues), 3),
+		"even nonzero numeric values are not a Boolean all-pass mask")
+}
+
+func TestRecordFilterStreamingAlternatesAllPassAndPartialBatches(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "keep", Type: iceberg.PrimitiveTypes.Bool},
+		iceberg.NestedField{ID: 2, Name: "value", Type: iceberg.PrimitiveTypes.Int64},
+	)
+	arrowSchema, err := SchemaToArrowSchema(schema, nil, true, false)
+	require.NoError(t, err)
+	filter, err := iceberg.BindExpr(schema, iceberg.EqualTo(iceberg.Reference("keep"), true), true)
+	require.NoError(t, err)
+	plan, err := compileFileFilterPlan(schema, filter, true, true, false)
+	require.NoError(t, err)
+
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+	process := plan.recordProcessor(compute.WithAllocator(t.Context(), mem))
+	for _, tc := range []struct {
+		name  string
+		keep  []bool
+		want  []int64
+		reuse bool
+	}{
+		{name: "first all pass", keep: []bool{true, true, true}, want: []int64{0, 1, 2}, reuse: true},
+		{name: "partial", keep: []bool{true, false, true}, want: []int64{0, 2}},
+		{name: "none", keep: []bool{false, false, false}},
+		{name: "later all pass", keep: []bool{true, true, true}, want: []int64{0, 1, 2}, reuse: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			builder := array.NewRecordBuilder(mem, arrowSchema)
+			builder.Field(0).(*array.BooleanBuilder).AppendValues(tc.keep, nil)
+			for i := range tc.keep {
+				builder.Field(1).(*array.Int64Builder).Append(int64(i))
+			}
+			input := builder.NewRecordBatch()
+			builder.Release()
+			result, err := process(input)
+			require.NoError(t, err)
+			require.NotNil(t, result)
+			defer result.Release()
+			if tc.reuse {
+				require.Same(t, input, result, "all-pass batches should reuse their Arrow record")
+			}
+			require.EqualValues(t, len(tc.want), result.NumRows())
+			for i, want := range tc.want {
+				require.Equal(t, want, result.Column(1).(*array.Int64).Value(i))
+			}
+		})
 	}
 }

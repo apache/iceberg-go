@@ -34,6 +34,7 @@ import (
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/bitutil"
 	"github.com/apache/arrow-go/v18/arrow/compute"
 	"github.com/apache/arrow-go/v18/arrow/compute/exprs"
 	"github.com/apache/arrow-go/v18/arrow/memory"
@@ -1590,6 +1591,24 @@ func enrichRecordsWithPosDeleteFields(ctx context.Context, filePath iceberg.Data
 	}
 }
 
+func allPassRecordMask(mask compute.Datum, rows int64) bool {
+	arrayMask, ok := mask.(*compute.ArrayDatum)
+	if !ok || rows <= 0 || arrayMask.Len() != rows || arrayMask.Type().ID() != arrow.BOOL {
+		return false
+	}
+	data := arrayMask.Value
+	if data.NullN() > 0 {
+		return false
+	}
+	validity, values := data.Buffers()[0], data.Buffers()[1]
+	if values == nil || !bitutil.BitmapAllSet(values.Bytes(), data.Offset(), data.Len()) {
+		return false
+	}
+
+	// Arrow slices can report an unknown null count even when every row is valid.
+	return data.NullN() == 0 || validity == nil || bitutil.BitmapAllSet(validity.Bytes(), data.Offset(), data.Len())
+}
+
 func filterRecords(ctx context.Context, recordFilter expr.Expression) recProcessFn {
 	return func(rec arrow.RecordBatch) (arrow.RecordBatch, error) {
 		defer rec.Release()
@@ -1600,6 +1619,12 @@ func filterRecords(ctx context.Context, recordFilter expr.Expression) recProcess
 			return nil, err
 		}
 		defer mask.Release()
+
+		if allPassRecordMask(mask, rec.NumRows()) {
+			rec.Retain()
+
+			return rec, nil
+		}
 
 		result, err := compute.Filter(ctx, input, mask, *compute.DefaultFilterOptions())
 		if err != nil {
