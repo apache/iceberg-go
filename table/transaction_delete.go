@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"iter"
+	"maps"
 	"runtime"
 	"slices"
 	"strings"
@@ -167,11 +168,21 @@ func (t *Transaction) performMergeOnReadDeletion(ctx context.Context, snapshotPr
 	}
 
 	// On v3 every removed file takes its deletion vector with it, and a partially deleted file's vector is
-	// merged into its replacement. Both need only the deletion vectors, read once.
-	// DVs only exist from v3, so v2 skips the read.
-	var dvs liveDeletionVectors
+	// merged into its replacement. A file's first vector also absorbs its v2 position deletes, which readers
+	// stop applying once the file has a vector. DVs only exist from v3, so v2 skips the read.
+	var (
+		dvs    liveDeletionVectors
+		folded foldedPositionDeletes
+	)
 	if meta.formatVersion >= 3 && (len(filesToDelete) > 0 || len(withPartialDeletions) > 0) {
-		dvs, err = t.readLiveDeletionVectors(ctx, fs)
+		classified, err := t.classifyLiveDeletes(ctx, fs)
+		if err != nil {
+			return nil, err
+		}
+		if dvs, err = buildDVIndex(classified.dvEntries); err != nil {
+			return nil, err
+		}
+		folded, err = foldPositionDeletes(ctx, fs, withPartialDeletions, classified.positionalDeleteEntries, dvs)
 		if err != nil {
 			return nil, err
 		}
@@ -186,7 +197,7 @@ func (t *Transaction) performMergeOnReadDeletion(ctx context.Context, snapshotPr
 		for _, entry := range withPartialDeletions {
 			partialFiles = append(partialFiles, entry.DataFile())
 		}
-		referenced, err := t.writePositionDeletesForFiles(ctx, fs, updater, dvs, partialFiles, filter, caseSensitive, concurrency, commitUUID)
+		referenced, err := t.writePositionDeletesForFiles(ctx, fs, updater, dvs, folded, partialFiles, filter, caseSensitive, concurrency, commitUUID)
 		if err != nil {
 			return nil, err
 		}
@@ -900,7 +911,7 @@ func isNullPositionDeletePath(values arrow.TypedArray[string], column arrow.Arra
 // files that match filter, appends them to updater, and returns the distinct
 // data-file paths those deletes reference, including paths in v2 delete files
 // that cover more than one data file.
-func (t *Transaction) writePositionDeletesForFiles(ctx context.Context, fs io.IO, updater *snapshotProducer, dvs liveDeletionVectors, files []iceberg.DataFile, filter iceberg.BooleanExpression, caseSensitive bool, concurrency int, commitUUID uuid.UUID) ([]string, error) {
+func (t *Transaction) writePositionDeletesForFiles(ctx context.Context, fs io.IO, updater *snapshotProducer, dvs liveDeletionVectors, folded foldedPositionDeletes, files []iceberg.DataFile, filter iceberg.BooleanExpression, caseSensitive bool, concurrency int, commitUUID uuid.UUID) ([]string, error) {
 	meta, err := t.txnMeta()
 	if err != nil {
 		return nil, err
@@ -995,6 +1006,8 @@ func (t *Transaction) writePositionDeletesForFiles(ctx context.Context, fs io.IO
 		existingDVs[df.FilePath()] = entry.DataFile()
 		existingDVBitmaps[df.FilePath()] = bitmap
 	}
+	// A file without a DV starts from the positions its v2 position deletes removed.
+	maps.Copy(existingDVBitmaps, folded.seeds)
 
 	posDeleteFiles := positionDeleteRecordsToDataFiles(ctx, meta.loc, meta, partitionContextByFilePath, recordWritingArgs{
 		sc:          PositionalDeleteArrowSchema,
@@ -1030,8 +1043,70 @@ func (t *Transaction) writePositionDeletesForFiles(ctx context.Context, fs io.IO
 	for _, dvFile := range existingDVs {
 		updater.removeDeletionVector(dvFile)
 	}
+	for _, f := range folded.drop {
+		updater.removeDeleteFile(f)
+	}
 
 	return referenced, nil
+}
+
+// foldedPositionDeletes is what a v3 delete takes over from v2 position delete files.
+type foldedPositionDeletes struct {
+	// seeds maps a data file without a deletion vector to the positions its position delete files removed.
+	seeds map[string]*dv.RoaringPositionBitmap
+	// drop lists the file-scoped position delete files whose positions moved into a seed.
+	drop []iceberg.DataFile
+}
+
+// foldPositionDeletes collects the v2 position deletes of every file in partial that has no deletion vector yet.
+//
+// Like Java's BaseDVFileWriter, only file-scoped delete files (one target data file) are dropped. A
+// partition-scoped file can cover other data files, so it stays: readers ignore it for files with a vector
+// and still apply it to the rest. Dropping is safe because every seeded file gets a vector written.
+func foldPositionDeletes(ctx context.Context, fs io.IO, partial []iceberg.ManifestEntry, positional []iceberg.ManifestEntry, dvs liveDeletionVectors) (foldedPositionDeletes, error) {
+	var folded foldedPositionDeletes
+	if len(partial) == 0 || len(positional) == 0 {
+		return folded, nil
+	}
+	idx, err := buildPositionalDeleteIndex(positional)
+	if err != nil {
+		return folded, err
+	}
+
+	folded.seeds = make(map[string]*dv.RoaringPositionBitmap)
+	read := make(map[string]map[string]*dv.RoaringPositionBitmap) // delete file path -> target path -> positions
+	for _, entry := range partial {
+		path := entry.DataFile().FilePath()
+		if _, ok := dvs[path]; ok {
+			continue
+		}
+		matched, err := idx.forDataFile(entry)
+		if err != nil {
+			return folded, err
+		}
+		for _, del := range matched {
+			targets, ok := read[del.FilePath()]
+			if !ok {
+				if targets, err = readPositionDeleteBitmapsForPaths(ctx, fs, del, nil); err != nil {
+					return folded, fmt.Errorf("failed to read position deletes from %s: %w", del.FilePath(), err)
+				}
+				read[del.FilePath()] = targets
+			}
+			bitmap, ok := targets[path]
+			if !ok {
+				continue
+			}
+			if folded.seeds[path] == nil {
+				folded.seeds[path] = dv.NewRoaringPositionBitmap()
+			}
+			folded.seeds[path].Or(bitmap)
+			if referencedDataFilePath(del) == path {
+				folded.drop = append(folded.drop, del)
+			}
+		}
+	}
+
+	return folded, nil
 }
 
 func (t *Transaction) makePositionDeleteRecordsForFilter(ctx context.Context, fs io.IO, files []iceberg.DataFile, filter iceberg.BooleanExpression, caseSensitive bool, concurrency int) (seq2 iter.Seq2[arrow.RecordBatch, error], err error) {
