@@ -978,6 +978,7 @@ func (f *compactionSourceOpenHook) Open(ctx context.Context, name string) (iceio
 		f.onOpen = nil
 		fn()
 	}
+
 	return f.LocalFS.Open(ctx, name)
 }
 

@@ -547,6 +547,7 @@ func (t *Transaction) RewriteDataFiles(ctx context.Context, groups []CompactionT
 			if len(gr.NewDataFiles) > 0 {
 				outputs = append(outputs, gr)
 			}
+
 			return result, err
 		}
 

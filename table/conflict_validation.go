@@ -520,7 +520,8 @@ func (c *conflictContext) forEachEntryInSnapshot(
 			}
 			status := entry.Status()
 			if entry.SnapshotID() != snap.SnapshotID ||
-				!(includeAdded && status == iceberg.EntryStatusADDED || includeDeleted && status == iceberg.EntryStatusDELETED) {
+				(!includeAdded || status != iceberg.EntryStatusADDED) &&
+					(!includeDeleted || status != iceberg.EntryStatusDELETED) {
 				continue
 			}
 			if err := visit(snap, entry); err != nil {
