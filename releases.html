@@ -291,6 +291,9 @@
 <p><strong>Struct defaults must be empty objects.</strong> Non-null <code>initial-default</code> and <code>write-default</code> values for struct fields must be <code>{}</code>; defaults for nested fields belong on those fields. Tables with populated struct defaults written by older iceberg-go versions still load, but <code>AddSchema</code> validates the entire resulting schema. Any schema update, including one that changes an unrelated column, will fail until the populated default is cleared.</p>
 </li>
 <li>
+<p><strong>Schemas with duplicate field IDs are rejected.</strong> Table and view metadata now fail to load with <code>ErrInvalidSchema</code> if any schema in their history has two fields sharing an ID, including <code>0</code> or <code>-1</code>; Java Iceberg already rejects these. Older releases could write such schemas through SQL <code>CreateView</code>, <code>view.CreateView</code> or <code>view.NewMetadata</code>, or through <code>CommitTable</code> with <code>NewAddSchemaUpdate</code> on non-REST catalogs, when IDs were left unset; these calls, and the new <code>UpdateView</code>, now return <code>ErrInvalidSchema</code> instead. To recover, drop and recreate an affected view. For a table, point the catalog at a copy of the metadata without that schema through an atomic catalog metadata replacement, instead of editing the currently referenced metadata file in place.</p>
+</li>
+<li>
 <p><strong>Sort order replacements reuse orders staged earlier in the same transaction.</strong> If a transaction replaces order A with B and then returns to A, A becomes the default again instead of B. The final update reuses A's ID instead of adding another definition. Reuse of orders from earlier commits was already supported.</p>
 </li>
 <li>
