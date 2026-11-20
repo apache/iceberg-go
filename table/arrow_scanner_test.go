@@ -50,18 +50,21 @@ func TestAllPassRecordMaskSlicedValidity(t *testing.T) {
 	defer values.Release()
 
 	for _, tc := range []struct {
+		name       string
 		start, end int64
 		want       bool
 	}{
-		{start: 1, end: 3, want: true},
-		{start: 1, end: 4, want: false},
-		{start: 4, end: 5, want: true},
+		{name: "valid before null", start: 1, end: 3, want: true},
+		{name: "includes null", start: 1, end: 4, want: false},
+		{name: "valid after null", start: 4, end: 5, want: true},
 	} {
-		sliced := array.NewSlice(values, tc.start, tc.end)
-		mask := compute.NewDatumWithoutOwning(sliced)
-		require.Equal(t, array.UnknownNullCount, sliced.Data().NullN())
-		require.Equal(t, tc.want, allPassRecordMask(mask, tc.end-tc.start))
-		sliced.Release()
+		t.Run(tc.name, func(t *testing.T) {
+			sliced := array.NewSlice(values, tc.start, tc.end)
+			defer sliced.Release()
+			mask := compute.NewDatumWithoutOwning(sliced)
+			require.Equal(t, array.UnknownNullCount, sliced.Data().NullN())
+			require.Equal(t, tc.want, allPassRecordMask(mask, tc.end-tc.start))
+		})
 	}
 }
 
@@ -587,7 +590,7 @@ func TestAllPassRecordMaskRejectsIncorrectRowCountsAndTypes(t *testing.T) {
 	require.True(t, allPassRecordMask(mask, 3))
 	for _, rows := range []int64{0, 1, 2, 4} {
 		require.False(t, allPassRecordMask(mask, rows),
-			"a mask can only be reused for a batch with exactly the same row count")
+			"a 3-row mask must not be reused for a %d-row batch", rows)
 	}
 
 	ints := array.NewInt64Builder(mem)
@@ -636,6 +639,7 @@ func TestRecordFilterStreamingAlternatesAllPassAndPartialBatches(t *testing.T) {
 			result, err := process(input)
 			require.NoError(t, err)
 			require.NotNil(t, result)
+			defer result.Release()
 			if tc.reuse {
 				require.Same(t, input, result, "all-pass batches should reuse their Arrow record")
 			}
@@ -643,7 +647,6 @@ func TestRecordFilterStreamingAlternatesAllPassAndPartialBatches(t *testing.T) {
 			for i, want := range tc.want {
 				require.Equal(t, want, result.Column(1).(*array.Int64).Value(i))
 			}
-			result.Release()
 		})
 	}
 }
