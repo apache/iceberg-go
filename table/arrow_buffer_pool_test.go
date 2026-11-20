@@ -198,7 +198,7 @@ func TestArrowBufferPoolBoundsEachSizeClass(t *testing.T) {
 		require.Equal(t, arrowBuffersPerClass, bucket.count,
 			"size %d must not retain more than the configured buffer count", size)
 
-		for i := 0; i < arrowBuffersPerClass; i++ {
+		for range arrowBuffersPerClass {
 			reused := pool.Allocate(size)
 			require.Equal(t, make([]byte, cap(reused)), reused[:cap(reused)],
 				"size %d must clear the full buffer, including its spare capacity", size)
@@ -245,11 +245,11 @@ func TestArrowBufferPoolConcurrentFreeAndClose(t *testing.T) {
 	start := make(chan struct{})
 	var wg sync.WaitGroup
 	wg.Add(workers)
-	for worker := 0; worker < workers; worker++ {
+	for range workers {
 		go func() {
 			defer wg.Done()
 			<-start
-			for i := 0; i < rounds; i++ {
+			for i := range rounds {
 				buf := pool.Allocate(65 + i%3)
 				buf[0] = byte(i)
 				pool.Free(buf)
