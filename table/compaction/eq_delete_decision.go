@@ -20,7 +20,6 @@ package compaction
 import (
 	"fmt"
 	"math"
-	"strings"
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/internal"
@@ -41,8 +40,13 @@ type SurvivorSurvey struct {
 	PartMinSeq      map[string]int64
 
 	minSeq         int64
-	specPartMinSeq map[string]int64
+	specPartMinSeq map[survivorPartition]int64
 	partitionErr   error
+}
+
+type survivorPartition struct {
+	specID int32
+	tuple  string
 }
 
 // PartitionSpecLookup resolves the partition spec used to write a data file.
@@ -58,7 +62,7 @@ func NewSurvivorSurvey() *SurvivorSurvey {
 		EmptyPartMinSeq: math.MaxInt64,
 		PartMinSeq:      make(map[string]int64),
 		minSeq:          math.MaxInt64,
-		specPartMinSeq:  make(map[string]int64),
+		specPartMinSeq:  make(map[survivorPartition]int64),
 	}
 }
 
@@ -79,9 +83,8 @@ func (s *SurvivorSurvey) AddSurvivor(partition map[int]any, seq int64) {
 
 	// An unsupported tuple uses the empty key. This API takes the minimum
 	// across all buckets, so the survivor still protects older data.
-	var storage [256]byte
-	tuple, _ := tblutils.AppendPartitionTuple(storage[:0], partition)
-	updatePartitionMinSeq(s.PartMinSeq, string(tuple), seq)
+	tuple, _ := survivorPartitionTuple(partition)
+	updatePartitionMinSeq(s.PartMinSeq, tuple, seq)
 }
 
 // AddSurvivorWithSpec records a surviving data file's spec ID, partition, and
@@ -92,7 +95,7 @@ func (s *SurvivorSurvey) AddSurvivorWithSpec(specID int32, partition map[int]any
 	seq = max(seq, 0)
 	s.minSeq = min(seq, s.minSeq)
 
-	key, err := tblutils.CanonicalPartitionKey(specID, partition)
+	tuple, err := survivorPartitionTuple(partition)
 	if err != nil {
 		if s.partitionErr == nil {
 			s.partitionErr = fmt.Errorf("encoding survivor partition for spec %d: %w", specID, err)
@@ -104,10 +107,9 @@ func (s *SurvivorSurvey) AddSurvivorWithSpec(specID int32, partition map[int]any
 	if len(partition) == 0 {
 		s.EmptyPartMinSeq = min(seq, s.EmptyPartMinSeq)
 	} else {
-		_, tuple, _ := strings.Cut(key, ":")
 		updatePartitionMinSeq(s.PartMinSeq, tuple, seq)
 	}
-	updatePartitionMinSeq(s.specPartMinSeq, key, seq)
+	updatePartitionMinSeq(s.specPartMinSeq, survivorPartition{specID: specID, tuple: tuple}, seq)
 }
 
 func (s *SurvivorSurvey) conservativeMinSeq() int64 {
@@ -127,11 +129,11 @@ func (s *SurvivorSurvey) specAwareApplicableMinSeq(
 	if isUnpartitioned {
 		return s.minSeq, nil
 	}
-	key, err := tblutils.CanonicalPartitionKey(eqSpecID, eqPartition)
+	tuple, err := survivorPartitionTuple(eqPartition)
 	if err != nil {
 		return 0, err
 	}
-	if v, ok := s.specPartMinSeq[key]; ok {
+	if v, ok := s.specPartMinSeq[survivorPartition{specID: eqSpecID, tuple: tuple}]; ok {
 		return v, nil
 	}
 
@@ -240,7 +242,14 @@ func DecideDeadEqualityDeletesWithSpecs(
 	return dead, nil
 }
 
-func updatePartitionMinSeq(partitions map[string]int64, key string, seq int64) {
+func survivorPartitionTuple(partition map[int]any) (string, error) {
+	var storage [256]byte
+	tuple, err := tblutils.AppendPartitionTuple(storage[:0], partition)
+
+	return string(tuple), err
+}
+
+func updatePartitionMinSeq[K comparable](partitions map[K]int64, key K, seq int64) {
 	if cur, ok := partitions[key]; ok {
 		seq = min(seq, cur)
 	}
