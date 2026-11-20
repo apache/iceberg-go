@@ -603,9 +603,9 @@ func ExecuteCompactionGroup(ctx context.Context, tbl *Table, group CompactionTas
 	if err != nil {
 		return CompactionGroupResult{}, fmt.Errorf("compaction group %q: %w", group.PartitionKey, err)
 	}
-	_, binPack := strategy.(binPackStrategy)
-	if binPack {
-		if err := validateBinPackPartition(group.Tasks); err != nil {
+	binPack, isBinPack := strategy.(binPackStrategy)
+	if isBinPack {
+		if err := binPack.validatePartition(group.Tasks); err != nil {
 			return CompactionGroupResult{}, err
 		}
 	}
@@ -659,7 +659,7 @@ func ExecuteCompactionGroup(ctx context.Context, tbl *Table, group CompactionTas
 	// Sort and Hilbert cluster by the current spec before writing.
 	var writeOpts []WriteRecordOption
 	currentSpec := tbl.Spec()
-	if !binPack || int(group.Tasks[0].File.SpecID()) == currentSpec.ID() {
+	if !isBinPack || int(group.Tasks[0].File.SpecID()) == currentSpec.ID() {
 		writeOpts = append(writeOpts, WithClusteredWrite())
 	}
 	if cfg.targetFileSize > 0 {
@@ -720,28 +720,6 @@ func ExecuteCompactionGroup(ctx context.Context, tbl *Table, group CompactionTas
 		BytesBefore:         group.TotalSizeBytes,
 		BytesAfter:          bytesAfter,
 	}, nil
-}
-
-// Bin-pack streams rows in input order. Sort strategies can accept a mixed
-// group because they split records by the output partition before writing.
-func validateBinPackPartition(tasks []FileScanTask) error {
-	var firstKey string
-	for i, task := range tasks {
-		file := task.File
-		key, err := canonicalPartitionKey(file.SpecID(), dataFilePartition(file))
-		if err != nil {
-			return fmt.Errorf("%w: invalid partition for compaction data file %q: %v",
-				ErrInvalidOperation, file.FilePath(), err)
-		}
-		if i == 0 {
-			firstKey = key
-		} else if key != firstKey {
-			return fmt.Errorf("%w: compaction group contains files from different partitions: %q and %q",
-				ErrInvalidOperation, tasks[0].File.FilePath(), file.FilePath())
-		}
-	}
-
-	return nil
 }
 
 // allTasksHaveRowLineage returns true iff every task in the group has a
