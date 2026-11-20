@@ -713,6 +713,36 @@ func TestV3MergeOnReadUpgradeKeepsUntouchedFileScopedDeletes(t *testing.T) {
 	require.Zero(t, liveDeleteFileCount(t, tbl, iceberg.EntryContentPosDeletes))
 }
 
+func TestV3MergeOnReadMergesExistingVectorAndLegacyDeletesInSameCommit(t *testing.T) {
+	ctx := t.Context()
+	tbl := newMergeOnReadTestTable(t)
+	tbl = appendRows(t, tbl, `[{"id":1},{"id":2},{"id":3},{"id":4}]`)
+	tbl = appendRows(t, tbl, `[{"id":5},{"id":6},{"id":7},{"id":8}]`)
+
+	tbl, err := tbl.Delete(ctx, iceberg.EqualTo(iceberg.Reference("id"), int64(1)), nil)
+	require.NoError(t, err)
+	tbl, err = tbl.Delete(ctx, iceberg.EqualTo(iceberg.Reference("id"), int64(5)), nil)
+	require.NoError(t, err)
+	require.Equal(t, 2, liveDeleteFileCount(t, tbl, iceberg.EntryContentPosDeletes))
+
+	upgrade := tbl.NewTransaction()
+	require.NoError(t, upgrade.UpgradeFormatVersion(3))
+	tbl, err = upgrade.Commit(ctx)
+	require.NoError(t, err)
+	tbl, err = tbl.Delete(ctx, iceberg.EqualTo(iceberg.Reference("id"), int64(2)), nil)
+	require.NoError(t, err)
+	require.Equal(t, 1, liveDVCount(t, tbl))
+	require.Equal(t, 1, liveDeleteFileCount(t, tbl, iceberg.EntryContentPosDeletes))
+	require.Equal(t, []int64{3, 4, 6, 7, 8}, idsInTable(t, tbl))
+
+	filter := iceberg.IsIn(iceberg.Reference("id"), int64(3), int64(6))
+	tbl, err = tbl.Delete(ctx, filter, nil)
+	require.NoError(t, err)
+	require.Equal(t, []int64{4, 7, 8}, idsInTable(t, tbl))
+	require.Equal(t, 2, liveDVCount(t, tbl))
+	require.Zero(t, liveDeleteFileCount(t, tbl, iceberg.EntryContentPosDeletes))
+}
+
 // TestV3MergeOnReadMixedExistingDVsKeepsUnchangedFile guards the case
 // where one candidate has no new matching rows but another gets new deletes.
 // The first file's DV must not be removed or unnecessarily rewritten.
