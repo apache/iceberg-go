@@ -484,6 +484,11 @@ func (t *Transaction) RewriteDataFiles(ctx context.Context, groups []CompactionT
 	if err != nil {
 		return nil, err
 	}
+	for _, group := range groups {
+		if _, err := compactionRowLineage(staged.Metadata(), t.branch, group.Tasks); err != nil {
+			return nil, err
+		}
+	}
 
 	result := &RewriteResult{}
 	rewrite := t.NewRewrite(opts.SnapshotProps)
@@ -566,7 +571,8 @@ func (t *Transaction) RewriteDataFiles(ctx context.Context, groups []CompactionT
 //
 // Once a v3 table has assigned row IDs, standalone workers require each task
 // to carry its inherited first row ID and data sequence number. Use a local
-// scan plan where the catalog allows it.
+// scan plan where the catalog allows it. Preserve the source files' inherited
+// first row IDs when transferring results to the coordinator.
 //
 // In-process callers should prefer [Transaction.RewriteDataFiles],
 // which drives this and the commit step in one call.
@@ -698,7 +704,7 @@ func executeCompactionGroup(ctx context.Context, tbl *Table, branch string, grou
 }
 
 func compactionRowLineage(meta Metadata, branch string, tasks []FileScanTask) (bool, error) {
-	if meta.FormatVersion() < 3 {
+	if len(tasks) == 0 || meta.FormatVersion() < 3 {
 		return false, nil
 	}
 
@@ -715,8 +721,10 @@ func compactionRowLineage(meta Metadata, branch string, tasks []FileScanTask) (b
 
 	for _, task := range tasks {
 		switch {
+		case task.File == nil:
+			return false, fmt.Errorf("%w: compaction task has no data file", ErrInvalidOperation)
 		case task.FirstRowID == nil || *task.FirstRowID < 0:
-			return false, fmt.Errorf("%w: cannot preserve v3 row lineage for %q without a valid first row ID", ErrInvalidOperation, task.File.FilePath())
+			return false, fmt.Errorf("%w: cannot preserve v3 row lineage for %q without a valid first row ID; replan from the target branch", ErrInvalidOperation, task.File.FilePath())
 		case task.DataSequenceNumber == nil || *task.DataSequenceNumber < 0:
 			return false, fmt.Errorf("%w: cannot preserve v3 row lineage for %q without a valid data sequence number", ErrInvalidOperation, task.File.FilePath())
 		}

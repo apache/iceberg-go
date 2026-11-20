@@ -1650,6 +1650,15 @@ func writeManifestListFile(
 // before anything is written (RewriteManifests detecting a no-op) can build the
 // manifests themselves and only then decide to write the manifest list.
 func (sp *snapshotProducer) commitManifests(ctx context.Context, newManifests, addedContent []iceberg.ManifestFile) (_ []Update, _ []Requirement, err error) {
+	var replacesRowsWithoutLineage bool
+	if sp.op == OpReplace && len(sp.deletedFiles) > 0 && len(sp.addedFiles) > 0 {
+		parent, err := sp.parentSnapshot()
+		if err != nil {
+			return nil, nil, err
+		}
+		replacesRowsWithoutLineage = parent != nil && parent.FirstRowID == nil
+	}
+
 	nextSequence := sp.txn.meta.nextSequenceNumber()
 	summary, err := sp.summary(sp.snapshotProps)
 	if err != nil {
@@ -1749,6 +1758,11 @@ func (sp *snapshotProducer) commitManifests(ctx context.Context, newManifests, a
 	capturedSnapshot := snapshot // copy the value so the closure is self-contained
 
 	rebuildFn := func(rebuildCtx context.Context, freshMeta Metadata, freshParent *Snapshot, fio iceio.WriteFileIO, attempt int) (*Snapshot, error) {
+		if replacesRowsWithoutLineage && freshParent != nil && freshParent.FirstRowID != nil {
+			return nil, fmt.Errorf("%w: %w: the rewrite's source rows were assigned v3 row IDs after planning; replan from the target branch",
+				ErrTransactionUnusable, ErrCommitFailed)
+		}
+
 		// A concurrent writer may have already removed the files this producer
 		// intends to rewrite. Grafting our replacement on top of the fresh
 		// parent would duplicate rows, so abort terminally. The scan also

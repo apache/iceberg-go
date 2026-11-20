@@ -67,6 +67,8 @@ type RewriteFiles struct {
 	snapshotProps           iceberg.Properties
 	err                     error
 	committed               bool
+
+	workerSourceWithoutID string
 }
 
 type rewriteDeleteFileAddition struct {
@@ -286,6 +288,9 @@ func (r *RewriteFiles) AddFile(df iceberg.DataFile) *RewriteFiles {
 func (r *RewriteFiles) ApplyResult(gr CompactionGroupResult) *RewriteFiles {
 	for _, df := range gr.OldDataFiles {
 		r.DeleteFile(df)
+		if r.err == nil && len(gr.NewDataFiles) > 0 && r.workerSourceWithoutID == "" && df.FirstRowID() == nil {
+			r.workerSourceWithoutID = df.FilePath()
+		}
 	}
 	for _, df := range gr.NewDataFiles {
 		r.AddFile(df)
@@ -333,6 +338,16 @@ func (r *RewriteFiles) Commit(ctx context.Context) error {
 	// deleteFilesToRemove non-empty) is still legitimate.
 	if len(r.dataFilesToDelete) == 0 && len(r.dataFilesToAdd) > 0 {
 		return fmt.Errorf("%w: rewrite must delete at least one data file when adding data files", ErrInvalidOperation)
+	}
+	if r.workerSourceWithoutID != "" {
+		meta, err := r.txn.txnMeta()
+		if err != nil {
+			return err
+		}
+		if parent := r.txn.planningSnapshot(meta); parent != nil && parent.FirstRowID != nil {
+			return fmt.Errorf("%w: worker result for %q has no first row ID; replan from the target branch",
+				ErrInvalidOperation, r.workerSourceWithoutID)
+		}
 	}
 
 	opts := []WriteOption{withRewriteSemantics()}

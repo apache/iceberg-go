@@ -614,3 +614,97 @@ func TestCompactionCanAssignFirstRowIDsOnLegacyBranch(t *testing.T) {
 	require.NotNil(t, result.Table.SnapshotByName(branch).FirstRowID)
 	require.ElementsMatch(t, []int64{1, 2}, idsOnRef(t, result.Table, branch))
 }
+
+func TestAtomicCompactionChecksLineageBeforeWritingAnyGroup(t *testing.T) {
+	tbl := appendRows(t, newV3RowLineageTestTable(t), `[{"id":1},{"id":2}]`)
+	tbl = appendRows(t, tbl, `[{"id":3},{"id":4}]`)
+	tasks, err := tbl.Scan().PlanFiles(t.Context())
+	require.NoError(t, err)
+	require.Len(t, tasks, 2)
+	tasks[1].DataSequenceNumber = nil
+	before := parquetFiles(t, tbl.Location())
+
+	groups := []table.CompactionTaskGroup{{Tasks: tasks[:1]}, {Tasks: tasks[1:]}}
+	_, err = tbl.RewriteDataFiles(t.Context(), groups, table.RewriteDataFilesOptions{})
+	require.ErrorIs(t, err, table.ErrInvalidOperation)
+	require.ErrorContains(t, err, "data sequence number")
+	require.ElementsMatch(t, before, parquetFiles(t, tbl.Location()))
+}
+
+func TestCompactionCannotReplayAfterFirstRowIDsAreAssigned(t *testing.T) {
+	tbl, cat := newConcurrentRewriteTestTable(t)
+	tbl = appendRowsOnRef(t, tbl, table.MainBranch, 1, 2)
+	upgrade := tbl.NewTransaction()
+	require.NoError(t, upgrade.UpgradeFormatVersion(3))
+	tbl, err := upgrade.Commit(t.Context())
+	require.NoError(t, err)
+	require.Nil(t, tbl.CurrentSnapshot().FirstRowID)
+
+	tasks, err := tbl.Scan().PlanFiles(t.Context())
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	require.Nil(t, tasks[0].FirstRowID)
+	var assigned map[int64]int64
+	cat.beforeCommit = func() {
+		peer := appendRowsOnRef(t, tbl, table.MainBranch, 3, 4)
+		assigned = readRowIDsByID(t, t.Context(), peer)
+	}
+
+	_, err = tbl.RewriteDataFiles(t.Context(), []table.CompactionTaskGroup{{Tasks: tasks}}, table.RewriteDataFilesOptions{})
+	require.ErrorIs(t, err, table.ErrTransactionUnusable)
+	require.ErrorContains(t, err, "replan")
+	current, err := cat.LoadTable(t.Context(), tbl.Identifier())
+	require.NoError(t, err)
+	require.Len(t, assigned, 4)
+	require.Equal(t, assigned, readRowIDsByID(t, t.Context(), current))
+}
+
+func TestPartialCompactionRequiresReplanningAfterFirstRowIDsAreAssigned(t *testing.T) {
+	tbl := appendRows(t, newV2RowLineageTestTable(t), `[{"id":1},{"id":2}]`)
+	tbl = appendRows(t, tbl, `[{"id":3},{"id":4}]`)
+	upgrade := tbl.NewTransaction()
+	require.NoError(t, upgrade.UpgradeFormatVersion(3))
+	tbl, err := upgrade.Commit(t.Context())
+	require.NoError(t, err)
+	tasks, err := tbl.Scan().PlanFiles(t.Context())
+	require.NoError(t, err)
+	require.Len(t, tasks, 2)
+
+	groups := []table.CompactionTaskGroup{{Tasks: tasks[:1]}, {Tasks: tasks[1:]}}
+	result, err := tbl.RewriteDataFiles(t.Context(), groups, table.RewriteDataFilesOptions{
+		PartialProgress: true,
+		MaxCommits:      2,
+	})
+	require.ErrorIs(t, err, table.ErrInvalidOperation)
+	require.ErrorContains(t, err, "replan")
+	require.Len(t, result.CompletedGroups, 1)
+	assigned := readRowIDsByID(t, t.Context(), result.Table)
+	require.Len(t, assigned, 4)
+
+	fresh, err := result.Table.Scan().PlanFiles(t.Context())
+	require.NoError(t, err)
+	result, err = result.Table.RewriteDataFiles(t.Context(), []table.CompactionTaskGroup{{Tasks: fresh}}, table.RewriteDataFilesOptions{})
+	require.NoError(t, err)
+	require.Equal(t, assigned, readRowIDsByID(t, t.Context(), result.Table))
+}
+
+func TestCompactionRejectsWorkerResultAfterFirstRowIDsAreAssigned(t *testing.T) {
+	tbl := appendRows(t, newV2RowLineageTestTable(t), `[{"id":1},{"id":2}]`)
+	upgrade := tbl.NewTransaction()
+	require.NoError(t, upgrade.UpgradeFormatVersion(3))
+	tbl, err := upgrade.Commit(t.Context())
+	require.NoError(t, err)
+	tasks, err := tbl.Scan().PlanFiles(t.Context())
+	require.NoError(t, err)
+	result, err := table.ExecuteCompactionGroup(t.Context(), tbl, table.CompactionTaskGroup{Tasks: tasks})
+	require.NoError(t, err)
+	require.Len(t, result.OldDataFiles, 1)
+	require.Len(t, result.NewDataFiles, 1)
+	require.Nil(t, result.OldDataFiles[0].FirstRowID())
+
+	tbl = appendRows(t, tbl, `[{"id":3},{"id":4}]`)
+	tx := tbl.NewTransaction()
+	err = tx.NewRewrite(nil).ApplyResult(result).Commit(t.Context())
+	require.ErrorIs(t, err, table.ErrInvalidOperation)
+	require.ErrorContains(t, err, "replan")
+}
