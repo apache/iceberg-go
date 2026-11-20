@@ -136,7 +136,6 @@ func TestManifestDeflateCodecReleasesLargeBufferAfterSmallBlock(t *testing.T) {
 	require.LessOrEqual(t, codec.output.Cap(), manifestDeflateShrinkThreshold)
 }
 
-
 func TestManifestDeflateCodecAlternatingBlocksAndClose(t *testing.T) {
 	codec := newManifestDeflateCodec()
 	t.Cleanup(func() { require.NoError(t, codec.Close()) })
