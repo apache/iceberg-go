@@ -2176,6 +2176,14 @@ func ParseMetadataString(s string) (Metadata, error) {
 
 // ParseMetadataBytes is like [ParseMetadataString] but for a byte slice.
 func ParseMetadataBytes(b []byte) (Metadata, error) {
+	if meta, ok := parseEagerMetadataV2(b); ok {
+		return meta, nil
+	}
+
+	return parseMetadataBytes(b)
+}
+
+func parseMetadataBytes(b []byte) (Metadata, error) {
 	metadata, formatVersion, err := preflightMetadataBytes(b)
 	if err != nil {
 		return nil, err
@@ -3397,11 +3405,8 @@ func (m *metadataV2) Equals(other Metadata) bool {
 }
 
 func (m *metadataV2) UnmarshalJSON(b []byte) error {
-	type Alias metadataV2
-	next := initMetadataV2Deser()
-	aux := (*Alias)(next)
-
-	if err := json.Unmarshal(b, aux); err != nil {
+	next, err := decodeMetadataV2(b)
+	if err != nil {
 		return err
 	}
 	if err := next.finishUnmarshal(); err != nil {
@@ -3411,6 +3416,18 @@ func (m *metadataV2) UnmarshalJSON(b []byte) error {
 	*m = *next
 
 	return nil
+}
+
+// decodeMetadataV2 reads the wire fields. The eager path fills in the snapshot
+// history before running finishUnmarshal.
+func decodeMetadataV2(b []byte) (*metadataV2, error) {
+	type Alias metadataV2
+	next := initMetadataV2Deser()
+	if err := json.Unmarshal(b, (*Alias)(next)); err != nil {
+		return nil, err
+	}
+
+	return next, nil
 }
 
 func (m *metadataV2) finishUnmarshal() error {

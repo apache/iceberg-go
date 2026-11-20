@@ -246,26 +246,31 @@ func (s *Summary) UnmarshalJSON(b []byte) (err error) {
 		return err
 	}
 
-	op, ok := alias[operationKey]
-	if !ok {
+	op, present := alias[operationKey]
+	delete(alias, operationKey)
+
+	return s.setJSONProperties(alias, op, present)
+}
+
+func (s *Summary) setJSONProperties(properties map[string]string, operation string, present bool) error {
+	if !present {
 		// Match Java's compatibility behavior for older snapshots that contain
 		// summary properties but omit the required operation.
 		s.Operation = ""
-		if len(alias) > 0 {
+		if len(properties) > 0 {
 			s.Operation = OpOverwrite
 		}
-		s.Properties = alias
+		s.Properties = properties
 
 		return nil
 	}
 
-	if op == "" {
+	if operation == "" {
 		return fmt.Errorf("%w: found empty operation", ErrInvalidOperation)
 	}
-	s.Operation = Operation(op)
+	s.Operation = Operation(operation)
 
-	delete(alias, operationKey)
-	s.Properties = alias
+	s.Properties = properties
 
 	return nil
 }
