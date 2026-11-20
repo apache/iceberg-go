@@ -1147,6 +1147,12 @@ func (u *UpdateSchema) BuildUpdates() ([]Update, []Requirement, error) {
 			if err != nil {
 				return nil, nil, err
 			}
+			// UpdateNameMapping returns nil when no entry keeps a name, as
+			// for [] or entries with empty names. Write [] rather than null,
+			// which would make the property invalid for scans and add-files.
+			if updatedNameMapping == nil {
+				updatedNameMapping = iceberg.NameMapping{}
+			}
 			mappingJSON, err := json.Marshal(updatedNameMapping)
 			if err != nil {
 				return nil, nil, err
