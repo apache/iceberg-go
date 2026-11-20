@@ -32,6 +32,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/arrow-go/v18/parquet/file"
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/codec"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
 	"github.com/apache/iceberg-go/table/compaction"
@@ -877,6 +878,121 @@ func TestRewriteDataFiles_PartialProgressRejectedBatchesCountTowardMaxFailedComm
 	require.Len(t, result.CompletedGroups, 1)
 	assert.Equal(t, "absorbed-group-0", result.CompletedGroups[0].PartitionKey)
 	require.Len(t, result.FailedGroups, 2)
+}
+
+func TestCompactionRejectsDeletesCommittedBeforeTransaction(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		kind absorbedDeleteKind
+	}{
+		{"position-delete", absorbedPositionDelete},
+		{"deletion-vector", absorbedDeletionVector},
+	} {
+		for _, mode := range []string{"atomic", "partial", "distributed", "explicit", "replanned"} {
+			t.Run(tc.name+"/"+mode, func(t *testing.T) {
+				ctx := t.Context()
+				planned, cat, groups, _ := newAbsorbedDeleteFixture(t, tc.kind, 2, 0)
+				commitDelete := cat.beforeCommit
+				cat.beforeCommit = nil
+				commitDelete()
+				latest, err := cat.LoadTable(ctx, planned.Identifier())
+				require.NoError(t, err)
+				require.NotEqual(t, planned.CurrentSnapshot().SnapshotID, latest.CurrentSnapshot().SnapshotID)
+				require.ElementsMatch(t, []int64{2, 3, 4}, scanIDs(t, latest))
+				before := parquetFiles(t, latest.Location())
+
+				switch mode {
+				case "atomic":
+					_, err := latest.RewriteDataFiles(ctx, groups, table.RewriteDataFilesOptions{})
+					require.ErrorIs(t, err, table.ErrConflictingDeleteFiles)
+					require.ElementsMatch(t, before, parquetFiles(t, latest.Location()))
+				case "partial":
+					result, err := latest.RewriteDataFiles(ctx, groups[:1], table.RewriteDataFilesOptions{PartialProgress: true})
+					require.NoError(t, err)
+					require.Empty(t, result.CompletedGroups)
+					require.Len(t, result.FailedGroups, 1)
+					require.ErrorIs(t, result.FailedGroups[0].Err, table.ErrConflictingDeleteFiles)
+					require.ElementsMatch(t, before, parquetFiles(t, latest.Location()))
+				case "distributed", "explicit", "replanned":
+					group := groups[0]
+					switch mode {
+					case "replanned":
+						tasks, err := latest.Scan().PlanFiles(ctx)
+						require.NoError(t, err)
+						group.Tasks = tasks
+						group.TotalSizeBytes += groups[1].TotalSizeBytes
+					case "distributed":
+						version := latest.Metadata().FormatVersion()
+						encoded, err := codec.EncodeFileScanTask(group.Tasks[0], latest.Spec(), latest.Schema(), version)
+						require.NoError(t, err)
+						task, err := codec.DecodeFileScanTask(encoded, latest.Spec(), latest.Schema(), version)
+						require.NoError(t, err)
+						group.Tasks = []table.FileScanTask{task}
+					}
+					worker, err := table.ExecuteCompactionGroup(ctx, latest, group)
+					require.NoError(t, err)
+					wantID := planned.CurrentSnapshot().SnapshotID
+					if mode == "replanned" {
+						wantID = latest.CurrentSnapshot().SnapshotID
+					}
+					require.NotNil(t, worker.PlanningSnapshotID)
+					require.Equal(t, wantID, *worker.PlanningSnapshotID)
+
+					tx := latest.NewTransaction()
+					rewrite := tx.NewRewrite(nil)
+					if mode == "explicit" {
+						worker.PlanningSnapshotID = nil
+						rewrite.ValidateFromSnapshot(wantID)
+					}
+					err = rewrite.ApplyResult(worker).Commit(ctx)
+					if mode == "replanned" {
+						require.NoError(t, err)
+						committed, err := tx.Commit(ctx)
+						require.NoError(t, err)
+						require.Equal(t, table.OpReplace, committed.CurrentSnapshot().Summary.Operation)
+						require.ElementsMatch(t, []int64{2, 3, 4}, scanIDs(t, committed))
+
+						return
+					}
+					require.ErrorIs(t, err, table.ErrConflictingDeleteFiles)
+				}
+
+				current, err := cat.LoadTable(ctx, latest.Identifier())
+				require.NoError(t, err)
+				require.Equal(t, latest.CurrentSnapshot().SnapshotID, current.CurrentSnapshot().SnapshotID)
+				require.ElementsMatch(t, []int64{2, 3, 4}, scanIDs(t, current))
+			})
+		}
+	}
+}
+
+func TestCompactionPlanningSnapshotOnTargetBranch(t *testing.T) {
+	planned, cat, groups, _ := newAbsorbedDeleteFixture(t, absorbedPositionDelete, 2)
+	cat.beforeCommit = nil
+	branch := appendRowsOnRef(t, planned, "compaction", 5, 6)
+	latest := appendRowsOnRef(t, branch, table.MainBranch, 7, 8)
+	branchID := latest.SnapshotByName("compaction").SnapshotID
+
+	tx, err := latest.NewTransactionOnBranch("compaction")
+	require.NoError(t, err)
+	_, err = tx.RewriteDataFiles(t.Context(), groups, table.RewriteDataFilesOptions{})
+	require.NoError(t, err)
+	compacted, err := tx.Commit(t.Context())
+	require.NoError(t, err)
+	snapshot := compacted.SnapshotByName("compaction")
+	require.Equal(t, table.OpReplace, snapshot.Summary.Operation)
+	require.Equal(t, &branchID, snapshot.ParentSnapshotID)
+	require.Equal(t, []int64{1, 2, 3, 4, 5, 6}, idsOnRef(t, compacted, "compaction"))
+	require.Equal(t, []int64{1, 2, 3, 4, 7, 8}, idsOnRef(t, compacted, table.MainBranch))
+
+	// Main's head is a sibling of the target branch despite sharing the data file.
+	scan := compacted.Scan()
+	tasks, err := scan.PlanFiles(t.Context())
+	require.NoError(t, err)
+	tx, err = compacted.NewTransactionOnBranch("compaction")
+	require.NoError(t, err)
+	_, err = tx.RewriteDataFiles(t.Context(), []table.CompactionTaskGroup{{Tasks: tasks}}, table.RewriteDataFilesOptions{})
+	require.ErrorIs(t, err, table.ErrCommitDiverged)
 }
 
 type absorbedDeleteKind int

@@ -449,6 +449,7 @@ func TestScanPlanningRemotePropagatesSnapshotSchemaSemantics(t *testing.T) {
 	)
 	require.NoError(t, builder.AddSchema(currentSchema))
 	require.NoError(t, builder.SetCurrentSchemaID(-1))
+	require.NoError(t, builder.SetSnapshotRef(MainBranch, 10, BranchRef))
 	require.NoError(t, builder.SetSnapshotRef("branch", 10, BranchRef))
 	require.NoError(t, builder.SetSnapshotRef("tag", 10, TagRef))
 	metadata, err = builder.Build()
@@ -466,10 +467,15 @@ func TestScanPlanningRemotePropagatesSnapshotSchemaSemantics(t *testing.T) {
 	require.False(t, snapshotSchema.Equals(metadata.CurrentSchema()))
 
 	base := (&Table{metadata: metadata}).Scan(WithScanPlanningMode(ScanPlanningRemote))
-	livePlanner := &fakeScanPlanner{supports: true}
+	livePlanner := &fakeScanPlanner{supports: true, result: ScanPlanningResult{Tasks: []FileScanTask{{}}}}
 	base.planner = livePlanner
-	_, err = base.PlanFiles(context.Background())
+	liveTasks, err := base.PlanFiles(context.Background())
 	require.NoError(t, err)
+	require.Len(t, liveTasks, 1)
+	require.NotNil(t, livePlanner.receivedRequest.SnapshotID)
+	require.NotNil(t, liveTasks[0].PlanningSnapshotID)
+	assert.Equal(t, int64(10), *livePlanner.receivedRequest.SnapshotID)
+	assert.Equal(t, int64(10), *liveTasks[0].PlanningSnapshotID)
 	assert.True(t, livePlanner.receivedRequest.Schema.Equals(metadata.CurrentSchema()))
 	assert.Equal(t, []string{"id", "category"}, livePlanner.receivedRequest.SelectedFields)
 

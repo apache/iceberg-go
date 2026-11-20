@@ -1697,14 +1697,14 @@ func (scan *Scan) planFiles(ctx context.Context, projectScanColumns bool) ([]Fil
 
 	switch mode {
 	case ScanPlanningRemote:
-		return scan.planFilesRemote(ctx)
+		return scan.planFilesRemote(ctx, !projectScanColumns)
 	case ScanPlanningAuto:
 		if !supportsAutomaticRemotePlanning(scan.planner) {
 			scanmetrics.Fallback(ctx, "capability")
 		} else if scan.requiresLastUpdatedSequenceNumber() {
 			scanmetrics.Fallback(ctx, "row-lineage")
 		} else {
-			return scan.planFilesRemote(ctx)
+			return scan.planFilesRemote(ctx, !projectScanColumns)
 		}
 	case ScanPlanningLocal:
 	default:
@@ -1849,7 +1849,15 @@ func (scan *Scan) planFilesLocal(
 		eqDeleteIndex = nil
 	}
 
-	return scan.finalizePlannedTasks(plannedTasks, schema, acc)
+	results, err = scan.finalizePlannedTasks(plannedTasks, schema, acc)
+	if err == nil && !projectScanColumns {
+		snapshotID := snap.SnapshotID
+		for i := range results {
+			results[i].PlanningSnapshotID = &snapshotID
+		}
+	}
+
+	return results, err
 }
 
 func dataFilesWithoutColumnStats(
@@ -1918,7 +1926,7 @@ func limitManifestListByRows(manifestList []iceberg.ManifestFile, limit int64) (
 	return manifestList, false
 }
 
-func (scan *Scan) planFilesRemote(ctx context.Context) ([]FileScanTask, error) {
+func (scan *Scan) planFilesRemote(ctx context.Context, recordPlanningSnapshot bool) ([]FileScanTask, error) {
 	if scan.requiresLastUpdatedSequenceNumber() {
 		return nil, fmt.Errorf(
 			"%w: remote scan planning cannot populate %s",
@@ -1956,13 +1964,21 @@ func (scan *Scan) planFilesRemote(ctx context.Context) ([]FileScanTask, error) {
 		minRowsRequested = &minRows
 	}
 
+	snapshotID := scan.snapshotID
+	if recordPlanningSnapshot && snapshotID == nil && scan.metadata != nil {
+		// Pin the request to the loaded snapshot so its tasks identify the
+		// snapshot they read even if the server's table has advanced.
+		if snap := scan.metadata.CurrentSnapshot(); snap != nil {
+			snapshotID = &snap.SnapshotID
+		}
+	}
 	result, err := scan.planner.PlanFiles(ctx, ScanPlanningRequest{
 		Identifier:        slices.Clone(scan.identifier),
 		Metadata:          scan.metadata,
 		Schema:            schema,
 		MetadataLocation:  scan.metadataLocation,
 		FileIOProperties:  maps.Clone(scan.scanPlanningIOProps),
-		SnapshotID:        scan.snapshotID,
+		SnapshotID:        snapshotID,
 		SelectedFields:    selectedFields,
 		RowFilter:         scan.rowFilter,
 		MinRowsRequested:  minRowsRequested,
@@ -1980,6 +1996,13 @@ func (scan *Scan) planFilesRemote(ctx context.Context) ([]FileScanTask, error) {
 	targetSize := int64(ReadSplitTargetSizeDefault)
 	if scan.metadata != nil {
 		targetSize = scan.metadata.Properties().GetInt64(ReadSplitTargetSizeKey, targetSize)
+	}
+	if recordPlanningSnapshot && snapshotID != nil && len(result.Tasks) > 0 {
+		id := *snapshotID
+		result.Tasks = slices.Clone(result.Tasks)
+		for i := range result.Tasks {
+			result.Tasks[i].PlanningSnapshotID = &id
+		}
 	}
 	result.Tasks = splitRemoteScanTasks(result.Tasks, targetSize)
 
@@ -2155,6 +2178,10 @@ type FileScanTask struct {
 	// DataSequenceNumber is the data sequence number of the file's manifest entry.
 	FirstRowID         *int64
 	DataSequenceNumber *int64
+
+	// PlanningSnapshotID identifies the snapshot used by [Scan.PlanFiles].
+	// Nil indicates unknown provenance. Treat the pointer as read-only.
+	PlanningSnapshotID *int64
 }
 
 // ToArrowRecords returns the arrow schema of the expected records and an interator

@@ -64,6 +64,8 @@ type RewriteFiles struct {
 	deleteFilesToRemove     []iceberg.DataFile
 	autoDeleteFilesToRemove []iceberg.DataFile
 	dataSequenceNumber      *int64
+	planningSnapshotID      *int64
+	workerSnapshots         compactionPlanningSnapshots
 	snapshotProps           iceberg.Properties
 	err                     error
 	committed               bool
@@ -88,6 +90,18 @@ type rewriteDeleteFileAddition struct {
 //	committed, err := tx.Commit(ctx)
 func (t *Transaction) NewRewrite(snapshotProps iceberg.Properties) *RewriteFiles {
 	return &RewriteFiles{txn: t, snapshotProps: maps.Clone(snapshotProps)}
+}
+
+// ValidateFromSnapshot sets the snapshot used to read the files being
+// rewritten. A rewrite rejects conflicting deletes committed after this
+// snapshot. Worker results supplied through [RewriteFiles.ApplyResult] must
+// agree with the snapshot when they carry their own planning snapshot ID.
+// Without an explicit ID or any worker snapshot IDs, validation starts at
+// the transaction's base as usual.
+func (r *RewriteFiles) ValidateFromSnapshot(snapshotID int64) *RewriteFiles {
+	r.planningSnapshotID = &snapshotID
+
+	return r
 }
 
 // DeleteFile marks a file for removal in this rewrite. Routes by
@@ -274,7 +288,8 @@ func (r *RewriteFiles) AddFile(df iceberg.DataFile) *RewriteFiles {
 
 // ApplyResult queues a worker's [CompactionGroupResult] onto this builder,
 // routing OldDataFiles (DeleteFile), NewDataFiles (AddFile), SafePosDeletes
-// and SafeDeletionVectors as automatic delete-file removals.
+// and SafeDeletionVectors as automatic delete-file removals. It also carries
+// the planning snapshot ID from the worker to the coordinator.
 //
 // Typical distributed-coordinator pattern:
 //
@@ -284,6 +299,14 @@ func (r *RewriteFiles) AddFile(df iceberg.DataFile) *RewriteFiles {
 //	}
 //	if err := rewrite.Commit(ctx); err != nil { ... }
 func (r *RewriteFiles) ApplyResult(gr CompactionGroupResult) *RewriteFiles {
+	if r.err == nil && len(gr.OldDataFiles) > 0 {
+		r.err = r.workerSnapshots.add(gr.PlanningSnapshotID)
+	}
+
+	return r.applyResult(gr)
+}
+
+func (r *RewriteFiles) applyResult(gr CompactionGroupResult) *RewriteFiles {
 	for _, df := range gr.OldDataFiles {
 		r.DeleteFile(df)
 	}
@@ -333,6 +356,20 @@ func (r *RewriteFiles) Commit(ctx context.Context) error {
 	// deleteFilesToRemove non-empty) is still legitimate.
 	if len(r.dataFilesToDelete) == 0 && len(r.dataFilesToAdd) > 0 {
 		return fmt.Errorf("%w: rewrite must delete at least one data file when adding data files", ErrInvalidOperation)
+	}
+
+	snapshotID, err := r.workerSnapshots.resolve(r.planningSnapshotID)
+	if err != nil {
+		return err
+	}
+	if snapshotID != nil {
+		meta, err := r.txn.txnMeta()
+		if err != nil {
+			return err
+		}
+		if err := r.txn.validateRewriteFromSnapshot(ctx, meta, snapshotID, r.dataFilesToDelete); err != nil {
+			return err
+		}
 	}
 
 	opts := []WriteOption{withRewriteSemantics()}

@@ -432,7 +432,17 @@ func (c *conflictContext) manifestsFor(snap Snapshot) ([]iceberg.ManifestFile, e
 // ErrCommitDiverged; the commit cannot be safely revalidated without
 // a refresh-and-rebuild.
 func newConflictContext(ctx context.Context, base, current Metadata, branch string, fs iceio.IO, caseSensitive bool) (*conflictContext, error) {
-	currentHead := current.SnapshotByName(branch)
+	var baseID *int64
+	if baseHead := base.SnapshotByName(branch); baseHead != nil {
+		baseID = &baseHead.SnapshotID
+	}
+
+	return newConflictContextAt(ctx, current, branch, current.SnapshotByName(branch), baseID, fs, caseSensitive)
+}
+
+// newConflictContextAt walks from the head the operation will inherit to the
+// snapshot its reads were based on.
+func newConflictContextAt(ctx context.Context, current Metadata, branch string, currentHead *Snapshot, baseID *int64, fs iceio.IO, caseSensitive bool) (*conflictContext, error) {
 	if currentHead == nil {
 		// Branch does not exist on the current side — either it was
 		// deleted concurrently or the writer is creating it. Treat as
@@ -440,8 +450,7 @@ func newConflictContext(ctx context.Context, base, current Metadata, branch stri
 		return nil, fmt.Errorf("%w: branch %q missing on current metadata", ErrCommitDiverged, branch)
 	}
 
-	baseHead := base.SnapshotByName(branch)
-	if baseHead == nil {
+	if baseID == nil {
 		// Writer's base has no view of this branch (empty table or
 		// branch created concurrently). Every snapshot now reachable
 		// from the branch head is concurrent relative to base.
@@ -465,10 +474,10 @@ func newConflictContext(ctx context.Context, base, current Metadata, branch stri
 		}, nil
 	}
 
-	concurrent, baseFound := AncestorsBetween(currentHead.SnapshotID, baseHead.SnapshotID, current.SnapshotByID)
+	concurrent, baseFound := AncestorsBetween(currentHead.SnapshotID, *baseID, current.SnapshotByID)
 	if !baseFound {
 		return nil, fmt.Errorf("%w: base snapshot %d not found in %s ancestry from %d",
-			ErrCommitDiverged, baseHead.SnapshotID, branch, currentHead.SnapshotID)
+			ErrCommitDiverged, *baseID, branch, currentHead.SnapshotID)
 	}
 
 	return &conflictContext{
