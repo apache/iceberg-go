@@ -37,26 +37,131 @@ import (
 	"gocloud.dev/gcerrors"
 )
 
+// wholeObjectReadMaxSize is the largest object ReadAt downloads whole on its
+// first call. Reading a Parquet file issues a ReadAt for its footer and for
+// every column chunk; for a small file one GET of the object is far cheaper
+// than one GET per column. The downloaded object is held until Close.
+const wholeObjectReadMaxSize = 8 << 20
+
 // blobOpenFile describes a single open blob as a File.
 // It implements the iceberg-go/io.File interface.
-// It is based on gocloud.dev/blob.iofsOpenFile which:
-// - Doesn't support the `io.ReaderAt` interface
-// - Is not externally accessible, so copied here
+//
+// Opening a blobOpenFile reads only the object's attributes. Read starts a
+// streaming GET from the current offset on first use, and ReadAt issues a
+// ranged GET per call, or downloads an object of at most
+// wholeObjectReadMaxSize once and serves every ReadAt from memory.
 type blobOpenFile struct {
-	*blob.Reader
-
 	name, key string
+	size      int64
+	modTime   time.Time
 	b         *FileIO
 	ctx       context.Context
+
+	mu  sync.Mutex // guards r and pos, used by Read and Seek
+	r   io.ReadCloser
+	pos int64
+
+	whole    sync.Once // downloads data for ReadAt of a small object
+	data     []byte
+	wholeErr error
 }
 
-func (f *blobOpenFile) ReadAt(p []byte, off int64) (n int, err error) {
-	var rdr io.ReadCloser
+func (f *blobOpenFile) rangeReader(off, length int64) (io.ReadCloser, error) {
 	if f.b.newRangeReader != nil {
-		rdr, err = f.b.newRangeReader(f.ctx, f.key, off, int64(len(p)))
-	} else {
-		rdr, err = f.b.NewRangeReader(f.ctx, f.key, off, int64(len(p)), nil)
+		return f.b.newRangeReader(f.ctx, f.key, off, length)
 	}
+
+	return f.b.NewRangeReader(f.ctx, f.key, off, length, nil)
+}
+
+func (f *blobOpenFile) Read(p []byte) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if f.pos >= f.size {
+		return 0, io.EOF
+	}
+	if f.r == nil {
+		r, err := f.rangeReader(f.pos, -1)
+		if err != nil {
+			return 0, err
+		}
+		f.r = r
+	}
+	n, err := f.r.Read(p)
+	f.pos += int64(n)
+
+	return n, err
+}
+
+func (f *blobOpenFile) Seek(offset int64, whence int) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	switch whence {
+	case io.SeekCurrent:
+		offset += f.pos
+	case io.SeekEnd:
+		offset += f.size
+	case io.SeekStart:
+	default:
+		return 0, fmt.Errorf("blobfs: invalid whence %d", whence)
+	}
+	if offset < 0 {
+		return 0, fmt.Errorf("blobfs: negative position %d", offset)
+	}
+	if offset != f.pos && f.r != nil {
+		err := f.r.Close()
+		f.r = nil
+		if err != nil {
+			return 0, err
+		}
+	}
+	f.pos = offset
+
+	return offset, nil
+}
+
+func (f *blobOpenFile) Close() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if f.r == nil {
+		return nil
+	}
+	err := f.r.Close()
+	f.r = nil
+
+	return err
+}
+
+func (f *blobOpenFile) ReadAt(p []byte, off int64) (int, error) {
+	if f.size > wholeObjectReadMaxSize {
+		return f.readRange(p, off)
+	}
+
+	f.whole.Do(func() {
+		data := make([]byte, f.size)
+		_, f.wholeErr = f.readRange(data, 0)
+		f.data = data
+	})
+	if f.wholeErr != nil {
+		return 0, f.wholeErr
+	}
+	if off >= int64(len(f.data)) {
+		return 0, io.EOF
+	}
+	n := copy(p, f.data[off:])
+	if n < len(p) {
+		return n, io.ErrUnexpectedEOF
+	}
+
+	return n, nil
+}
+
+// readRange reads len(p) bytes at off with one ranged GET.
+func (f *blobOpenFile) readRange(p []byte, off int64) (n int, err error) {
+	rdr, err := f.rangeReader(off, int64(len(p)))
 	if err != nil {
 		return 0, err
 	}
@@ -69,6 +174,8 @@ func (f *blobOpenFile) ReadAt(p []byte, off int64) (n int, err error) {
 // Functions to implement the `Stat()` function in the `io/fs.File` interface
 
 func (f *blobOpenFile) Name() string               { return f.name }
+func (f *blobOpenFile) Size() int64                { return f.size }
+func (f *blobOpenFile) ModTime() time.Time         { return f.modTime }
 func (f *blobOpenFile) Mode() fs.FileMode          { return fs.ModeIrregular }
 func (f *blobOpenFile) Sys() any                   { return f.b }
 func (f *blobOpenFile) IsDir() bool                { return false }
@@ -300,12 +407,17 @@ func (bfs *FileIO) Open(_ context.Context, path string) (icebergio.File, error) 
 
 	key, name := path, pathpkg.Base(path)
 
-	r, err := bfs.NewReader(bfs.ctx, key, nil)
+	// Read only the attributes: a reader opened here would start a GET of the
+	// whole object, which ReadAt, the way Parquet files are read, never uses.
+	attrs, err := bfs.Attributes(bfs.ctx, key)
 	if err != nil {
 		return nil, blobErrToFsErr("open", originalPath, err)
 	}
 
-	return &blobOpenFile{Reader: r, name: name, key: key, b: bfs, ctx: bfs.ctx}, nil
+	return &blobOpenFile{
+		name: name, key: key, size: attrs.Size, modTime: attrs.ModTime,
+		b: bfs, ctx: bfs.ctx,
+	}, nil
 }
 
 func (bfs *FileIO) Remove(ctx context.Context, name string) error {
