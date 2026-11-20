@@ -1634,12 +1634,21 @@ type dataFileCfg struct {
 	rewriteSemantics             bool
 	equalityDeleteToDVConversion bool
 	dataSequenceNumber           *int64
-	compactionSourceRowLineage   map[string]CompactionSourceRowLineage
+	// Keep dataFileCfg comparable because it is part of WriteOption's signature.
+	compactionSourceRowLineage *map[string]CompactionSourceRowLineage
+}
+
+func (cfg dataFileCfg) compactionLineage() map[string]CompactionSourceRowLineage {
+	if cfg.compactionSourceRowLineage == nil {
+		return nil
+	}
+
+	return *cfg.compactionSourceRowLineage
 }
 
 func withCompactionSourceRowLineage(lineage map[string]CompactionSourceRowLineage) WriteOption {
 	return func(cfg *dataFileCfg) {
-		cfg.compactionSourceRowLineage = lineage
+		cfg.compactionSourceRowLineage = &lineage
 	}
 }
 
@@ -1900,7 +1909,7 @@ func (t *Transaction) ReplaceDataFiles(ctx context.Context, filesToDelete, files
 
 		df := entry.DataFile()
 		if _, ok := setToDelete[df.FilePath()]; ok {
-			if lineage, ok := cfg.compactionSourceRowLineage[df.FilePath()]; ok {
+			if lineage, ok := cfg.compactionLineage()[df.FilePath()]; ok {
 				if err := lineage.validate(entry); err != nil {
 					return err
 				}
@@ -1955,7 +1964,7 @@ func (t *Transaction) ReplaceDataFiles(ctx context.Context, filesToDelete, files
 	for _, df := range markedForDeletion {
 		dvs.removeDataFile(updater, df)
 	}
-	updater.compactionSourceRowLineage = cfg.compactionSourceRowLineage
+	updater.compactionSourceRowLineage = cfg.compactionLineage()
 
 	for _, df := range filesToAdd {
 		updater.appendDataFile(df)
@@ -2142,7 +2151,7 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 		if isData && isLive {
 			liveDataFiles[path] = rewriteFileState{file: df, dataSequenceNumber: entry.DataSequenceNumber()}
 			if _, ok := setToDelete[path]; ok {
-				if lineage, ok := cfg.compactionSourceRowLineage[path]; ok {
+				if lineage, ok := cfg.compactionLineage()[path]; ok {
 					if err := lineage.validate(entry); err != nil {
 						return err
 					}
@@ -2372,7 +2381,7 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 	for _, df := range markedDataForDeletion {
 		updater.deleteDataFile(df)
 	}
-	updater.compactionSourceRowLineage = cfg.compactionSourceRowLineage
+	updater.compactionSourceRowLineage = cfg.compactionLineage()
 	for _, df := range dataFilesToAdd {
 		updater.appendDataFile(df)
 	}
