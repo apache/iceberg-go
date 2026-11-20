@@ -39,8 +39,6 @@ type NDVStats struct {
 
 // NDVResult is the number-of-distinct-values sketch computed for one column.
 type NDVResult struct {
-	// FieldID is the Iceberg field ID of the column.
-	FieldID int
 	// NDV is the estimated number of distinct non-null values.
 	NDV int64
 	// Sketch is the serialized DataSketches Theta sketch, i.e. the body of an
@@ -134,9 +132,8 @@ func (t Table) ComputeNDVs(ctx context.Context, snapshotID int64, columns ...str
 	results := make(map[int]NDVResult, len(targets))
 	for _, tgt := range targets {
 		results[tgt.field.ID] = NDVResult{
-			FieldID: tgt.field.ID,
-			NDV:     tgt.sketch.NDV(),
-			Sketch:  tgt.sketch.Serialize(),
+			NDV:    tgt.sketch.NDV(),
+			Sketch: tgt.sketch.Serialize(),
 		}
 	}
 
