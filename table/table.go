@@ -98,8 +98,9 @@ var ErrCommitRejected = errors.New("commit rejected")
 // commit branch's head assertion is rebased. A staged update that cannot
 // apply keeps the builder's error as its cause. Transaction.Commit also
 // returns it, on any attempt, when a delete references data files that are
-// missing (ErrDataFilesMissing), or when a RowDelta retry detects a duplicate
-// live data file path (ErrDuplicateDataFiles).
+// missing (ErrDataFilesMissing), or when a RowDelta, AddDataFiles or
+// AddDataFilesByPath retry detects a duplicate live data file path
+// (ErrDuplicateDataFiles).
 var ErrTransactionUnusable = errors.New("transaction cannot be committed again")
 
 // ErrWriteIORequired is returned by write paths when the table's file system
