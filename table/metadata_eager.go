@@ -307,7 +307,16 @@ func readEagerSnapshot(c *metadataJSONCursor) (Snapshot, bool) {
 		return snapshot, false
 	}
 
-	const required = 1 | 2
+	const (
+		snapshotIDField = 1 << iota
+		timestampField
+		sequenceField
+		parentField
+		manifestListField
+		schemaIDField
+		summaryField
+		required = snapshotIDField | timestampField
+	)
 	seen := 0
 	for {
 		key, ok := c.objectField()
@@ -317,33 +326,33 @@ func readEagerSnapshot(c *metadataJSONCursor) (Snapshot, bool) {
 		var field int
 		switch string(key) {
 		case "snapshot-id":
-			field = 1
+			field = snapshotIDField
 			snapshot.SnapshotID, ok = c.integer()
 		case "timestamp-ms":
-			field = 2
+			field = timestampField
 			snapshot.TimestampMs, ok = c.integer()
 		case "sequence-number":
-			field = 4
+			field = sequenceField
 			snapshot.SequenceNumber, ok = c.integer()
 		case "parent-snapshot-id":
-			field = 8
+			field = parentField
 			var parent int64
 			parent, ok = c.integer()
 			snapshot.ParentSnapshotID = &parent
 		case "manifest-list":
-			field = 16
+			field = manifestListField
 			var value []byte
 			value, ok = c.stringBytes()
 			snapshot.ManifestList = string(value)
 		case "schema-id":
-			field = 32
+			field = schemaIDField
 			var schemaID int64
 			schemaID, ok = c.integer()
 			id := int(schemaID)
 			ok = ok && int64(id) == schemaID
 			snapshot.SchemaID = &id
 		case "summary":
-			field = 64
+			field = summaryField
 			snapshot.Summary, ok = readEagerSummary(c)
 		default:
 			return snapshot, false
