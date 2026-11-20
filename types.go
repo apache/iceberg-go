@@ -236,11 +236,12 @@ func (t *typeIFace) UnmarshalJSON(b []byte) error {
 				}
 
 				if matches[1] != "" {
-					geom, err := GeometryTypeOf(strings.TrimSpace(matches[1]))
-					if err != nil {
+					crs := strings.TrimSpace(matches[1])
+					if _, err := GeometryTypeOf(crs); err != nil {
 						return err
 					}
-					t.Type = geom
+					// keep an explicit default CRS so it is written back as read
+					t.Type = GeometryType{crs: crs}
 				} else {
 					t.Type = GeometryType{}
 				}
@@ -260,9 +261,17 @@ func (t *typeIFace) UnmarshalJSON(b []byte) error {
 					algorithm = strings.TrimSpace(matches[2])
 				}
 
-				geog, err := GeographyTypeOf(crs, algorithm)
-				if err != nil {
+				if _, err := GeographyTypeOf(crs, algorithm); err != nil {
 					return err
+				}
+
+				// keep an explicit default CRS or algorithm so it is written back as read
+				var geog GeographyType
+				if matches[1] != "" {
+					geog.crs = crs
+				}
+				if matches[2] != "" {
+					geog.algorithm = strings.ToLower(algorithm)
 				}
 				t.Type = geog
 			default:
@@ -1146,7 +1155,7 @@ func (g GeometryType) Equals(other Type) bool {
 		return false
 	}
 
-	return g.crs == rhs.crs
+	return g.CRS() == rhs.CRS()
 }
 
 func (GeometryType) primitive() {}
@@ -1227,7 +1236,7 @@ func (g GeographyType) Equals(other Type) bool {
 		return false
 	}
 
-	return g.crs == rhs.crs && g.algorithm == rhs.algorithm
+	return g.CRS() == rhs.CRS() && g.Algorithm() == rhs.Algorithm()
 }
 
 func (GeographyType) primitive() {}
