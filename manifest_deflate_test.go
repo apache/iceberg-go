@@ -98,7 +98,7 @@ func TestManifestReaderKeepsDeflateEntriesFromEarlierBlocks(t *testing.T) {
 
 func TestManifestDeflateCodecRejectsOversizedAndTruncatedBlocks(t *testing.T) {
 	codec := newManifestDeflateCodec()
-	defer codec.Close()
+	t.Cleanup(func() { require.NoError(t, codec.Close()) })
 	data := bytes.Repeat([]byte{42}, 1024)
 	encoded, err := codec.Compress(data)
 	require.NoError(t, err)
@@ -116,7 +116,7 @@ func TestManifestDeflateCodecRejectsOversizedAndTruncatedBlocks(t *testing.T) {
 
 func TestManifestDeflateCodecReleasesLargeBufferAfterSmallBlock(t *testing.T) {
 	codec := newManifestDeflateCodec()
-	defer codec.Close()
+	t.Cleanup(func() { require.NoError(t, codec.Close()) })
 	large := bytes.Repeat([]byte{42}, manifestDeflateShrinkThreshold+1)
 	small := []byte("next block")
 	largeBlock, err := codec.Compress(large)

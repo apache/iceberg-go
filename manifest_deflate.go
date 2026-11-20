@@ -29,7 +29,7 @@ import (
 // manifestDeflateCodec reuses the inflater and output buffer across blocks of
 // one manifest. The avro decoder copies strings and bytes out of the block unless
 // avro.AliasInput is set, and ocf.Reader drops that option, so the output buffer
-// can be overwritten on the next block.
+// can be overwritten on the next block. Each reader needs its own instance.
 type manifestDeflateCodec struct {
 	ocf.Codec
 	input  bytes.Reader
