@@ -506,12 +506,17 @@ func (t *Transaction) applyPinned(updates []Update, reqs []Requirement, refs []s
 	t.mx.Lock()
 	defer t.mx.Unlock()
 
-	return t.applyPinnedLocked(updates, reqs, refs)
-}
-
-func (t *Transaction) applyPinnedLocked(updates []Update, reqs []Requirement, refs []string) error {
 	if err := t.applyLocked(updates, reqs); err != nil {
 		return err
+	}
+	t.recordPinnedRefsLocked(refs)
+
+	return nil
+}
+
+func (t *Transaction) recordPinnedRefsLocked(refs []string) {
+	if len(refs) == 0 {
+		return
 	}
 	if t.pinnedRefs == nil {
 		t.pinnedRefs = make(map[string]struct{}, len(refs))
@@ -519,8 +524,6 @@ func (t *Transaction) applyPinnedLocked(updates []Update, reqs []Requirement, re
 	for _, ref := range refs {
 		t.pinnedRefs[ref] = struct{}{}
 	}
-
-	return nil
 }
 
 // AssertDefaultShape registers requirements pinning the table's default
@@ -1955,14 +1958,15 @@ func (t *Transaction) ReplaceDataFiles(ctx context.Context, filesToDelete, files
 		updater.appendDataFile(df)
 	}
 
-	updates, reqs, err := updater.commit(ctx)
+	updates, reqs, pins, err := t.prepareRewriteCommit(ctx, updater, cfg.rewriteSemantics)
 	if err != nil {
 		return err
 	}
 
-	if err := t.applyRewriteLocked(updates, reqs, cfg.rewriteSemantics); err != nil {
+	if err := t.applyLocked(updates, reqs); err != nil {
 		return err
 	}
+	t.recordPinnedRefsLocked(pins)
 	if len(filesToAdd) > 0 || cfg.rewriteSemantics {
 		// Replacing data files must preserve deletes committed after the
 		// replacement was planned. This is independent of overwrite isolation:
@@ -2387,7 +2391,7 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 		updater.removeDeletionVector(df)
 	}
 
-	updates, reqs, err := updater.commit(ctx)
+	updates, reqs, pins, err := t.prepareRewriteCommit(ctx, updater, cfg.rewriteSemantics && len(markedDataForDeletion) > 0)
 	if err != nil {
 		return err
 	}
@@ -2399,9 +2403,10 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 		validator = rewriteValidator(markedDataForDeletion)
 	}
 
-	if err := t.applyRewriteLocked(updates, reqs, cfg.rewriteSemantics && len(markedDataForDeletion) > 0); err != nil {
+	if err := t.applyLocked(updates, reqs); err != nil {
 		return err
 	}
+	t.recordPinnedRefsLocked(pins)
 	if validator != nil {
 		t.validators = append(t.validators, validator)
 	}

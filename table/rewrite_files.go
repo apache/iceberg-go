@@ -57,6 +57,10 @@ import (
 // Commit has been called, a second call returns an error regardless
 // of whether the first call succeeded.
 type RewriteFiles struct {
+	planningSnapshotID  *int64
+	workerSnapshots     compactionPlanningSnapshots
+	validatedPlanHeadID *int64 // Set after preflight, to check only subsequent staged changes.
+
 	txn                     *Transaction
 	dataFilesToDelete       []iceberg.DataFile
 	dataFilesToAdd          []iceberg.DataFile
@@ -64,8 +68,6 @@ type RewriteFiles struct {
 	deleteFilesToRemove     []iceberg.DataFile
 	autoDeleteFilesToRemove []iceberg.DataFile
 	dataSequenceNumber      *int64
-	planningSnapshotID      *int64
-	workerSnapshots         compactionPlanningSnapshots
 	snapshotProps           iceberg.Properties
 	err                     error
 	committed               bool
@@ -290,8 +292,7 @@ func (r *RewriteFiles) AddFile(df iceberg.DataFile) *RewriteFiles {
 
 // ApplyResult queues a worker's [CompactionGroupResult] onto this builder,
 // routing OldDataFiles (DeleteFile), NewDataFiles (AddFile), SafePosDeletes
-// and SafeDeletionVectors as automatic delete-file removals. It also carries
-// the planning snapshot ID from the worker to the coordinator.
+// and SafeDeletionVectors as automatic delete-file removals.
 //
 // Typical distributed-coordinator pattern:
 //
@@ -305,10 +306,6 @@ func (r *RewriteFiles) ApplyResult(gr CompactionGroupResult) *RewriteFiles {
 		r.err = r.workerSnapshots.add(gr.PlanningSnapshotID)
 	}
 
-	return r.applyResult(gr)
-}
-
-func (r *RewriteFiles) applyResult(gr CompactionGroupResult) *RewriteFiles {
 	for _, df := range gr.OldDataFiles {
 		r.DeleteFile(df)
 	}
@@ -364,7 +361,9 @@ func (r *RewriteFiles) Commit(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if snapshotID == nil && r.workerSnapshots.missing {
+	if r.validatedPlanHeadID != nil {
+		snapshotID = r.validatedPlanHeadID
+	} else if snapshotID == nil && r.workerSnapshots.missing {
 		if _, err := r.txn.txnMeta(); err != nil {
 			return err
 		}

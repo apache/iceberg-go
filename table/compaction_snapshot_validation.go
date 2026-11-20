@@ -262,19 +262,20 @@ func (d *rewriteConflictsSincePlanning) advance(ctx context.Context, current *Ta
 	return nil
 }
 
-func (t *Transaction) applyRewriteLocked(updates []Update, reqs []Requirement, rewritesData bool) error {
-	if !rewritesData || t.branch == "" || t.branch == MainBranch || t.baseRefSnapshotID(t.branch) != nil {
-		return t.applyLocked(updates, reqs)
+// prepareRewriteCommit adds the parent requirement when a new branch inherits main.
+func (t *Transaction) prepareRewriteCommit(ctx context.Context, updater *snapshotProducer, rewritesData bool) ([]Update, []Requirement, []string, error) {
+	updates, reqs, err := updater.commit(ctx)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if !rewritesData || t.branch == "" || t.branch == MainBranch || t.baseRefSnapshotID(t.branch) != nil ||
+		!t.rewriteNeedsMainRequirement() {
+		return updates, reqs, nil, nil
 	}
 
-	if !t.rewriteNeedsMainRequirement() {
-		return t.applyLocked(updates, reqs)
-	}
-
-	// Pin both refs alongside the rewrite to keep the inherited parent stable.
 	reqs = append(reqs, AssertRefSnapshotID(MainBranch, t.baseRefSnapshotID(MainBranch)))
 
-	return t.applyPinnedLocked(updates, reqs, []string{t.branch, MainBranch})
+	return updates, reqs, []string{t.branch, MainBranch}, nil
 }
 
 // A new branch inherits main when a snapshot is staged before its ref is set.

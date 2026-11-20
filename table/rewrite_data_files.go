@@ -513,9 +513,7 @@ func (t *Transaction) RewriteDataFiles(ctx context.Context, groups []CompactionT
 	result := &RewriteResult{}
 	rewrite := t.NewRewrite(opts.SnapshotProps)
 	if checkedHead != nil {
-		// The earlier interval is already validated. Check for any staged
-		// changes between that head and the parent used to replace the files.
-		rewrite.ValidateFromSnapshot(checkedHead.SnapshotID)
+		rewrite.validatedPlanHeadID = &checkedHead.SnapshotID
 	}
 	stagedDeleteFiles := make(map[string]struct{})
 	var outputs []CompactionGroupResult
@@ -558,8 +556,7 @@ func (t *Transaction) RewriteDataFiles(ctx context.Context, groups []CompactionT
 			outputs = append(outputs, gr)
 		}
 
-		// The whole plan was checked above, before writing any outputs.
-		rewrite.applyResult(gr)
+		rewrite.ApplyResult(gr)
 		accumulateGroupMetrics(result, gr)
 		for _, df := range gr.SafePosDeletes {
 			stagedDeleteFiles[df.FilePath()] = struct{}{}

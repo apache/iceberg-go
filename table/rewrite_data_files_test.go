@@ -966,6 +966,29 @@ func TestCompactionRejectsDeletesCommittedBeforeTransaction(t *testing.T) {
 	}
 }
 
+func TestAtomicCompactionCanRewriteAfterUnrelatedAppend(t *testing.T) {
+	ctx := t.Context()
+	tbl, _ := newConcurrentRewriteTestTable(t)
+	tbl = appendRows(t, tbl, `[{"id":1},{"id":2}]`)
+	plannedSnapshotID := tbl.CurrentSnapshot().SnapshotID
+	scan := tbl.Scan()
+	t.Cleanup(func() { require.NoError(t, scan.Close()) })
+	tasks, err := scan.PlanFiles(ctx)
+	require.NoError(t, err)
+	require.NotEmpty(t, tasks)
+	for _, task := range tasks {
+		require.NotNil(t, task.PlanningSnapshotID)
+		require.Equal(t, plannedSnapshotID, *task.PlanningSnapshotID)
+	}
+
+	tbl = appendRows(t, tbl, `[{"id":3}]`)
+	require.NotEqual(t, plannedSnapshotID, tbl.CurrentSnapshot().SnapshotID)
+	result, err := tbl.RewriteDataFiles(ctx, []table.CompactionTaskGroup{{Tasks: tasks}}, table.RewriteDataFilesOptions{})
+	require.NoError(t, err)
+	require.Equal(t, 1, result.RewrittenGroups)
+	require.ElementsMatch(t, []int64{1, 2, 3}, scanIDs(t, result.Table))
+}
+
 func TestCompactionRejectsMixedPlanningSnapshots(t *testing.T) {
 	ctx := t.Context()
 	tbl, _ := newConcurrentRewriteTestTable(t)
