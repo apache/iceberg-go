@@ -168,6 +168,29 @@ func TestRewriteFilesRejectsMisclassifiedWorkerDeletes(t *testing.T) {
 	}
 }
 
+func TestRewriteFilesRejectsUnknownWorkerPositionDelete(t *testing.T) {
+	ctx := t.Context()
+	tbl, groups := setupSharedPositionDeleteRewrite(t, newRewriteTestTable(t))
+	output, err := table.ExecuteCompactionGroup(ctx, tbl, groups[0])
+	require.NoError(t, err)
+	require.Len(t, output.SafePosDeletes, 1)
+
+	missingPath := tbl.Location() + "/data/missing-position-delete.parquet"
+	builder, err := iceberg.NewDataFileBuilder(*iceberg.UnpartitionedSpec,
+		iceberg.EntryContentPosDeletes, missingPath, iceberg.ParquetFile, nil, nil, nil, 1, 128)
+	require.NoError(t, err)
+	output.SafePosDeletes = append(output.SafePosDeletes, builder.Build())
+
+	txn := tbl.NewTransaction()
+	err = txn.NewRewrite(nil).ApplyResult(output).Commit(ctx)
+	require.ErrorContains(t, err, "do not belong to the table")
+	require.ErrorContains(t, err, missingPath)
+	unchanged, err := txn.Commit(ctx)
+	require.NoError(t, err)
+	require.Equal(t, tbl.CurrentSnapshot().SnapshotID, unchanged.CurrentSnapshot().SnapshotID)
+	require.ElementsMatch(t, []int64{2, 4}, scanIDs(t, unchanged))
+}
+
 func TestRewriteFilesWithAutomaticPositionRemovalRejectsStaleCommit(t *testing.T) {
 	ctx := t.Context()
 	tbl, catalog := newConcurrentRewriteTestTable(t)
