@@ -17,8 +17,11 @@
 package table
 
 import (
+	"bytes"
 	"context"
 	"iter"
+	"math/bits"
+	"sync"
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -170,5 +173,97 @@ func benchmarkReadTasksBufferReuse(b *testing.B, scan *Scan, tasks []FileScanTas
 			record.Release()
 		}
 		require.Equal(b, wantRows, rows)
+	}
+}
+
+
+func TestArrowBufferPoolBoundsEachSizeClass(t *testing.T) {
+	pool := &arrowBufferPool{backing: memory.NewGoAllocator()}
+	defer pool.close()
+
+	for _, size := range []int{1, 64, 65, 1025, 1 << arrowBufferMaxClass} {
+		class := max(arrowBufferMinClass, bits.Len(uint(size-1)))
+		bucket := &pool.buckets[class-arrowBufferMinClass]
+		held := make([][]byte, arrowBuffersPerClass+3)
+		for i := range held {
+			held[i] = pool.Allocate(size)
+			require.Len(t, held[i], size)
+			full := held[i][:cap(held[i])]
+			for j := range full {
+				full[j] = byte(i + 1)
+			}
+		}
+		for _, buf := range held {
+			pool.Free(buf)
+		}
+		require.Equal(t, arrowBuffersPerClass, bucket.count,
+			"size %d must not retain more than the configured buffer count", size)
+
+		for i := 0; i < arrowBuffersPerClass; i++ {
+			reused := pool.Allocate(size)
+			require.Equal(t, make([]byte, cap(reused)), reused[:cap(reused)],
+				"size %d must clear the full buffer, including its spare capacity", size)
+		}
+		require.Zero(t, bucket.count)
+	}
+
+	oversized := pool.Allocate((1 << arrowBufferMaxClass) + 1)
+	pool.Free(oversized)
+	for i := range pool.buckets {
+		require.Zero(t, pool.buckets[i].count, "oversized allocations must bypass the cache")
+	}
+}
+
+func TestArrowBufferPoolReallocateShrinkAndRegrow(t *testing.T) {
+	pool := &arrowBufferPool{backing: memory.NewGoAllocator()}
+	defer pool.close()
+
+	buf := pool.Allocate(100)
+	for i := range buf {
+		buf[i] = 7
+	}
+	shrunk := pool.Reallocate(64, buf)
+	require.Same(t, &buf[0], &shrunk[0])
+	require.Len(t, shrunk, 64)
+
+	grown := pool.Reallocate(100, shrunk)
+	require.Same(t, &buf[0], &grown[0])
+	require.Equal(t, bytes.Repeat([]byte{7}, 64), grown[:64])
+	require.Equal(t, make([]byte, 36), grown[64:])
+
+	pool.close()
+	pool.Free(grown)
+	require.Equal(t, byte(7), grown[0], "closing must not mutate live Arrow buffers")
+	for i := range pool.buckets {
+		require.Zero(t, pool.buckets[i].count)
+	}
+}
+
+func TestArrowBufferPoolConcurrentFreeAndClose(t *testing.T) {
+	pool := &arrowBufferPool{backing: memory.NewGoAllocator()}
+	const workers = 8
+	const rounds = 200
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for worker := 0; worker < workers; worker++ {
+		go func() {
+			defer wg.Done()
+			<-start
+			for i := 0; i < rounds; i++ {
+				buf := pool.Allocate(65 + i%3)
+				buf[0] = byte(i)
+				pool.Free(buf)
+			}
+		}()
+	}
+	close(start)
+	pool.close()
+	wg.Wait()
+	pool.close()
+
+	require.True(t, pool.closed.Load())
+	for i := range pool.buckets {
+		require.Zero(t, pool.buckets[i].count)
 	}
 }
