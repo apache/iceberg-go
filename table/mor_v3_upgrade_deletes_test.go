@@ -108,6 +108,26 @@ func TestV3MergeOnReadUpgradeKeepsSharedPositionDeleteFile(t *testing.T) {
 	assert.Equal(t, 1, livePositionDeleteFiles(t, tbl), "a shared delete file is not dropped")
 }
 
+// A file that already has a DV must not be seeded again from a shared v2 delete file that still
+// covers it: the seed would replace the DV's bitmap and bring back the row an earlier v3 delete removed.
+func TestV3MergeOnReadSharedPositionDeleteFileDoesNotResurrectDVRows(t *testing.T) {
+	tbl := newMergeOnReadTestTableVersion(t, "2")
+	tbl = appendRows(t, tbl, `[{"id":1,"data":"a"},{"id":2,"data":"b"},{"id":3,"data":"c"}]`)
+	tbl = appendRows(t, tbl, `[{"id":4,"data":"d"},{"id":5,"data":"e"}]`)
+
+	tbl, err := tbl.Delete(t.Context(), iceberg.IsIn(iceberg.Reference("id"), int64(1), int64(4)), nil)
+	require.NoError(t, err)
+	require.Equal(t, 1, livePositionDeleteFiles(t, tbl), "one delete file must cover both data files")
+	tbl = upgradeToV3(t, tbl)
+
+	tbl = deleteID(t, tbl, 2)
+	require.Equal(t, []int64{3, 5}, idsInTable(t, tbl))
+	require.Equal(t, 1, livePositionDeleteFiles(t, tbl), "the shared delete file still covers the second file")
+
+	tbl = deleteID(t, tbl, 3)
+	assert.Equal(t, []int64{5}, idsInTable(t, tbl), "id=2 was deleted by the first DV and must stay deleted")
+}
+
 func TestV3MergeOnReadUpgradeKeepsPartitionedPositionDeletes(t *testing.T) {
 	tbl := newPartitionedMergeOnReadTestTableVersion(t, "2")
 	tbl = appendRows(t, tbl, `[{"id":1,"category":"x"},{"id":2,"category":"x"},{"id":3,"category":"x"},`+

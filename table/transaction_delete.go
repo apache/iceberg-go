@@ -284,8 +284,10 @@ func WithDeleteCaseInsensitive() DeleteOption {
 // On a v3 table, every data file the delete removes or rewrites takes its deletion vector with it.
 // A merge-on-read delete replaces the existing deletion vector of a file it deletes rows from.
 //
-// A commit that removes a deletion vector is not replayed: if another writer commits first,
-// it fails with ErrCommitFailed instead of refreshing and retrying, so reload the table and run the delete again.
+// A commit that removes a deletion vector, or that drops v2 position delete files because the first deletion
+// vector of a file replaces them, is not replayed: if another writer commits first, it fails with ErrCommitFailed
+// instead of refreshing and retrying. On a table upgraded from v2 the first delete after the upgrade can hit
+// this, so reload the table and run the delete again.
 //
 // The concurrency parameter controls the level of parallelism for manifest processing and file rewriting and
 // can be overridden using the WithOverwriteConcurrency option. Defaults to runtime.GOMAXPROCS(0).
@@ -584,9 +586,10 @@ func (t *Transaction) readPlanningDeletes(ctx context.Context, fs io.IO, builtMe
 	return planningDeletes{positional: positional, dvs: dvs, equality: equality}, nil
 }
 
-// readLiveDeletionVectors returns the live deletion vectors of the planning snapshot. Merge-on-read uses it
-// because it only drops or merges deletion vectors, so it skips building the position and equality delete
-// indexes and neither pays for them nor fails on them.
+// readLiveDeletionVectors returns the live deletion vectors of the planning snapshot. ReplaceDataFiles,
+// ReplaceDataFilesByPath and dynamic partition overwrite use it because they only remove deletion vectors
+// together with their data files, so it skips building the position and equality delete indexes and neither
+// pays for them nor fails on them.
 func (t *Transaction) readLiveDeletionVectors(ctx context.Context, fs io.IO) (liveDeletionVectors, error) {
 	classified, err := t.classifyLiveDeletes(ctx, fs)
 	if err != nil {
@@ -1006,7 +1009,9 @@ func (t *Transaction) writePositionDeletesForFiles(ctx context.Context, fs io.IO
 		existingDVs[df.FilePath()] = entry.DataFile()
 		existingDVBitmaps[df.FilePath()] = bitmap
 	}
-	// A file without a DV starts from the positions its v2 position deletes removed.
+	// A file without a DV starts from the positions its v2 position deletes removed. maps.Copy overwrites,
+	// so this relies on foldPositionDeletes skipping files that already have a DV: their bitmap above is the
+	// live one, and a seed from a shared v2 delete file would bring back rows that DV deleted.
 	maps.Copy(existingDVBitmaps, folded.seeds)
 
 	posDeleteFiles := positionDeleteRecordsToDataFiles(ctx, meta.loc, meta, partitionContextByFilePath, recordWritingArgs{
@@ -1073,8 +1078,10 @@ func foldPositionDeletes(ctx context.Context, fs io.IO, partial []iceberg.Manife
 		return folded, err
 	}
 
+	// Gather each delete file's targets first, so a large partition-scoped file loads only the folded positions.
 	folded.seeds = make(map[string]*dv.RoaringPositionBitmap)
-	read := make(map[string]map[string]*dv.RoaringPositionBitmap) // delete file path -> target path -> positions
+	targets := make(map[string]map[string]struct{}) // delete file path -> target paths
+	matches := make(map[string][]iceberg.DataFile)  // target path -> its delete files
 	for _, entry := range partial {
 		path := entry.DataFile().FilePath()
 		if _, ok := dvs[path]; ok {
@@ -1084,15 +1091,28 @@ func foldPositionDeletes(ctx context.Context, fs io.IO, partial []iceberg.Manife
 		if err != nil {
 			return folded, err
 		}
+		matches[path] = matched
 		for _, del := range matched {
-			targets, ok := read[del.FilePath()]
+			if targets[del.FilePath()] == nil {
+				targets[del.FilePath()] = make(map[string]struct{})
+			}
+			targets[del.FilePath()][path] = struct{}{}
+		}
+	}
+
+	read := make(map[string]map[string]*dv.RoaringPositionBitmap) // delete file path -> target path -> positions
+	for _, entry := range partial {
+		path := entry.DataFile().FilePath()
+		for _, del := range matches[path] {
+			bitmaps, ok := read[del.FilePath()]
 			if !ok {
-				if targets, err = readPositionDeleteBitmapsForPaths(ctx, fs, del, nil); err != nil {
+				var err error
+				if bitmaps, err = readPositionDeleteBitmapsForPaths(ctx, fs, del, targets[del.FilePath()]); err != nil {
 					return folded, fmt.Errorf("failed to read position deletes from %s: %w", del.FilePath(), err)
 				}
-				read[del.FilePath()] = targets
+				read[del.FilePath()] = bitmaps
 			}
-			bitmap, ok := targets[path]
+			bitmap, ok := bitmaps[path]
 			if !ok {
 				continue
 			}
