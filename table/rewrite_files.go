@@ -307,17 +307,16 @@ func (r *RewriteFiles) ApplyResult(gr CompactionGroupResult) *RewriteFiles {
 	return r.applyResult(gr)
 }
 
-func (t *Transaction) pinNewRewriteBranch() error {
-	if t.branch == "" || t.branch == MainBranch || t.baseRefSnapshotID(t.branch) != nil {
-		return nil
+func (t *Transaction) applyRewriteLocked(updates []Update, reqs []Requirement, rewritesData bool) error {
+	if !rewritesData || t.branch == "" || t.branch == MainBranch || t.baseRefSnapshotID(t.branch) != nil {
+		return t.applyLocked(updates, reqs)
 	}
 
-	// A new branch inherits main. Retrying against a different ref could
-	// change which deletes apply to the rows the workers already read.
-	return t.applyPinned(nil, []Requirement{
-		AssertRefSnapshotID(t.branch, nil),
-		AssertRefSnapshotID(MainBranch, t.baseRefSnapshotID(MainBranch)),
-	}, []string{t.branch, MainBranch})
+	// A new branch inherits main. Pin both refs alongside the rewrite so a
+	// failed rewrite cannot leave a requirement on other transaction work.
+	reqs = append(reqs, AssertRefSnapshotID(MainBranch, t.baseRefSnapshotID(MainBranch)))
+
+	return t.applyPinnedLocked(updates, reqs, []string{t.branch, MainBranch})
 }
 
 func (r *RewriteFiles) applyResult(gr CompactionGroupResult) *RewriteFiles {
@@ -385,12 +384,6 @@ func (r *RewriteFiles) Commit(ctx context.Context) error {
 			return err
 		}
 	}
-	if len(r.dataFilesToDelete) > 0 {
-		if err := r.txn.pinNewRewriteBranch(); err != nil {
-			return err
-		}
-	}
-
 	opts := []WriteOption{withRewriteSemantics()}
 	if r.dataSequenceNumber != nil {
 		opts = append(opts, withDataSequenceNumber(*r.dataSequenceNumber))

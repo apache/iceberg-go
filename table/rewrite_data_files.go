@@ -911,7 +911,7 @@ func (t *Transaction) rewriteDataFilesPartial(ctx context.Context, groups []Comp
 		// The batch's commit validator starts at the transaction base. Check
 		// history before that point as well, including changes absorbed by an
 		// earlier batch's retry.
-		if err := sincePlanning.validate(ctx, current.Metadata(), fs, batchGroups); err != nil {
+		if err := sincePlanning.validate(ctx, current, fs, batchGroups); err != nil {
 			if !errors.Is(err, ErrConflictingDeleteFiles) {
 				return result, fmt.Errorf("validate partial rewrite batch %d against its planning snapshot: %w", batchNum, err)
 			}
@@ -1001,9 +1001,6 @@ func (t *Transaction) rewriteDataFilesPartial(ctx context.Context, groups []Comp
 		groupTxn, err := current.NewTransactionOnBranch(t.branch)
 		if err != nil {
 			return result, cleanupBatch(fmt.Errorf("create transaction for partial rewrite batch: %w", err))
-		}
-		if err := groupTxn.pinNewRewriteBranch(); err != nil {
-			return result, cleanupBatch(err)
 		}
 		newDataFiles := make([]iceberg.DataFile, 0)
 		oldDataFiles := make([]iceberg.DataFile, 0, len(rewrittenFiles))
@@ -1146,6 +1143,10 @@ func rewriteValidatorWithReferencedDataFiles(
 	}
 }
 
+var errSnapshotHistoryIncompleteForRewrite = errors.New(
+	"cannot validate compaction: history may be incomplete under REST snapshot-loading-mode=refs; reload with snapshot-loading-mode=all",
+)
+
 // validateRewriteFromSnapshot covers changes already visible when the rewrite
 // is staged. The transaction's existing validators cover subsequent changes
 // discovered during commit retries.
@@ -1163,6 +1164,17 @@ func (t *Transaction) validateRewriteFromSnapshot(ctx context.Context, meta *Met
 		return err
 	}
 	cc, err := newConflictContextAt(ctx, current, t.branch, head, snapshotID, fs, true)
+	if errors.Is(err, ErrCommitDiverged) && t.tbl.snapshotHistoryRefsOnly && head != nil {
+		_, full, loadErr := loadStagedSnapshotHistory(ctx, t.tbl, meta, errSnapshotHistoryIncompleteForRewrite)
+		if loadErr != nil {
+			return loadErr
+		}
+		current, err = full.Build()
+		if err != nil {
+			return err
+		}
+		cc, err = newConflictContextAt(ctx, current, t.branch, t.planningSnapshot(full), snapshotID, fs, true)
+	}
 	if err != nil {
 		return err
 	}
@@ -1184,10 +1196,17 @@ type deletesSincePlanning struct {
 
 // validate collects deletes from newly checked snapshots and returns
 // ErrConflictingDeleteFiles if any delete since planning applies to groups.
-func (d *deletesSincePlanning) validate(ctx context.Context, current Metadata, fs iceio.IO, groups []CompactionTaskGroup) error {
+func (d *deletesSincePlanning) validate(ctx context.Context, current *Table, fs iceio.IO, groups []CompactionTaskGroup) error {
 	// The rewrite validator binds no filters, so case sensitivity is moot.
-	head := latestSnapshotForBranch(current, d.branch)
-	cc, err := newConflictContextAt(ctx, current, d.branch, head, d.checkedSnapshotID, fs, true)
+	head := latestSnapshotForBranch(current.metadata, d.branch)
+	cc, err := newConflictContextAt(ctx, current.metadata, d.branch, head, d.checkedSnapshotID, fs, true)
+	if errors.Is(err, ErrCommitDiverged) && current.snapshotHistoryRefsOnly && head != nil {
+		full, loadErr := current.loadFullSnapshotHistory(ctx, errSnapshotHistoryIncompleteForRewrite)
+		if loadErr != nil {
+			return loadErr
+		}
+		cc, err = newConflictContextAt(ctx, full.metadata, d.branch, head, d.checkedSnapshotID, fs, true)
+	}
 	if err != nil {
 		return err
 	}

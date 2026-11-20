@@ -1001,6 +1001,126 @@ func TestCompactionRejectsConcurrentChangeToNewBranchParent(t *testing.T) {
 	require.ElementsMatch(t, []int64{2, 3, 4}, scanIDs(t, latest))
 }
 
+func TestRejectedCompactionDoesNotPinNewBranch(t *testing.T) {
+	tbl, cat := newConcurrentRewriteTestTable(t)
+	tbl = appendRows(t, tbl, `[{"id":1}]`)
+	tasks, err := tbl.Scan().PlanFiles(t.Context())
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	tx, err := tbl.NewTransactionOnBranch("compaction")
+	require.NoError(t, err)
+	file := tasks[0].File
+	err = tx.NewRewrite(nil).DeleteFile(file).AddFile(file).Commit(t.Context())
+	require.ErrorContains(t, err, "already referenced by table")
+	require.NoError(t, tx.SetProperties(iceberg.Properties{"test.property": "updated"}))
+	cat.beforeCommit = func() {
+		appendRows(t, tbl, `[{"id":2}]`)
+	}
+	committed, err := tx.Commit(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, "updated", committed.Properties()["test.property"])
+	require.ElementsMatch(t, []int64{1, 2}, scanIDs(t, committed))
+}
+
+type compactionHistoryCatalog struct {
+	*concurrentTestCatalog
+	fullLoads int
+}
+
+func (c *compactionHistoryCatalog) LoadTable(ctx context.Context, ident table.Identifier) (*table.Table, error) {
+	full, err := c.concurrentTestCatalog.LoadTable(ctx, ident)
+	if err != nil {
+		return nil, err
+	}
+	var remove []int64
+	for _, snap := range full.Metadata().Snapshots() {
+		if snap.SnapshotID != full.CurrentSnapshot().SnapshotID {
+			remove = append(remove, snap.SnapshotID)
+		}
+	}
+	limited, err := table.UpdateTableMetadata(full.Metadata(), []table.Update{table.NewRemoveSnapshotsUpdate(remove, false)}, "")
+	if err != nil {
+		return nil, err
+	}
+
+	return table.New(ident, limited, full.MetadataLocation(), c.fsF, c, table.WithSnapshotHistoryLimitedToRefs(true)), nil
+}
+
+func (c *compactionHistoryCatalog) LoadTableWithFullSnapshotHistory(ctx context.Context, ident table.Identifier) (*table.Table, error) {
+	c.fullLoads++
+
+	return c.concurrentTestCatalog.LoadTable(ctx, ident)
+}
+
+func TestCompactionValidatesAgainstFullHistoryFromRefsOnlyTable(t *testing.T) {
+	for _, mode := range []string{"atomic", "partial", "distributed"} {
+		for _, withDelete := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/delete=%t", mode, withDelete), func(t *testing.T) {
+				planned, cat, groups, _ := newAbsorbedDeleteFixture(t, absorbedPositionDelete, 2, 0)
+				peerDelete := cat.beforeCommit
+				cat.beforeCommit = nil
+				if withDelete {
+					peerDelete()
+				} else {
+					appendRows(t, planned, `[{"id":7}]`)
+				}
+				latest, err := cat.LoadTable(t.Context(), planned.Identifier())
+				require.NoError(t, err)
+				appendRows(t, latest, `[{"id":8}]`)
+
+				catalog := &compactionHistoryCatalog{concurrentTestCatalog: cat}
+				limited, err := catalog.LoadTable(t.Context(), planned.Identifier())
+				require.NoError(t, err)
+				require.Len(t, limited.Metadata().Snapshots(), 1)
+				tx := limited.NewTransaction()
+				switch mode {
+				case "partial":
+					result, err := tx.RewriteDataFiles(t.Context(), groups[:1],
+						table.RewriteDataFilesOptions{PartialProgress: true})
+					require.NoError(t, err)
+					if withDelete {
+						require.Len(t, result.FailedGroups, 1)
+						require.ErrorIs(t, result.FailedGroups[0].Err, table.ErrConflictingDeleteFiles)
+					} else {
+						require.Len(t, result.CompletedGroups, 1)
+					}
+				default:
+					if mode == "distributed" {
+						result, workerErr := table.ExecuteCompactionGroup(t.Context(), limited, groups[0])
+						require.NoError(t, workerErr)
+						err = tx.NewRewrite(nil).ApplyResult(result).Commit(t.Context())
+					} else {
+						_, err = tx.RewriteDataFiles(t.Context(), groups[:1], table.RewriteDataFilesOptions{})
+					}
+					if withDelete {
+						require.ErrorIs(t, err, table.ErrConflictingDeleteFiles)
+					} else {
+						require.NoError(t, err)
+						_, err = tx.Commit(t.Context())
+						require.NoError(t, err)
+					}
+				}
+				require.Equal(t, 1, catalog.fullLoads)
+			})
+		}
+	}
+}
+
+func TestCompactionRetryLoadsFullHistoryFromRefsOnlyTable(t *testing.T) {
+	planned, cat, groups, _ := newAbsorbedDeleteFixture(t, absorbedPositionDelete, 2)
+	cat.beforeCommit = func() {
+		latest := appendRows(t, planned, `[{"id":5}]`)
+		appendRows(t, latest, `[{"id":6}]`)
+	}
+	catalog := &compactionHistoryCatalog{concurrentTestCatalog: cat}
+	limited, err := catalog.LoadTable(t.Context(), planned.Identifier())
+	require.NoError(t, err)
+	result, err := limited.RewriteDataFiles(t.Context(), groups, table.RewriteDataFilesOptions{})
+	require.NoError(t, err)
+	require.Equal(t, 1, catalog.fullLoads)
+	require.ElementsMatch(t, []int64{1, 2, 3, 4, 5, 6}, scanIDs(t, result.Table))
+}
+
 func TestCompactionPlanningSnapshotOnTargetBranch(t *testing.T) {
 	planned, cat, groups, _ := newAbsorbedDeleteFixture(t, absorbedPositionDelete, 2)
 	cat.beforeCommit = nil

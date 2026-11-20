@@ -492,6 +492,10 @@ func (t *Transaction) applyPinned(updates []Update, reqs []Requirement, refs []s
 	t.mx.Lock()
 	defer t.mx.Unlock()
 
+	return t.applyPinnedLocked(updates, reqs, refs)
+}
+
+func (t *Transaction) applyPinnedLocked(updates []Update, reqs []Requirement, refs []string) error {
 	if err := t.applyLocked(updates, reqs); err != nil {
 		return err
 	}
@@ -851,7 +855,7 @@ func (t *Transaction) ExpireSnapshotsWithContext(ctx context.Context, opts ...Ex
 	}
 	base := t.tbl
 	if base.snapshotHistoryRefsOnly {
-		base, meta, err = loadExpirationHistory(ctx, base, meta)
+		base, meta, err = loadStagedSnapshotHistory(ctx, base, meta, errSnapshotHistoryIncompleteForExpiration)
 		if err != nil {
 			return err
 		}
@@ -1936,7 +1940,7 @@ func (t *Transaction) ReplaceDataFiles(ctx context.Context, filesToDelete, files
 	// between the two.
 	t.mx.Lock()
 	defer t.mx.Unlock()
-	if err := t.applyLocked(updates, reqs); err != nil {
+	if err := t.applyRewriteLocked(updates, reqs, cfg.rewriteSemantics); err != nil {
 		return err
 	}
 	if len(filesToAdd) > 0 || cfg.rewriteSemantics {
@@ -2370,7 +2374,7 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 	// between the two.
 	t.mx.Lock()
 	defer t.mx.Unlock()
-	if err := t.applyLocked(updates, reqs); err != nil {
+	if err := t.applyRewriteLocked(updates, reqs, cfg.rewriteSemantics && len(markedDataForDeletion) > 0); err != nil {
 		return err
 	}
 	if validator != nil {

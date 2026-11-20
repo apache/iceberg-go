@@ -34,24 +34,10 @@ var errSnapshotHistoryIncompleteForExpiration = errors.New(
 // Load the same metadata revision with complete history, then rebuild the
 // staged state over that base. Keep the original Table and builder intact
 // until the expiration has been staged successfully.
-func loadExpirationHistory(ctx context.Context, base *Table, staged *MetadataBuilder) (*Table, *MetadataBuilder, error) {
-	loader, ok := base.cat.(FullSnapshotHistoryLoader)
-	if !ok {
-		return nil, nil, fmt.Errorf("%w: %w", ErrInvalidOperation, errSnapshotHistoryIncompleteForExpiration)
-	}
-	full, err := loader.LoadTableWithFullSnapshotHistory(ctx, slices.Clone(base.identifier))
+func loadStagedSnapshotHistory(ctx context.Context, base *Table, staged *MetadataBuilder, incomplete error) (*Table, *MetadataBuilder, error) {
+	full, err := base.loadFullSnapshotHistory(ctx, incomplete)
 	if err != nil {
-		return nil, nil, fmt.Errorf("%w: load full snapshot history: %w", ErrInvalidOperation, err)
-	}
-	if full.snapshotHistoryRefsOnly {
-		return nil, nil, fmt.Errorf("%w: %w", ErrInvalidOperation, errSnapshotHistoryIncompleteForExpiration)
-	}
-	if err := validateTableUUID(base.identifier, base.metadata.TableUUID(), full.metadata.TableUUID()); err != nil {
-		return nil, nil, fmt.Errorf("%w: %w", ErrInvalidOperation, err)
-	}
-	if base.metadataLocation == "" || base.metadataLocation != full.metadataLocation {
-		return nil, nil, fmt.Errorf("%w: could not load full snapshot history for the transaction's metadata revision; reload the table and start a new transaction",
-			ErrInvalidOperation)
+		return nil, nil, err
 	}
 
 	meta, err := MetadataBuilderFromBase(full.metadata, base.metadataLocation)
@@ -67,10 +53,8 @@ func loadExpirationHistory(ctx context.Context, base *Table, staged *MetadataBui
 	// make an update redundant now that more of the base history is visible.
 	meta.updates = slices.Clone(staged.updates)
 	meta.lastUpdatedMS = staged.lastUpdatedMS
-	base = base.withMetadata(full.metadata, base.metadataLocation)
-	base.snapshotHistoryRefsOnly = false
 
-	return base, meta, nil
+	return full, meta, nil
 }
 
 func (r *stagedReplay) replan(b *MetadataBuilder, rec expirationRecord) ([]Update, []string, error) {
