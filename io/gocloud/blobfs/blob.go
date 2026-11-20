@@ -345,10 +345,6 @@ func (bfs *fileIO) Remove(ctx context.Context, name string) error {
 	return nil
 }
 
-func (bfs *fileIO) Create(ctx context.Context, name string) (icebergio.FileWriter, error) {
-	return bfs.newWriter(ctx, name, true, nil)
-}
-
 func (bfs *fileIO) WriteFile(ctx context.Context, name string, content []byte) error {
 	key, err := bfs.preprocess(name)
 	if err != nil {
@@ -358,33 +354,20 @@ func (bfs *fileIO) WriteFile(ctx context.Context, name string, content []byte) e
 	return bfs.WriteAll(ctx, key, content, nil)
 }
 
-// newWriter returns a writer that writes to the blob stored at path.
-// A nil WriterOptions is treated the same as the zero value.
-//
-// If overwrite is disabled and a blob with this path already exists,
-// an error will be returned.
+// Create returns a writer that overwrites the blob stored at name.
 //
 // The caller must call Close on the returned writer, even if the write is
 // aborted.
-func (bfs *fileIO) newWriter(ctx context.Context, path string, overwrite bool, opts *blob.WriterOptions) (w *writer, err error) {
-	key, err := bfs.preprocess(path)
+func (bfs *fileIO) Create(ctx context.Context, name string) (icebergio.FileWriter, error) {
+	key, err := bfs.preprocess(name)
 	if err != nil {
-		return nil, &fs.PathError{Op: "new writer", Path: path, Err: err}
+		return nil, &fs.PathError{Op: "new writer", Path: name, Err: err}
 	}
 	if !fs.ValidPath(key) {
-		return nil, &fs.PathError{Op: "new writer", Path: path, Err: fs.ErrInvalid}
+		return nil, &fs.PathError{Op: "new writer", Path: name, Err: fs.ErrInvalid}
 	}
 
-	if !overwrite {
-		if exists, err := bfs.Exists(ctx, key); err != nil || exists {
-			if err != nil {
-				return nil, &fs.PathError{Op: "new writer", Path: path, Err: err}
-			}
-
-			return nil, &fs.PathError{Op: "new writer", Path: path, Err: fs.ErrInvalid}
-		}
-	}
-	bw, err := bfs.NewWriter(ctx, key, opts)
+	bw, err := bfs.NewWriter(ctx, key, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -865,7 +848,7 @@ func (bfs *fileIO) RemoveAll(ctx context.Context, name string) error {
 	return nil
 }
 
-// writer is the FileWriter returned by newWriter.
+// writer is the FileWriter returned by Create.
 type writer struct {
 	*blob.Writer
 	name string

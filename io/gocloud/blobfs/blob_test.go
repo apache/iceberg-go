@@ -548,25 +548,6 @@ func TestBlobFileIORejectsUnsupportedObjectPaths(t *testing.T) {
 	}
 }
 
-func TestNewWriterExistsError(t *testing.T) {
-	ctx := context.Background()
-
-	bucket := memblob.OpenBucket(nil)
-
-	bfs := &fileIO{
-		Bucket:        bucket,
-		extractObject: identityObjectLocation,
-		ctx:           ctx,
-	}
-	require.NoError(t, bucket.Close())
-
-	_, err := bfs.newWriter(ctx, "test-file", false, nil)
-
-	var pathErr *fs.PathError
-	require.ErrorAs(t, err, &pathErr, "error should be a PathError wrapping the Exists failure")
-	require.Equal(t, "new writer", pathErr.Op)
-}
-
 type trackingReadCloser struct {
 	io.ReadCloser
 	closed *bool
@@ -1628,7 +1609,7 @@ func TestBlobFileIOPreprocessErrorRetainsOriginalPath(t *testing.T) {
 		{"remove", func() error { return fileIO.Remove(context.Background(), name) }},
 		{"write file", func() error { return fileIO.WriteFile(context.Background(), name, nil) }},
 		{"new writer", func() error {
-			_, err := fileIO.newWriter(context.Background(), name, true, nil)
+			_, err := fileIO.Create(context.Background(), name)
 
 			return err
 		}},
