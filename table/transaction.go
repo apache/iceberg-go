@@ -90,8 +90,9 @@ type Transaction struct {
 
 	// noReplay marks the commit as non-replayable: on a CAS conflict
 	// doCommit fails instead of refreshing and replaying. Set by
-	// snapshot producers whose staged snapshot carries delete-file removals;
-	// see the flag site in commitManifests.
+	// snapshot producers whose staged snapshot carries delete-file
+	// removals that a replay could get wrong; see the flag site in
+	// commitManifests and snapshotProducer.dvRemovalsReplayable.
 	noReplay bool
 
 	// pinnedRefs names refs whose AssertRefSnapshotID requirement guards
