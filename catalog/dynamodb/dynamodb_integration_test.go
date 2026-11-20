@@ -534,7 +534,7 @@ func TestDynamoDBRegistry(t *testing.T) {
 	c := localCatalog(t)
 	props := maps.Clone(c.props)
 	props["type"] = "dynamodb"
-	loaded, err := catalog.Load(awsconfig.WithAWSConfig(t.Context(), &c.awsConfig), "registry", props)
+	loaded, err := catalog.Load(awsconfig.NewContext(t.Context(), &c.awsConfig), "registry", props)
 	require.NoError(t, err)
 	require.Equal(t, "registry", loaded.Name())
 	require.Equal(t, catalog.DynamoDB, loaded.CatalogType())

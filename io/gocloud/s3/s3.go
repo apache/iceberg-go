@@ -184,7 +184,7 @@ func resolveS3AWSConfig(ctx context.Context, props map[string]string) (*aws.Conf
 		base *aws.Config
 		err  error
 	)
-	if v := awsconfig.GetAWSConfig(ctx); v != nil {
+	if v := awsconfig.FromContext(ctx); v != nil {
 		base = v
 	} else if base, err = ParseAWSConfig(ctx, props); err != nil {
 		return nil, err

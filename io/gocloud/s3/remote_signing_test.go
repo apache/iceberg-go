@@ -114,7 +114,7 @@ func TestRemoteSigningFileIO(t *testing.T) {
 
 		return aws.Credentials{}, errors.New("unexpected credentials")
 	})}
-	ctx := awsconfig.WithAWSConfig(t.Context(), shared)
+	ctx := awsconfig.NewContext(t.Context(), shared)
 	props := map[string]string{io.S3EndpointURL: storage.URL, io.S3RemoteSigningEnabled: "true", remotesigning.EndpointProperty: signer.URL, remotesigning.ConfigProperty: settings, "token": "ignored"}
 	parsed, _ := url.Parse("s3://bucket")
 	bucket, err := createS3Bucket(ctx, parsed, props)
@@ -354,7 +354,7 @@ func TestRemoteSigningRejectsClientsWithUncontrolledRedirects(t *testing.T) {
 	custom := &wrappedHTTPClient{Client: &http.Client{}}
 	props := map[string]string{io.S3RemoteSigningEnabled: "true", remotesigning.EndpointProperty: "https://signer.example/sign"}
 	shared := &aws.Config{Region: "us-east-1", HTTPClient: custom}
-	ctx := awsconfig.WithAWSConfig(t.Context(), shared)
+	ctx := awsconfig.NewContext(t.Context(), shared)
 	parsed, err := url.Parse("s3://bucket")
 	require.NoError(t, err)
 	_, err = createS3Bucket(ctx, parsed, props)

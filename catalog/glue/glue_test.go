@@ -3248,7 +3248,7 @@ func recordingMemFS(t *testing.T, scheme string) (*iceio.MemFS, *[]*aws.Config) 
 	recorded := new([]*aws.Config)
 	iceio.Unregister(scheme)
 	iceio.Register(scheme, func(ctx context.Context, _ *url.URL, _ map[string]string) (iceio.IO, error) {
-		*recorded = append(*recorded, awsconfig.GetAWSConfig(ctx))
+		*recorded = append(*recorded, awsconfig.FromContext(ctx))
 
 		return memFS, nil
 	})

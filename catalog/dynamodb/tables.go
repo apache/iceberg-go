@@ -109,7 +109,7 @@ func (c *Catalog) CreateTable(ctx context.Context, ident table.Identifier, schem
 	if err != nil {
 		return nil, err
 	}
-	if err := internal.WriteMetadata(awsconfig.WithAWSConfig(ctx, &c.awsConfig), staged.Table); err != nil {
+	if err := internal.WriteMetadata(awsconfig.NewContext(ctx, &c.awsConfig), staged.Table); err != nil {
 		return nil, err
 	}
 	if err := c.createTableEntry(ctx, ident, staged.MetadataLocation()); err != nil {
@@ -237,7 +237,7 @@ func (c *Catalog) CommitTable(ctx context.Context, ident table.Identifier, requi
 	if current != nil && staged.Metadata().Equals(current.Metadata()) {
 		return current.Metadata(), current.MetadataLocation(), nil
 	}
-	if err := internal.WriteMetadata(awsconfig.WithAWSConfig(ctx, &c.awsConfig), staged.Table); err != nil {
+	if err := internal.WriteMetadata(awsconfig.NewContext(ctx, &c.awsConfig), staged.Table); err != nil {
 		return nil, "", err
 	}
 	if current == nil {
@@ -294,7 +294,7 @@ func (c *Catalog) commitSucceeded(ctx context.Context, ident table.Identifier, l
 }
 
 func (c *Catalog) removeUncommittedMetadata(ctx context.Context, location string, loadFS table.FSysF) error {
-	cleanupCtx, cancel := context.WithTimeout(awsconfig.WithAWSConfig(context.WithoutCancel(ctx), &c.awsConfig), 5*time.Second)
+	cleanupCtx, cancel := context.WithTimeout(awsconfig.NewContext(context.WithoutCancel(ctx), &c.awsConfig), 5*time.Second)
 	defer cancel()
 	fs, err := loadFS(cleanupCtx)
 	if err != nil {

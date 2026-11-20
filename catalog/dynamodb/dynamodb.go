@@ -76,7 +76,7 @@ var (
 func init() {
 	catalog.MustRegister("dynamodb", catalog.RegistrarFunc(func(ctx context.Context, name string, props iceberg.Properties) (catalog.Catalog, error) {
 		var cfg aws.Config
-		if supplied := awsconfig.GetAWSConfig(ctx); supplied != nil {
+		if supplied := awsconfig.FromContext(ctx); supplied != nil {
 			cfg = supplied.Copy()
 		} else {
 			var err error
@@ -263,7 +263,7 @@ func properties(entry item) iceberg.Properties {
 
 func (c *Catalog) fileSystem(props iceberg.Properties, location string) table.FSysF {
 	return func(ctx context.Context) (icebergio.IO, error) {
-		return icebergio.LoadFS(awsconfig.WithAWSConfig(ctx, &c.awsConfig), props, location)
+		return icebergio.LoadFS(awsconfig.NewContext(ctx, &c.awsConfig), props, location)
 	}
 }
 
