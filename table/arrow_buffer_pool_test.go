@@ -176,7 +176,6 @@ func benchmarkReadTasksBufferReuse(b *testing.B, scan *Scan, tasks []FileScanTas
 	}
 }
 
-
 func TestArrowBufferPoolBoundsEachSizeClass(t *testing.T) {
 	pool := &arrowBufferPool{backing: memory.NewGoAllocator()}
 	defer pool.close()
