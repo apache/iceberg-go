@@ -609,16 +609,8 @@ func (t *Transaction) rewriteFilesWithFilter(ctx context.Context, fs io.IO, upda
 	}
 
 	for _, entry := range entries {
-		var spec *iceberg.PartitionSpec
-		if _, hasDV := deletes.dvs[entry.DataFile().FilePath()]; hasDV {
-			spec, err = meta.GetSpecByID(int(entry.DataFile().SpecID()))
-			if err != nil {
-				return fmt.Errorf("failed to get partition spec %d for data file %s: %w",
-					entry.DataFile().SpecID(), entry.DataFile().FilePath(), err)
-			}
-		}
 		task, err := fileScanTaskForDataEntry(
-			entry, deletes.positional, deletes.dvs, deletes.equality, spec, meta.CurrentSchema())
+			entry, deletes.positional, deletes.dvs, deletes.equality, meta.GetSpecByID, meta.CurrentSchema())
 		if err != nil {
 			return err
 		}

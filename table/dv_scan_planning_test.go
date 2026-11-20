@@ -277,8 +277,14 @@ func TestDVMatchingToDataFiles(t *testing.T) {
 	// Match DVs against data-001 — should only get dv-001
 	dataEntry1 := iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &snapshotID, &seqNum, nil,
 		&mockDataFile{path: dataFilePath, contentType: iceberg.EntryContentData})
-	matched, err := matchDVToData(dataEntry1, dvIndex, nil, nil)
+	var visitedSpecIDs []int
+	matched, err := matchDVToData(dataEntry1, dvIndex, func(id int) (*iceberg.PartitionSpec, error) {
+		visitedSpecIDs = append(visitedSpecIDs, id)
+
+		return iceberg.UnpartitionedSpec, nil
+	}, nil)
 	assert.NoError(t, err)
+	assert.Equal(t, []int{int(dataEntry1.DataFile().SpecID())}, visitedSpecIDs)
 	assert.Len(t, matched, 1)
 	assert.Equal(t, dvForData1.path, matched[0].FilePath())
 
@@ -314,7 +320,11 @@ func TestDVMatchingNoMatch(t *testing.T) {
 
 	dataEntry := iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &snapshotID, &seqNum, nil,
 		&mockDataFile{path: "s3://bucket/data/data-001.parquet", contentType: iceberg.EntryContentData})
-	matched, err := matchDVToData(dataEntry, dvIndex, nil, nil)
+	matched, err := matchDVToData(dataEntry, dvIndex, func(id int) (*iceberg.PartitionSpec, error) {
+		t.Fatalf("partition spec %d was looked up without a matching deletion vector", id)
+
+		return nil, nil
+	}, nil)
 	assert.NoError(t, err)
 	assert.Empty(t, matched)
 }

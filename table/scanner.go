@@ -1394,6 +1394,7 @@ func (scan *Scan) planDataManifestTasksWithOptions(
 		return nil, err
 	}
 
+	dvSpecByID := dvSpecLookupForMetadata(scan.metadata)
 	taskBatches := make([][]FileScanTask, len(manifestList))
 	skippedFiles := make([]int64, len(manifestList))
 	taskCapacities := make([]int, len(manifestList))
@@ -1478,11 +1479,7 @@ func (scan *Scan) planDataManifestTasksWithOptions(
 						ErrInvalidMetadata, dataFile.ContentType(), dataFile.FilePath())
 				}
 
-				var spec *iceberg.PartitionSpec
-				if _, hasDV := dvIndex[dataFile.FilePath()]; hasDV {
-					spec = scan.metadata.PartitionSpecByID(int(dataFile.SpecID()))
-				}
-				task, err := fileScanTaskForDataEntry(entry, posDeleteIndex, dvIndex, eqDeleteIndex, spec, schema)
+				task, err := fileScanTaskForDataEntry(entry, posDeleteIndex, dvIndex, eqDeleteIndex, dvSpecByID, schema)
 				if err != nil {
 					return err
 				}
@@ -1573,7 +1570,7 @@ func fileScanTaskForDataEntry(
 	posDeleteIndex *positionalDeleteIndex,
 	dvIndex map[string]iceberg.ManifestEntry,
 	eqDeleteIndex *equalityDeleteIndex,
-	spec *iceberg.PartitionSpec,
+	dvSpecByID dvSpecLookup,
 	schema *iceberg.Schema,
 ) (FileScanTask, error) {
 	// Spec §Scan Planning: when a deletion vector applies to a data file,
@@ -1582,7 +1579,7 @@ func fileScanTaskForDataEntry(
 	// would be wasteful I/O, and on a buggy writer whose DV omits prior
 	// positions, applying both would over-delete. Mirrors Java's
 	// DeleteFileIndex.forDataFile.
-	dvFiles, err := matchDVToData(entry, dvIndex, spec, schema)
+	dvFiles, err := matchDVToData(entry, dvIndex, dvSpecByID, schema)
 	if err != nil {
 		return FileScanTask{}, err
 	}

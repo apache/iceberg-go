@@ -144,6 +144,20 @@ func buildDVIndex(dvEntries []iceberg.ManifestEntry) (map[string]iceberg.Manifes
 	return dvIndex, nil
 }
 
+type dvSpecLookup func(int) (*iceberg.PartitionSpec, error)
+
+// dvSpecLookupForMetadata adapts read-only metadata, where the historical
+// spec may be absent. A rewrite can supply the builder's strict lookup.
+func dvSpecLookupForMetadata(specs partitionSpecLookup) dvSpecLookup {
+	if specs == nil {
+		return nil
+	}
+
+	return func(id int) (*iceberg.PartitionSpec, error) {
+		return specs.PartitionSpecByID(id), nil
+	}
+}
+
 // matchDVToData returns the deletion vector that applies to the given data
 // entry, if any. A DV applies when the data file's sequence number is less
 // than or equal to the DV's sequence number.
@@ -161,13 +175,22 @@ func buildDVIndex(dvEntries []iceberg.ManifestEntry) (map[string]iceberg.Manifes
 func matchDVToData(
 	dataEntry iceberg.ManifestEntry,
 	dvIndex map[string]iceberg.ManifestEntry,
-	spec *iceberg.PartitionSpec,
+	specByID dvSpecLookup,
 	schema *iceberg.Schema,
 ) ([]iceberg.DataFile, error) {
 	dataFile := dataEntry.DataFile()
 	dvEntry, ok := dvIndex[dataFile.FilePath()]
 	if !ok {
 		return nil, nil
+	}
+	var spec *iceberg.PartitionSpec
+	if specByID != nil {
+		var err error
+		spec, err = specByID(int(dataFile.SpecID()))
+		if err != nil {
+			return nil, fmt.Errorf("failed to get partition spec %d for data file %s: %w",
+				dataFile.SpecID(), dataFile.FilePath(), err)
+		}
 	}
 	if dvSeq := dvEntry.DataSequenceNumber(); dvSeq >= 0 && dataEntry.DataSequenceNumber() > dvSeq {
 		return nil, nil
