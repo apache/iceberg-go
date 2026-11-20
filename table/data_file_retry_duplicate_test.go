@@ -107,25 +107,29 @@ func TestDirectDataFileWritesRejectConcurrentDuplicatePaths(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			synctest.Test(t, func(t *testing.T) {
-				fs, cat, tbl := newExpireReplayTable(t, iceberg.Properties{
-					WriteUpdateIsolationLevelKey: string(IsolationSnapshot),
+			for _, level := range []IsolationLevel{WriteUpdateIsolationLevelDefault, IsolationSnapshot} {
+				t.Run(string(level), func(t *testing.T) {
+					synctest.Test(t, func(t *testing.T) {
+						fs, cat, tbl := newExpireReplayTable(t, iceberg.Properties{
+							WriteUpdateIsolationLevelKey: string(level),
+						})
+						tbl, _ = appendOnBranch(t, tbl, MainBranch, "base")
+						tx := tbl.NewTransaction()
+						require.NoError(t, tc.stage(t, tx, fs))
+						peerHead := peerAppend(t, fs, cat, MainBranch, "duplicate")
+						attemptsBefore := cat.attempts.Load()
+
+						_, err := tx.Commit(t.Context())
+
+						require.ErrorIs(t, err, ErrDuplicateDataFiles)
+						require.ErrorIs(t, err, ErrTransactionUnusable)
+						require.NotErrorIs(t, err, ErrCommitFailed)
+						assert.Equal(t, attemptsBefore+1, cat.attempts.Load(),
+							"the duplicate must fail before a second catalog commit")
+						assert.Equal(t, peerHead, refHead(t, cat.metadata, MainBranch))
+					})
 				})
-				tbl, _ = appendOnBranch(t, tbl, MainBranch, "base")
-				tx := tbl.NewTransaction()
-				require.NoError(t, tc.stage(t, tx, fs))
-				peerHead := peerAppend(t, fs, cat, MainBranch, "duplicate")
-				attemptsBefore := cat.attempts.Load()
-
-				_, err := tx.Commit(t.Context())
-
-				require.ErrorIs(t, err, ErrDuplicateDataFiles)
-				require.ErrorIs(t, err, ErrTransactionUnusable)
-				require.NotErrorIs(t, err, ErrCommitFailed)
-				assert.Equal(t, attemptsBefore+1, cat.attempts.Load(),
-					"the duplicate must fail before a second catalog commit")
-				assert.Equal(t, peerHead, refHead(t, cat.metadata, MainBranch))
-			})
+			}
 		})
 	}
 }
@@ -235,5 +239,85 @@ func TestDirectDataFileWritesRejectConcurrentlyReaddedPath(t *testing.T) {
 		require.Equal(t, attemptsBefore+1, cat.attempts.Load())
 		require.Equal(t, peerHead, refHead(t, cat.metadata, MainBranch))
 		require.Equal(t, []string{"base", "reused"}, branchFiles(t, fs, cat.metadata, MainBranch))
+	})
+}
+
+func TestDirectDataFileWritesRetryNewBranchAgainstMain(t *testing.T) {
+	for _, peerPath := range []string{"staged", "peer"} {
+		t.Run(peerPath, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				const branch = "new-branch"
+				fs, cat, tbl := newExpireReplayTable(t, nil)
+				tbl, _ = appendOnBranch(t, tbl, MainBranch, "base")
+				tx, err := tbl.NewTransactionOnBranch(branch)
+				require.NoError(t, err)
+				stageFiles(t, tx, "staged")
+				mainHead := peerAppend(t, fs, cat, MainBranch, peerPath)
+				attemptsBefore := cat.attempts.Load()
+
+				committed, err := tx.Commit(t.Context())
+				if peerPath == "staged" {
+					require.ErrorIs(t, err, ErrDuplicateDataFiles)
+					require.Equal(t, attemptsBefore+1, cat.attempts.Load())
+					require.Nil(t, cat.metadata.SnapshotByName(branch))
+
+					return
+				}
+				require.NoError(t, err)
+				require.Equal(t, mainHead, parentOf(t, committed.Metadata(), refHead(t, committed.Metadata(), branch)))
+				require.Equal(t, []string{"base", "peer", "staged"},
+					branchFiles(t, fs, committed.Metadata(), branch))
+			})
+		})
+	}
+}
+
+func TestDirectDataFileWritesRetryWithRefsOnlyHistory(t *testing.T) {
+	for _, peerPath := range []string{"staged", "peer"} {
+		t.Run(peerPath, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				fs, cat, tbl := newExpireReplayTable(t, nil)
+				tbl, _ = appendOnBranch(t, tbl, MainBranch, "base")
+				refs := &refsOnlyReloadCatalog{reqValidatingCatalog: cat}
+				tx := newOCCTable(t, tbl.Metadata(), fs, refs).NewTransaction()
+				stageFiles(t, tx, "staged")
+				peerAppend(t, fs, cat, MainBranch, peerPath)
+				head := peerAppend(t, fs, cat, MainBranch, "head")
+				refs.partial = refsOnlySnapshotMetadata(t, cat.metadata, head)
+
+				committed, err := tx.Commit(t.Context())
+				require.Equal(t, 1, refs.loads)
+				if peerPath == "staged" {
+					require.ErrorIs(t, err, ErrDuplicateDataFiles)
+					require.Equal(t, head, refHead(t, cat.metadata, MainBranch))
+
+					return
+				}
+				require.NoError(t, err)
+				require.Equal(t, []string{"base", "head", "peer", "staged"},
+					branchFiles(t, fs, committed.Metadata(), MainBranch))
+			})
+		})
+	}
+}
+
+func TestDirectDataFileRetrySkipsInheritedManifests(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		fs, cat, tbl := newExpireReplayTable(t, nil)
+		tbl, _ = appendOnBranch(t, tbl, MainBranch, "base")
+		inherited, err := tbl.CurrentSnapshot().Manifests(t.Context(), fs)
+		require.NoError(t, err)
+		require.Len(t, inherited, 1)
+
+		tracked := &unreadableListIO{memIO: fs}
+		tx := newOCCTable(t, tbl.Metadata(), tracked, cat).NewTransaction()
+		stageFiles(t, tx, "staged")
+		peerAppend(t, fs, cat, MainBranch, "peer")
+		tracked.unreadable = inherited[0].FilePath()
+
+		committed, err := tx.Commit(t.Context())
+		require.NoError(t, err)
+		require.Equal(t, []string{"base", "peer", "staged"},
+			branchFiles(t, fs, committed.Metadata(), MainBranch))
 	})
 }

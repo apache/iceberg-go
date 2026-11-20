@@ -622,77 +622,59 @@ func validateDataFilesExist(cc *conflictContext, referencedPaths []string) error
 	return dataFilesMissingError(missing, "missing")
 }
 
-// validateNoConcurrentDuplicateDataPaths checks whether any path this
-// transaction adds was also added by a concurrent snapshot and remains live.
-// Inspect the newest snapshot that changed each path, so a later deletion
-// releases it. An ambiguous add and delete in the same snapshot fails closed.
-func validateNoConcurrentDuplicateDataPaths(cc *conflictContext, addedPaths map[string]struct{}) error {
-	if cc == nil || len(addedPaths) == 0 || len(cc.concurrent) == 0 {
+// validateReplayDataPaths checks the live files in the parent a replay will
+// inherit. Staging already checked the original parent's immutable manifests,
+// so only manifests newly referenced by the replay parent need to be opened.
+func validateReplayDataPaths(
+	ctx context.Context, fs iceio.IO, original, parent *Snapshot,
+	paths map[string]struct{}, includeDeletes bool,
+) error {
+	if parent == nil || (original != nil && original.ManifestList != "" && original.ManifestList == parent.ManifestList) {
 		return nil
 	}
 
-	unresolved := make(map[string]struct{}, len(addedPaths))
-	for path := range addedPaths {
-		unresolved[path] = struct{}{}
-	}
-
-	for _, snap := range cc.concurrent {
-		if len(unresolved) == 0 {
-			break
-		}
-
-		// Resolve each candidate path against the newest snapshot that changed
-		// it. Prefer ADDED if a malformed snapshot contains both statuses for
-		// the same path, failing closed on an ambiguous live-file state.
-		changes := make(map[string]iceberg.ManifestEntryStatus)
-		if err := cc.forEachChangedEntryInSnapshot(snap, iceberg.ManifestContentData,
-			func(_ Snapshot, entry iceberg.ManifestEntry) error {
-				path := entry.DataFile().FilePath()
-				if _, ok := unresolved[path]; !ok {
-					return nil
-				}
-
-				switch entry.Status() {
-				case iceberg.EntryStatusADDED:
-					changes[path] = iceberg.EntryStatusADDED
-				case iceberg.EntryStatusDELETED:
-					if _, added := changes[path]; !added {
-						changes[path] = iceberg.EntryStatusDELETED
-					}
-				}
-
-				return nil
-			}); err != nil {
-			return err
-		}
-
-		for path, status := range changes {
-			delete(unresolved, path)
-			if status == iceberg.EntryStatusADDED {
-				return fmt.Errorf("%w: snapshot %d added data file %q already added by this transaction",
-					ErrDuplicateDataFiles, snap.SnapshotID, path)
+	var checked map[string]struct{}
+	if original != nil {
+		// The original snapshot may have expired. If its list is unavailable,
+		// scan the replay parent without pruning.
+		if manifests, err := original.Manifests(ctx, fs); err == nil {
+			checked = make(map[string]struct{}, len(manifests))
+			for _, manifest := range manifests {
+				checked[manifest.FilePath()] = struct{}{}
 			}
 		}
 	}
 
+	manifests, err := parent.Manifests(ctx, fs)
+	if err != nil {
+		return fmt.Errorf("read manifests for replay parent %d: %w", parent.SnapshotID, err)
+	}
+	for _, manifest := range manifests {
+		if !includeDeletes && manifest.ManifestContent() != iceberg.ManifestContentData {
+			continue
+		}
+		if _, ok := checked[manifest.FilePath()]; ok {
+			continue
+		}
+		for entry, err := range manifest.Entries(ctx, fs, true) {
+			if err != nil {
+				return fmt.Errorf("read entries for replay parent %d: %w", parent.SnapshotID, err)
+			}
+			path := entry.DataFile().FilePath()
+			if _, exists := paths[path]; !exists {
+				continue
+			}
+			conflict := ErrDuplicateDataFiles
+			if includeDeletes {
+				conflict = ErrConflictingDataFiles
+			}
+
+			return fmt.Errorf("%w: %w: replay parent %d already references file %q",
+				ErrTransactionUnusable, conflict, parent.SnapshotID, path)
+		}
+	}
+
 	return nil
-}
-
-// newDuplicateDataPathValidator snapshots staged paths rather than retaining
-// the caller's DataFile slice, which might be reused or changed after staging.
-func newDuplicateDataPathValidator(dataFiles []iceberg.DataFile) conflictValidatorFunc {
-	if len(dataFiles) == 0 {
-		return nil
-	}
-
-	paths := make(map[string]struct{}, len(dataFiles))
-	for _, file := range dataFiles {
-		paths[file.FilePath()] = struct{}{}
-	}
-
-	return func(cc *conflictContext) error {
-		return validateNoConcurrentDuplicateDataPaths(cc, paths)
-	}
 }
 
 // validateNoConcurrentDVs returns an error wrapping ErrConflictingDeleteFiles

@@ -177,27 +177,6 @@ func (t *Transaction) apply(updates []Update, reqs []Requirement) error {
 	return t.applyLocked(updates, reqs)
 }
 
-// applyWithDuplicateDataPathCheck stages the update and its retry validator
-// under one lock, so Commit cannot run between them.
-func (t *Transaction) applyWithDuplicateDataPathCheck(
-	updates []Update, reqs []Requirement, files []iceberg.DataFile,
-) error {
-	if err := t.checkNotNil(); err != nil {
-		return err
-	}
-	t.mx.Lock()
-	defer t.mx.Unlock()
-
-	if err := t.applyLocked(updates, reqs); err != nil {
-		return err
-	}
-	if validator := newDuplicateDataPathValidator(files); validator != nil {
-		t.validators = append(t.validators, validator)
-	}
-
-	return nil
-}
-
 // The caller must hold t.mx.
 func (t *Transaction) applyLocked(updates []Update, reqs []Requirement) error {
 	meta, err := t.txnMeta()
@@ -1171,6 +1150,7 @@ func (t *Transaction) ReplaceDataFilesByPath(ctx context.Context, filesToDelete,
 
 	commitUUID := uuid.New()
 	updater := t.updateSnapshot(wfs, snapshotProps, OpOverwrite).mergeOverwrite(&commitUUID, nil)
+	updater.retryDataPaths = setToAdd
 
 	for _, df := range markedForDeletion {
 		dvs.removeDataFile(updater, df)
@@ -1201,9 +1181,6 @@ func (t *Transaction) ReplaceDataFilesByPath(ctx context.Context, filesToDelete,
 	defer t.mx.Unlock()
 	if err := t.applyLocked(updates, reqs); err != nil {
 		return err
-	}
-	if validator := newDuplicateDataPathValidator(dataFiles); validator != nil {
-		t.validators = append(t.validators, validator)
 	}
 	if len(filesToAdd) > 0 {
 		// A replacement gets a newer data sequence number, so it would stop a
@@ -1647,14 +1624,6 @@ type dataFileCfg struct {
 	replacementPathValidator     *conflictValidatorFunc
 }
 
-func (cfg dataFileCfg) replacementRetryValidator(files []iceberg.DataFile) conflictValidatorFunc {
-	if cfg.replacementPathValidator != nil {
-		return *cfg.replacementPathValidator
-	}
-
-	return newDuplicateDataPathValidator(files)
-}
-
 // withRewriteSemantics marks an overwrite/replace operation as a
 // rewrite (compaction) rather than a user-facing overwrite. The
 // overwrite producer's default pre-commit conflict validator is
@@ -1814,6 +1783,9 @@ func (t *Transaction) AddDataFiles(ctx context.Context, dataFiles []iceberg.Data
 	}
 
 	appendFiles := t.appendSnapshotProducer(meta, wfs, snapshotProps)
+	if !cfg.skipDuplicateCheck {
+		appendFiles.retryDataPaths = setToAdd
+	}
 	for _, df := range dataFiles {
 		appendFiles.appendDataFile(df)
 	}
@@ -1823,11 +1795,7 @@ func (t *Transaction) AddDataFiles(ctx context.Context, dataFiles []iceberg.Data
 		return err
 	}
 
-	if cfg.skipDuplicateCheck {
-		return t.apply(updates, reqs)
-	}
-
-	return t.applyWithDuplicateDataPathCheck(updates, reqs, dataFiles)
+	return t.apply(updates, reqs)
 }
 
 // ReplaceDataFiles replaces files using pre-built DataFile objects.
@@ -1949,6 +1917,8 @@ func (t *Transaction) ReplaceDataFiles(ctx context.Context, filesToDelete, files
 
 	commitUUID := uuid.New()
 	updater := t.updateSnapshot(wfs, snapshotProps, op).mergeOverwrite(&commitUUID, nil)
+	updater.retryDataPaths = setToAdd
+	updater.retryPathCheckIncludesDeletes = cfg.replacementPathValidator != nil
 	if cfg.rewriteSemantics {
 		updater.setSkipDefaultValidator(true)
 	}
@@ -1983,8 +1953,8 @@ func (t *Transaction) ReplaceDataFiles(ctx context.Context, filesToDelete, files
 		// delete from applying.
 		t.validators = append(t.validators, rewriteValidator(markedForDeletion))
 	}
-	if validator := cfg.replacementRetryValidator(filesToAdd); validator != nil {
-		t.validators = append(t.validators, validator)
+	if cfg.replacementPathValidator != nil {
+		t.validators = append(t.validators, *cfg.replacementPathValidator)
 	}
 
 	return nil
@@ -2361,6 +2331,8 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 
 	commitUUID := uuid.New()
 	updater := t.updateSnapshot(wfs, snapshotProps, op).mergeOverwrite(&commitUUID, nil)
+	updater.retryDataPaths = setToAdd
+	updater.retryPathCheckIncludesDeletes = cfg.replacementPathValidator != nil
 	if cfg.rewriteSemantics {
 		updater.setSkipDefaultValidator(true)
 	}
@@ -2416,8 +2388,8 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 	if validator != nil {
 		t.validators = append(t.validators, validator)
 	}
-	if duplicateValidator := cfg.replacementRetryValidator(dataFilesToAdd); duplicateValidator != nil {
-		t.validators = append(t.validators, duplicateValidator)
+	if cfg.replacementPathValidator != nil {
+		t.validators = append(t.validators, *cfg.replacementPathValidator)
 	}
 
 	return nil
@@ -2539,6 +2511,9 @@ func (t *Transaction) AddDataFilesByPath(ctx context.Context, filePaths []string
 		return err
 	}
 	updater := t.appendSnapshotProducer(meta, wfs, snapshotProps)
+	if !ignoreDuplicates {
+		updater.retryDataPaths = set
+	}
 
 	dataFiles, err := filesToDataFiles(ctx, fs, meta, filePaths, addFilesOp.concurrency, partitionValues)
 	if err != nil {
@@ -2553,11 +2528,7 @@ func (t *Transaction) AddDataFilesByPath(ctx context.Context, filePaths []string
 		return err
 	}
 
-	if ignoreDuplicates {
-		return t.apply(updates, reqs)
-	}
-
-	return t.applyWithDuplicateDataPathCheck(updates, reqs, dataFiles)
+	return t.apply(updates, reqs)
 }
 
 // OverwriteTable overwrites the table data using an Arrow Table.
