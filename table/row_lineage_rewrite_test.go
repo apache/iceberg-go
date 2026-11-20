@@ -78,7 +78,13 @@ func readRowIDsByID(t *testing.T, ctx context.Context, tbl *table.Table) map[int
 func readLineageColumnByID(t *testing.T, ctx context.Context, tbl *table.Table, column string) map[int64]int64 {
 	t.Helper()
 
-	_, itr, err := tbl.Scan(table.WithRowLineage()).ToArrowRecords(ctx)
+	return readLineageColumnFromScan(t, ctx, tbl.Scan(table.WithRowLineage()), column)
+}
+
+func readLineageColumnFromScan(t *testing.T, ctx context.Context, scan *table.Scan, column string) map[int64]int64 {
+	t.Helper()
+
+	_, itr, err := scan.ToArrowRecords(ctx)
 	require.NoError(t, err)
 
 	got := map[int64]int64{}
@@ -589,30 +595,45 @@ func TestCompactionRejectsIncompleteRowLineage(t *testing.T) {
 func TestCompactionCanAssignFirstRowIDsOnLegacyBranch(t *testing.T) {
 	const branch = "legacy"
 	tbl := appendRowsOnRef(t, newV2RowLineageTestTable(t), branch, 1, 2)
+	tbl = appendRowsOnRef(t, tbl, branch, 3, 4)
 	upgrade := tbl.NewTransaction()
 	require.NoError(t, upgrade.UpgradeFormatVersion(3))
 	tbl, err := upgrade.Commit(t.Context())
 	require.NoError(t, err)
-	tbl = appendRows(t, tbl, `[{"id":3},{"id":4}]`)
+	tbl = appendRows(t, tbl, `[{"id":5},{"id":6}]`)
 	require.NotNil(t, tbl.CurrentSnapshot().FirstRowID)
 	require.Nil(t, tbl.SnapshotByName(branch).FirstRowID)
 
-	scan, err := tbl.Scan().UseRef(branch)
+	scan, err := tbl.Scan(table.WithRowLineage()).UseRef(branch)
 	require.NoError(t, err)
 	defer scan.Close()
 	tasks, err := scan.PlanFiles(t.Context())
 	require.NoError(t, err)
-	require.Len(t, tasks, 1)
-	require.Nil(t, tasks[0].FirstRowID)
+	require.Len(t, tasks, 2)
+	for _, task := range tasks {
+		require.Nil(t, task.FirstRowID)
+	}
+	before := readLineageColumnFromScan(t, t.Context(), scan, iceberg.LastUpdatedSequenceNumberColumnName)
+	require.Equal(t, map[int64]int64{1: 1, 2: 1, 3: 2, 4: 2}, before)
 
 	txn, err := tbl.NewTransactionOnBranch(branch)
 	require.NoError(t, err)
+	incomplete := slices.Clone(tasks)
+	incomplete[0].DataSequenceNumber = nil
+	_, err = txn.RewriteDataFiles(t.Context(), []table.CompactionTaskGroup{{Tasks: incomplete}}, table.RewriteDataFilesOptions{})
+	require.ErrorIs(t, err, table.ErrInvalidOperation)
+	require.ErrorContains(t, err, "data sequence number")
+
 	result, err := txn.RewriteDataFiles(t.Context(), []table.CompactionTaskGroup{{Tasks: tasks}},
 		table.RewriteDataFilesOptions{PartialProgress: true})
 	require.NoError(t, err)
 	require.Equal(t, 1, result.RewrittenGroups)
 	require.NotNil(t, result.Table.SnapshotByName(branch).FirstRowID)
-	require.ElementsMatch(t, []int64{1, 2}, idsOnRef(t, result.Table, branch))
+	compacted, err := result.Table.Scan(table.WithRowLineage()).UseRef(branch)
+	require.NoError(t, err)
+	defer compacted.Close()
+	assert.Equal(t, before, readLineageColumnFromScan(t, t.Context(), compacted, iceberg.LastUpdatedSequenceNumberColumnName))
+	assert.Len(t, readLineageColumnFromScan(t, t.Context(), compacted, iceberg.RowIDColumnName), 4)
 }
 
 func TestAtomicCompactionChecksLineageBeforeWritingAnyGroup(t *testing.T) {

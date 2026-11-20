@@ -485,7 +485,7 @@ func (t *Transaction) RewriteDataFiles(ctx context.Context, groups []CompactionT
 		return nil, err
 	}
 	for _, group := range groups {
-		if _, err := compactionRowLineage(staged.Metadata(), t.branch, group.Tasks); err != nil {
+		if err := validateCompactionRowLineage(staged.Metadata(), t.branch, group.Tasks); err != nil {
 			return nil, err
 		}
 	}
@@ -569,10 +569,10 @@ func (t *Transaction) RewriteDataFiles(ctx context.Context, groups []CompactionT
 // source file in full; partial ranges or residual filters would otherwise
 // silently discard rows when the original task is replaced.
 //
-// Once a v3 table has assigned row IDs, standalone workers require each task
-// to carry its inherited first row ID and data sequence number. Use a local
-// scan plan where the catalog allows it. Preserve the source files' inherited
-// first row IDs when transferring results to the coordinator.
+// On a v3 table, each task must carry its inherited data sequence number.
+// Once the table has assigned row IDs, standalone workers also require the
+// inherited first row ID. Use a local scan plan where the catalog allows it
+// and preserve the source files' first row IDs when transferring results.
 //
 // In-process callers should prefer [Transaction.RewriteDataFiles],
 // which drives this and the commit step in one call.
@@ -627,11 +627,13 @@ func executeCompactionGroup(ctx context.Context, tbl *Table, branch string, grou
 		scanOpts = append(scanOpts, WithArrowBatchSize(cfg.arrowBatchSize))
 	}
 
-	preserveLineage, err := compactionRowLineage(tbl.metadata, branch, group.Tasks)
-	if err != nil {
+	if err := validateCompactionRowLineage(tbl.metadata, branch, group.Tasks); err != nil {
 		return CompactionGroupResult{}, err
 	}
+	preserveLineage := tbl.metadata.FormatVersion() >= 3
 	if preserveLineage {
+		// Legacy rows keep their sequence numbers. Their null row IDs
+		// inherit from the new files when the first v3 snapshot commits.
 		scanOpts = append(scanOpts, WithRowLineage())
 	}
 
@@ -703,34 +705,32 @@ func executeCompactionGroup(ctx context.Context, tbl *Table, branch string, grou
 	}, nil
 }
 
-func compactionRowLineage(meta Metadata, branch string, tasks []FileScanTask) (bool, error) {
+func validateCompactionRowLineage(meta Metadata, branch string, tasks []FileScanTask) error {
 	if len(tasks) == 0 || meta.FormatVersion() < 3 {
-		return false, nil
+		return nil
 	}
 
 	// A branch can still point to a pre-v3 snapshot after another branch has
 	// assigned row IDs. Standalone workers do not know the target branch.
-	required := meta.NextRowID() > 0
+	requireRowID := meta.NextRowID() > 0
 	if branch != "" {
 		parent := latestSnapshotForBranch(meta, branch)
-		required = parent != nil && parent.FirstRowID != nil
+		requireRowID = parent != nil && parent.FirstRowID != nil
 	}
-	if !required && !slices.ContainsFunc(tasks, func(task FileScanTask) bool { return task.FirstRowID != nil }) {
-		return false, nil
-	}
+	requireRowID = requireRowID || slices.ContainsFunc(tasks, func(task FileScanTask) bool { return task.FirstRowID != nil })
 
 	for _, task := range tasks {
 		switch {
 		case task.File == nil:
-			return false, fmt.Errorf("%w: compaction task has no data file", ErrInvalidOperation)
-		case task.FirstRowID == nil || *task.FirstRowID < 0:
-			return false, fmt.Errorf("%w: cannot preserve v3 row lineage for %q without a valid first row ID; replan from the target branch", ErrInvalidOperation, task.File.FilePath())
+			return fmt.Errorf("%w: compaction task has no data file", ErrInvalidOperation)
+		case requireRowID && (task.FirstRowID == nil || *task.FirstRowID < 0):
+			return fmt.Errorf("%w: cannot preserve v3 row lineage for %q without a valid first row ID; replan from the target branch", ErrInvalidOperation, task.File.FilePath())
 		case task.DataSequenceNumber == nil || *task.DataSequenceNumber < 0:
-			return false, fmt.Errorf("%w: cannot preserve v3 row lineage for %q without a valid data sequence number", ErrInvalidOperation, task.File.FilePath())
+			return fmt.Errorf("%w: cannot preserve v3 row lineage for %q without a valid data sequence number", ErrInvalidOperation, task.File.FilePath())
 		}
 	}
 
-	return true, nil
+	return nil
 }
 
 // rewriteDataFilesPartial executes groups and commits them in durable batches.
