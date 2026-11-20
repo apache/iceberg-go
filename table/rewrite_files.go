@@ -68,7 +68,8 @@ type RewriteFiles struct {
 	err                     error
 	committed               bool
 
-	workerSourceWithoutID string
+	workerSourceWithoutID   string
+	workerLineageUnverified bool
 }
 
 type rewriteDeleteFileAddition struct {
@@ -285,6 +286,8 @@ func (r *RewriteFiles) AddFile(df iceberg.DataFile) *RewriteFiles {
 //	    rewrite.ApplyResult(gr)
 //	}
 //	if err := rewrite.Commit(ctx); err != nil { ... }
+//
+// For v3 rewrites, results that add files must set [CompactionGroupResult.PreservedRowLineage].
 func (r *RewriteFiles) ApplyResult(gr CompactionGroupResult) *RewriteFiles {
 	for _, df := range gr.OldDataFiles {
 		r.DeleteFile(df)
@@ -301,6 +304,9 @@ func (r *RewriteFiles) ApplyResult(gr CompactionGroupResult) *RewriteFiles {
 	}
 	for _, df := range gr.SafeDeletionVectors {
 		r.removeAutomaticDeleteFile(df)
+	}
+	if len(gr.NewDataFiles) > 0 && !gr.PreservedRowLineage {
+		r.workerLineageUnverified = true
 	}
 
 	return r
@@ -339,14 +345,20 @@ func (r *RewriteFiles) Commit(ctx context.Context) error {
 	if len(r.dataFilesToDelete) == 0 && len(r.dataFilesToAdd) > 0 {
 		return fmt.Errorf("%w: rewrite must delete at least one data file when adding data files", ErrInvalidOperation)
 	}
-	if r.workerSourceWithoutID != "" {
+	if r.workerLineageUnverified || r.workerSourceWithoutID != "" {
 		meta, err := r.txn.txnMeta()
 		if err != nil {
 			return err
 		}
-		if parent := r.txn.planningSnapshot(meta); parent != nil && parent.FirstRowID != nil {
-			return fmt.Errorf("%w: worker result for %q has no first row ID; replan from the target branch",
-				ErrInvalidOperation, r.workerSourceWithoutID)
+		if meta.formatVersion >= 3 {
+			if r.workerLineageUnverified {
+				return fmt.Errorf("%w: worker result did not confirm v3 row lineage preservation; replan and rerun compaction with a v3 worker",
+					ErrInvalidOperation)
+			}
+			if parent := r.txn.planningSnapshot(meta); r.workerSourceWithoutID != "" && parent != nil && parent.FirstRowID != nil {
+				return fmt.Errorf("%w: worker result for %q has no first row ID; replan from the target branch",
+					ErrInvalidOperation, r.workerSourceWithoutID)
+			}
 		}
 	}
 

@@ -1137,7 +1137,8 @@ func compactWithDeletes(ctx context.Context, tx *table.Transaction, automatic bo
 		return tx.ReplaceFiles(ctx, data, compacted, dels, nil)
 	}
 
-	result := table.CompactionGroupResult{OldDataFiles: data, NewDataFiles: compacted}
+	// The fixture uses metadata-only files and exercises the commit path.
+	result := table.CompactionGroupResult{OldDataFiles: data, NewDataFiles: compacted, PreservedRowLineage: true}
 	for _, del := range dels {
 		if table.IsDeletionVector(del) {
 			result.SafeDeletionVectors = append(result.SafeDeletionVectors, del)

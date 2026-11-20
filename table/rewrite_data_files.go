@@ -177,6 +177,10 @@ type CompactionGroupResult struct {
 	// BytesAfter is the sum of [iceberg.DataFile.FileSizeBytes] across
 	// NewDataFiles.
 	BytesAfter int64
+
+	// PreservedRowLineage reports that the worker wrote v3 row lineage
+	// columns. Preserve it when transferring results to a coordinator.
+	PreservedRowLineage bool
 }
 
 // RewriteDataFilesOptions bundles the per-rewrite knobs for
@@ -702,6 +706,7 @@ func executeCompactionGroup(ctx context.Context, tbl *Table, branch string, grou
 		SafeDeletionVectors: CollectSafeDeletionVectors(group.Tasks),
 		BytesBefore:         group.TotalSizeBytes,
 		BytesAfter:          bytesAfter,
+		PreservedRowLineage: preserveLineage,
 	}, nil
 }
 

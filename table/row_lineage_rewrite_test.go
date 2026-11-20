@@ -729,3 +729,35 @@ func TestCompactionRejectsWorkerResultAfterFirstRowIDsAreAssigned(t *testing.T) 
 	require.ErrorIs(t, err, table.ErrInvalidOperation)
 	require.ErrorContains(t, err, "replan")
 }
+
+func TestCompactionRejectsV2WorkerOutputAfterMetadataUpgrade(t *testing.T) {
+	tbl := appendRows(t, newV2RowLineageTestTable(t), `[{"id":1},{"id":2}]`)
+	tbl = appendRows(t, tbl, `[{"id":3},{"id":4}]`)
+	tasks, err := tbl.Scan().PlanFiles(t.Context())
+	require.NoError(t, err)
+	group := table.CompactionTaskGroup{Tasks: tasks}
+	oldResult, err := table.ExecuteCompactionGroup(t.Context(), tbl, group)
+	require.NoError(t, err)
+	require.False(t, oldResult.PreservedRowLineage)
+
+	upgrade := tbl.NewTransaction()
+	require.NoError(t, upgrade.UpgradeFormatVersion(3))
+	tbl, err = upgrade.Commit(t.Context())
+	require.NoError(t, err)
+	require.Nil(t, tbl.CurrentSnapshot().FirstRowID)
+	before := readLineageColumnByID(t, t.Context(), tbl, iceberg.LastUpdatedSequenceNumberColumnName)
+	require.Equal(t, map[int64]int64{1: 1, 2: 1, 3: 2, 4: 2}, before)
+
+	tx := tbl.NewTransaction()
+	err = tx.NewRewrite(nil).ApplyResult(oldResult).Commit(t.Context())
+	require.ErrorIs(t, err, table.ErrInvalidOperation)
+	require.ErrorContains(t, err, "v3 row lineage preservation")
+
+	result, err := table.ExecuteCompactionGroup(t.Context(), tbl, group)
+	require.NoError(t, err)
+	require.True(t, result.PreservedRowLineage)
+	require.NoError(t, tx.NewRewrite(nil).ApplyResult(result).Commit(t.Context()))
+	compacted, err := tx.Commit(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, before, readLineageColumnByID(t, t.Context(), compacted, iceberg.LastUpdatedSequenceNumberColumnName))
+}
