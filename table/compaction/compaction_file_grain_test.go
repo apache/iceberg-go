@@ -101,6 +101,8 @@ func TestPlanCompactionRejectsConflictingSplitMetadata(t *testing.T) {
 		{"missing first row ID", func(task *table.FileScanTask) { task.FirstRowID = nil }},
 		{"data sequence number", func(task *table.FileScanTask) { value := int64(4); task.DataSequenceNumber = &value }},
 		{"missing data sequence number", func(task *table.FileScanTask) { task.DataSequenceNumber = nil }},
+		{"planning snapshot", func(task *table.FileScanTask) { task.PlanningSnapshotID = new(int64(4)) }},
+		{"missing planning snapshot", func(task *table.FileScanTask) { task.PlanningSnapshotID = nil }},
 		{"positional deletes", func(task *table.FileScanTask) { task.DeleteFiles = []iceberg.DataFile{newDeleteFile("other.pos")} }},
 		{"same delete path, different metadata", func(task *table.FileScanTask) {
 			task.DeleteFiles = []iceberg.DataFile{newDeleteFile("same.pos")}
@@ -125,6 +127,7 @@ func TestPlanCompactionRejectsConflictingSplitMetadata(t *testing.T) {
 				first.DeleteFiles[0] = &testDataFile{path: "same.pos", size: 1024, records: 5, content: iceberg.EntryContentPosDeletes}
 			}
 			first.FirstRowID, first.DataSequenceNumber = new(int64), new(int64)
+			first.PlanningSnapshotID = new(int64(3))
 			if tc.name == "delete content offset" {
 				first.DeleteFiles = []iceberg.DataFile{offsetDataFile{DataFile: newDeleteFile("same.puffin"), offset: 1}}
 			}

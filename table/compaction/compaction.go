@@ -377,6 +377,7 @@ func sameCompactionMetadata(a, b table.FileScanTask) bool {
 
 	return sameCompactionOptionalInt64(a.FirstRowID, b.FirstRowID) &&
 		sameCompactionOptionalInt64(a.DataSequenceNumber, b.DataSequenceNumber) &&
+		sameCompactionOptionalInt64(a.PlanningSnapshotID, b.PlanningSnapshotID) &&
 		equalDataFiles(a.DeleteFiles, b.DeleteFiles) &&
 		equalDataFiles(a.EqualityDeleteFiles, b.EqualityDeleteFiles) &&
 		equalDataFiles(a.DeletionVectorFiles, b.DeletionVectorFiles)

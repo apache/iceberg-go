@@ -432,7 +432,17 @@ func (c *conflictContext) manifestsFor(snap Snapshot) ([]iceberg.ManifestFile, e
 // ErrCommitDiverged; the commit cannot be safely revalidated without
 // a refresh-and-rebuild.
 func newConflictContext(ctx context.Context, base, current Metadata, branch string, fs iceio.IO, caseSensitive bool) (*conflictContext, error) {
-	currentHead := current.SnapshotByName(branch)
+	var baseID *int64
+	if baseHead := base.SnapshotByName(branch); baseHead != nil {
+		baseID = &baseHead.SnapshotID
+	}
+
+	return newConflictContextAt(ctx, current, branch, current.SnapshotByName(branch), baseID, fs, caseSensitive)
+}
+
+// newConflictContextAt walks from the head the operation will inherit to the
+// snapshot its reads were based on.
+func newConflictContextAt(ctx context.Context, current Metadata, branch string, currentHead *Snapshot, baseID *int64, fs iceio.IO, caseSensitive bool) (*conflictContext, error) {
 	if currentHead == nil {
 		// Branch does not exist on the current side — either it was
 		// deleted concurrently or the writer is creating it. Treat as
@@ -440,8 +450,7 @@ func newConflictContext(ctx context.Context, base, current Metadata, branch stri
 		return nil, fmt.Errorf("%w: branch %q missing on current metadata", ErrCommitDiverged, branch)
 	}
 
-	baseHead := base.SnapshotByName(branch)
-	if baseHead == nil {
+	if baseID == nil {
 		// Writer's base has no view of this branch (empty table or
 		// branch created concurrently). Every snapshot now reachable
 		// from the branch head is concurrent relative to base.
@@ -465,10 +474,10 @@ func newConflictContext(ctx context.Context, base, current Metadata, branch stri
 		}, nil
 	}
 
-	concurrent, baseFound := AncestorsBetween(currentHead.SnapshotID, baseHead.SnapshotID, current.SnapshotByID)
+	concurrent, baseFound := AncestorsBetween(currentHead.SnapshotID, *baseID, current.SnapshotByID)
 	if !baseFound {
 		return nil, fmt.Errorf("%w: base snapshot %d not found in %s ancestry from %d",
-			ErrCommitDiverged, baseHead.SnapshotID, branch, currentHead.SnapshotID)
+			ErrCommitDiverged, *baseID, branch, currentHead.SnapshotID)
 	}
 
 	return &conflictContext{
@@ -482,7 +491,7 @@ func newConflictContext(ctx context.Context, base, current Metadata, branch stri
 }
 
 // forEachEntryInSnapshot visits entries in the selected manifest content
-// whose status matches includeStatus and whose entry snapshot ID matches
+// whose status is included and whose entry snapshot ID matches
 // snap. Entry snapshot IDs provide attribution across manifest rewrites,
 // which may carry entries from an earlier snapshot in a newer manifest.
 //
@@ -490,7 +499,7 @@ func newConflictContext(ctx context.Context, base, current Metadata, branch stri
 func (c *conflictContext) forEachEntryInSnapshot(
 	snap Snapshot,
 	content iceberg.ManifestContent,
-	includeStatus func(iceberg.ManifestEntryStatus) bool,
+	includeAdded, includeDeleted bool,
 	visit func(Snapshot, iceberg.ManifestEntry) error,
 ) error {
 	manifests, err := c.manifestsFor(snap)
@@ -501,12 +510,18 @@ func (c *conflictContext) forEachEntryInSnapshot(
 		if content >= 0 && mf.ManifestContent() != content {
 			continue
 		}
+		if !includeAdded && mf.DeletedDataFiles() == 0 {
+			continue
+		}
 
 		for entry, err := range mf.Entries(c.ctx, c.manifestReadIO(), false) {
 			if err != nil {
 				return fmt.Errorf("loading entries for concurrent snapshot %d: %w", snap.SnapshotID, err)
 			}
-			if entry.SnapshotID() != snap.SnapshotID || !includeStatus(entry.Status()) {
+			status := entry.Status()
+			if entry.SnapshotID() != snap.SnapshotID ||
+				(!includeAdded || status != iceberg.EntryStatusADDED) &&
+					(!includeDeleted || status != iceberg.EntryStatusDELETED) {
 				continue
 			}
 			if err := visit(snap, entry); err != nil {
@@ -523,8 +538,7 @@ func (c *conflictContext) forEachEntryInSnapshot(
 // so attribution uses the entry snapshot ID instead of the manifest snapshot ID.
 func (c *conflictContext) forEachAddedEntry(content iceberg.ManifestContent, visit func(Snapshot, iceberg.ManifestEntry) error) error {
 	for _, snap := range c.concurrent {
-		if err := c.forEachEntryInSnapshot(snap, content,
-			func(status iceberg.ManifestEntryStatus) bool { return status == iceberg.EntryStatusADDED }, visit); err != nil {
+		if err := c.forEachEntryInSnapshot(snap, content, true, false, visit); err != nil {
 			return err
 		}
 	}
@@ -540,9 +554,20 @@ func (c *conflictContext) forEachChangedEntryInSnapshot(
 	content iceberg.ManifestContent,
 	visit func(Snapshot, iceberg.ManifestEntry) error,
 ) error {
-	return c.forEachEntryInSnapshot(snap, content, func(status iceberg.ManifestEntryStatus) bool {
-		return status == iceberg.EntryStatusADDED || status == iceberg.EntryStatusDELETED
-	}, visit)
+	return c.forEachEntryInSnapshot(snap, content, true, true, visit)
+}
+
+func (c *conflictContext) forEachRemovedDataFile(visit func(snapshotID int64, path string) error) error {
+	for _, snap := range c.concurrent {
+		if err := c.forEachEntryInSnapshot(snap, iceberg.ManifestContentData, false, true,
+			func(snap Snapshot, entry iceberg.ManifestEntry) error {
+				return visit(snap.SnapshotID, entry.DataFile().FilePath())
+			}); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 // validateDataFilesExist verifies that every file path in
