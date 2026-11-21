@@ -2076,6 +2076,7 @@ func (p parquetFormat) DataFileStatsFromMeta(meta Metadata, statsCols map[int]St
 	for fieldID := range invalidateCol {
 		delete(nullValueCounts, fieldID)
 		delete(colAggs, fieldID)
+		incompleteBounds[fieldID] = nil
 	}
 	for fieldID := range missingNulls {
 		delete(nullValueCounts, fieldID)
