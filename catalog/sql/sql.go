@@ -183,7 +183,7 @@ const (
 )
 
 func init() {
-	catalog.MustRegister("sql", catalog.RegistrarFunc(func(ctx context.Context, name string, p iceberg.Properties) (c catalog.Catalog, err error) {
+	catalog.MustRegister("sql", catalog.IORegistryRegistrarFunc(func(ctx context.Context, name string, p iceberg.Properties, registry *io.Registry) (c catalog.Catalog, err error) {
 		driver, ok := p[DriverKey]
 		if !ok {
 			return nil, errors.New("must provide driver to pass to sql.Open")
@@ -202,7 +202,7 @@ func init() {
 
 		// Here, name is the loader-supplied catalog name and is persisted as the
 		// catalog_name partition key on every row in the iceberg_tables and iceberg_namespace_properties.
-		cat, err := NewCatalog(ctx, name, sqldb, SupportedDialect(dialect), p)
+		cat, err := NewCatalog(ctx, name, sqldb, SupportedDialect(dialect), p, WithIORegistry(registry))
 		if err != nil {
 			_ = sqldb.Close()
 

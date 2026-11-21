@@ -24,6 +24,7 @@ import (
 	"testing"
 
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/catalog"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/stretchr/testify/require"
 )
@@ -106,10 +107,11 @@ func TestHadoopCatalogsWithSameSchemeStayIsolated(t *testing.T) {
 		require.NoError(t, registry.Register("hadoop-shared-scheme", func(context.Context, *url.URL, map[string]string) (iceio.IO, error) {
 			return fs, nil
 		}))
-		cat, err := NewCatalog(t.Context(), "test", warehouse,
-			iceberg.Properties{"allow-unsafe-commits": "true"}, WithIORegistry(registry))
+		cat, err := catalog.Load(t.Context(), "test",
+			iceberg.Properties{"type": "hadoop", "warehouse": warehouse, "allow-unsafe-commits": "true"},
+			catalog.WithIORegistry(registry))
 		require.NoError(t, err)
-		catalogs[i] = cat
+		catalogs[i] = cat.(*Catalog)
 	}
 
 	for i, cat := range catalogs {

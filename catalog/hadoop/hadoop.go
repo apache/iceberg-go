@@ -47,11 +47,11 @@ import (
 )
 
 func init() {
-	catalog.MustRegister(string(catalog.Hadoop), catalog.RegistrarFunc(
-		func(ctx context.Context, name string, props iceberg.Properties) (catalog.Catalog, error) {
+	catalog.MustRegister(string(catalog.Hadoop), catalog.IORegistryRegistrarFunc(
+		func(ctx context.Context, name string, props iceberg.Properties, registry *io.Registry) (catalog.Catalog, error) {
 			warehouse := props.Get("warehouse", "")
 
-			return NewCatalog(ctx, name, warehouse, props)
+			return NewCatalog(ctx, name, warehouse, props, WithIORegistry(registry))
 		},
 	))
 }

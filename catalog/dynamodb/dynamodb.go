@@ -30,6 +30,7 @@ import (
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
+	"github.com/apache/iceberg-go/catalog/internal"
 	icebergio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/metrics"
 	"github.com/apache/iceberg-go/table"
@@ -60,12 +61,13 @@ type item = map[string]types.AttributeValue
 // emptiness checks use consistent reads; concurrent namespace deletion is
 // coordinated with Go writers, while Java writers retain Java's weaker behavior.
 type Catalog struct {
-	name      string
-	tableName string
-	props     iceberg.Properties
-	awsConfig aws.Config
-	client    *dynamodb.Client
-	reporter  metrics.CachedReporter
+	name       string
+	tableName  string
+	props      iceberg.Properties
+	ioRegistry *icebergio.Registry
+	awsConfig  aws.Config
+	client     *dynamodb.Client
+	reporter   metrics.CachedReporter
 }
 
 var (
@@ -74,7 +76,7 @@ var (
 )
 
 func init() {
-	catalog.MustRegister("dynamodb", catalog.RegistrarFunc(func(ctx context.Context, name string, props iceberg.Properties) (catalog.Catalog, error) {
+	catalog.MustRegister("dynamodb", catalog.IORegistryRegistrarFunc(func(ctx context.Context, name string, props iceberg.Properties, registry *icebergio.Registry) (catalog.Catalog, error) {
 		var cfg aws.Config
 		if supplied := utils.GetAWSConfig(ctx); supplied != nil {
 			cfg = supplied.Copy()
@@ -89,7 +91,13 @@ func init() {
 			cfg.Region = region
 		}
 
-		return NewCatalog(ctx, name, cfg, props)
+		cat, err := NewCatalog(ctx, name, cfg, props)
+		if err != nil {
+			return nil, err
+		}
+		cat.ioRegistry = registry
+
+		return cat, nil
 	}))
 }
 
@@ -263,7 +271,7 @@ func properties(entry item) iceberg.Properties {
 
 func (c *Catalog) fileSystem(props iceberg.Properties, location string) table.FSysF {
 	return func(ctx context.Context) (icebergio.IO, error) {
-		return icebergio.LoadFS(utils.WithAWSConfig(ctx, &c.awsConfig), props, location)
+		return internal.LoadFSWithRegistry(utils.WithAWSConfig(ctx, &c.awsConfig), c.ioRegistry, props, location)
 	}
 }
 

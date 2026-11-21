@@ -19,6 +19,7 @@ package hive
 
 import (
 	"context"
+	"net"
 	"net/url"
 	"os"
 	"testing"
@@ -32,6 +33,21 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
+
+func TestHiveLoaderUsesScopedIORegistry(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, listener.Close()) })
+
+	registry := &iceio.Registry{}
+	loaded, err := catalog.Load(t.Context(), "isolated", iceberg.Properties{
+		"type": "hive",
+		URI:    "thrift://" + listener.Addr().String(),
+	}, catalog.WithIORegistry(registry))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, loaded.Close()) })
+	require.Same(t, registry, loaded.(*Catalog).opts.ioRegistry)
+}
 
 func TestHiveIsolatedIORegistry(t *testing.T) {
 	const scheme = "hive-private-registry"

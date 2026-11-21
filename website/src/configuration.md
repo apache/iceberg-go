@@ -461,13 +461,16 @@ fs, err := registry.LoadFS(ctx, props, "myfs://bucket/key")
 
 `io.NewRegistry()` copies schemes already registered globally (including blank-imported cloud backends) but keeps later registrations independent. `registry.Clone()` makes an isolated copy of another registry. `registry.Names()` lists the schemes registered in that instance. `registry.LoadFSFunc()` is the lazy factory equivalent. Global `io.LoadFS()` and `io.LoadFSFunc()` continue using the default registry.
 
-Pass the catalog's `WithIORegistry(registry)` option to `NewCatalog` in
-Glue, Hadoop, Hive, REST, or SQL. For direct view metadata creation or
-writes, pass `view.WithIORegistry(registry)` to the view helper.
+Pass `catalog.WithIORegistry(registry)` to `catalog.Load` or `(*catalog.Registry).Load`
+to select FileIO for a built-in catalog. For DynamoDB, use a catalog loader to
+supply a scoped FileIO registry. Glue, Hadoop, Hive, REST, and SQL also accept
+their own `WithIORegistry` option in `NewCatalog`. View metadata helpers accept
+`view.WithIORegistry(registry)`.
+
 Omitting the option or passing nil uses the global registry. An empty
-non-nil registry has no registered schemes. A catalog-scoped registry does
-not affect `catalog.Load`, which uses the global registry with the built-in
-catalog registrars.
+non-nil registry has no registered schemes. A custom factory must implement
+`catalog.IORegistryRegistrar` to receive a non-nil scoped registry. Otherwise the
+loader returns an error wrapping `iceberg.ErrNotImplemented`.
 
 The catalog holds the supplied registry, so registering or unregistering a
 scheme affects future FileIO resolutions. Hadoop opens its warehouse
@@ -503,7 +506,11 @@ func init() {
 }
 ```
 
-After registration, `catalog.Load(ctx, "default", iceberg.Properties{"type": "mycatalog", ...})` will route to the factory. Custom catalogs must implement `Close() error` to satisfy `catalog.Catalog`, and callers must close them when finished. Built-in types: `rest`, `hive`, `glue`, `sql`, `hadoop`.
+After registration, `catalog.Load(ctx, "default", iceberg.Properties{"type": "mycatalog", ...})` will route to the factory. Custom catalogs must implement `Close() error` to satisfy `catalog.Catalog`, and callers must close them when finished. Built-in types include `rest`, `hive`, `glue`, `sql`, `hadoop`, and `dynamodb`.
+
+To opt in to `catalog.WithIORegistry`, implement `catalog.IORegistryRegistrar` or
+register a `catalog.IORegistryRegistrarFunc`. Other factories return an error
+wrapping `iceberg.ErrNotImplemented` when called with a non-nil FileIO registry.
 
 `catalog.GetRegisteredCatalogs()` returns the current list; `catalog.Unregister(catalogType)` removes one.
 
