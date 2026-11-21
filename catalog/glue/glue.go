@@ -98,13 +98,13 @@ var (
 )
 
 func init() {
-	catalog.MustRegister("glue", catalog.RegistrarFunc(func(ctx context.Context, name string, props iceberg.Properties) (catalog.Catalog, error) {
+	catalog.MustRegister("glue", catalog.IORegistryRegistrarFunc(func(ctx context.Context, name string, props iceberg.Properties, registry *io.Registry) (catalog.Catalog, error) {
 		awsConfig, err := toAwsConfig(ctx, props)
 		if err != nil {
 			return nil, err
 		}
 
-		return NewCatalog(WithName(name), WithAWSConfig(awsConfig), WithAWSProperties(AWSProperties(props)))
+		return NewCatalog(WithName(name), WithAWSConfig(awsConfig), WithAWSProperties(AWSProperties(props)), WithIORegistry(registry))
 	}))
 }
 

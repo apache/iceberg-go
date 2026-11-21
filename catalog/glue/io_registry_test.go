@@ -25,6 +25,7 @@ import (
 	"testing"
 
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/catalog"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -48,8 +49,12 @@ func TestGlueLoadTableWithIsolatedIORegistry(t *testing.T) {
 		Name: aws.String("tbl"), DatabaseName: aws.String("db"), TableType: aws.String(glueTableType),
 		Parameters: map[string]string{tableParamTableType: glueTypeIceberg, tableParamMetadataLocation: metadataLocation},
 	}}, nil).Once()
-	cat, err := NewCatalog(WithAWSConfig(aws.Config{Region: "us-east-1"}), WithIORegistry(registry))
+	loadedCatalog, err := catalog.Load(t.Context(), "isolated", iceberg.Properties{
+		"type": "glue", Region: "us-east-1", AccessKeyID: "test", SecretAccessKey: "test",
+	}, catalog.WithIORegistry(registry))
 	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, loadedCatalog.Close()) })
+	cat := loadedCatalog.(*Catalog)
 	cat.glueSvc = client
 	tbl, err := cat.LoadTable(t.Context(), TableIdentifier("db", "tbl"))
 	require.NoError(t, err)

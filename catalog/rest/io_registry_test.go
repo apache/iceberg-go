@@ -26,6 +26,7 @@ import (
 	"testing"
 
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/catalog"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sync/semaphore"
@@ -145,8 +146,9 @@ func TestCatalogUsesIsolatedIORegistry(t *testing.T) {
 	registry := &iceio.Registry{}
 	fs := iceio.NewMemFS()
 	require.NoError(t, registry.Register("isolated", func(context.Context, *url.URL, map[string]string) (iceio.IO, error) { return fs, nil }))
-	cat, err := NewCatalog(t.Context(), "test", server.URL, WithIORegistry(registry))
+	loadedCatalog, err := catalog.Load(t.Context(), "test", iceberg.Properties{"uri": server.URL}, catalog.WithIORegistry(registry))
 	require.NoError(t, err)
+	cat := loadedCatalog.(*Catalog)
 	defer cat.Close()
 	for _, vended := range []bool{false, true} {
 		t.Run(fmt.Sprintf("vended=%t", vended), func(t *testing.T) {

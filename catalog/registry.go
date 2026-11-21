@@ -28,6 +28,7 @@ import (
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/config"
+	iceio "github.com/apache/iceberg-go/io"
 )
 
 // Registry holds catalog factories independently of the package-level default.
@@ -87,6 +88,38 @@ type RegistrarFunc func(context.Context, string, iceberg.Properties) (Catalog, e
 
 func (f RegistrarFunc) GetCatalog(ctx context.Context, catalogName string, props iceberg.Properties) (Catalog, error) {
 	return f(ctx, catalogName, props)
+}
+
+// IORegistryRegistrar is a factory that supports catalog-scoped FileIO.
+type IORegistryRegistrar interface {
+	Registrar
+	GetCatalogWithIORegistry(ctx context.Context, name string, props iceberg.Properties, registry *iceio.Registry) (Catalog, error)
+}
+
+// IORegistryRegistrarFunc adapts a catalog factory to IORegistryRegistrar.
+// A nil registry selects the process-wide FileIO registry.
+type IORegistryRegistrarFunc func(context.Context, string, iceberg.Properties, *iceio.Registry) (Catalog, error)
+
+func (f IORegistryRegistrarFunc) GetCatalog(ctx context.Context, name string, props iceberg.Properties) (Catalog, error) {
+	return f.GetCatalogWithIORegistry(ctx, name, props, nil)
+}
+
+func (f IORegistryRegistrarFunc) GetCatalogWithIORegistry(ctx context.Context, name string, props iceberg.Properties, registry *iceio.Registry) (Catalog, error) {
+	return f(ctx, name, props, registry)
+}
+
+type loadOptions struct {
+	ioRegistry *iceio.Registry
+}
+
+// LoadOption configures a catalog created by Load.
+type LoadOption func(*loadOptions)
+
+// WithIORegistry selects the FileIO factories for this catalog and its tables.
+// A nil registry uses the process-wide default. A non-nil registry requires an
+// IORegistryRegistrar; Load returns iceberg.ErrNotImplemented otherwise.
+func WithIORegistry(registry *iceio.Registry) LoadOption {
+	return func(opts *loadOptions) { opts.ioRegistry = registry }
 }
 
 // Register adds a catalog factory to this registry. An existing catalog type
@@ -153,7 +186,8 @@ func GetRegisteredCatalogs() []string {
 }
 
 // Load returns a catalog that must be closed by the caller to release its
-// reporter, transports, and other catalog-owned resources.
+// reporter, transports, and other catalog-owned resources. Use WithIORegistry
+// to select a catalog-scoped FileIO registry.
 //
 // Load allows loading a specific catalog by URI and properties.
 //
@@ -188,14 +222,14 @@ func GetRegisteredCatalogs() []string {
 //     as the REST endpoint, otherwise the URI is used as the endpoint. The REST catalog also
 //     registers "http" and "https" so that Load with a http/s URI will automatically
 //     load the REST Catalog.
-func Load(ctx context.Context, name string, props iceberg.Properties) (Catalog, error) {
-	return defaultRegistry.Load(ctx, name, props)
+func Load(ctx context.Context, name string, props iceberg.Properties, opts ...LoadOption) (Catalog, error) {
+	return defaultRegistry.Load(ctx, name, props, opts...)
 }
 
 // Load resolves a catalog using only the factories registered in this registry.
 // Configuration resolution matches the package-level Load function and uses
 // the shared config.EnvConfig for named catalog settings.
-func (r *Registry) Load(ctx context.Context, name string, props iceberg.Properties) (Catalog, error) {
+func (r *Registry) Load(ctx context.Context, name string, props iceberg.Properties, opts ...LoadOption) (Catalog, error) {
 	if name == "" {
 		name = config.EnvConfig.DefaultCatalog
 	}
@@ -228,6 +262,19 @@ func (r *Registry) Load(ctx context.Context, name string, props iceberg.Properti
 	cat, ok := r.get(catalogType)
 	if !ok {
 		return nil, fmt.Errorf("%w: %s", ErrCatalogNotFound, catalogType)
+	}
+
+	var options loadOptions
+	for _, opt := range opts {
+		opt(&options)
+	}
+	if options.ioRegistry != nil {
+		factory, ok := cat.(IORegistryRegistrar)
+		if !ok {
+			return nil, fmt.Errorf("%w: catalog %q does not support a scoped FileIO registry", iceberg.ErrNotImplemented, catalogType)
+		}
+
+		return factory.GetCatalogWithIORegistry(ctx, name, props, options.ioRegistry)
 	}
 
 	return cat.GetCatalog(ctx, name, props)

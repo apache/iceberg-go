@@ -148,8 +148,8 @@ const (
 )
 
 func init() {
-	reg := catalog.RegistrarFunc(func(ctx context.Context, name string, p iceberg.Properties) (catalog.Catalog, error) {
-		return newCatalogFromProps(ctx, name, p.Get("uri", ""), p)
+	reg := catalog.IORegistryRegistrarFunc(func(ctx context.Context, name string, p iceberg.Properties, registry *iceio.Registry) (catalog.Catalog, error) {
+		return newCatalogFromProps(ctx, name, p.Get("uri", ""), p, WithIORegistry(registry))
 	})
 
 	catalog.MustRegister(string(catalog.REST), reg)
@@ -980,10 +980,14 @@ type Catalog struct {
 	scanPlanningMismatchWarned atomic.Bool
 }
 
-func newCatalogFromProps(ctx context.Context, name string, uri string, p iceberg.Properties) (*Catalog, error) {
+func newCatalogFromProps(ctx context.Context, name string, uri string, p iceberg.Properties, opts ...Option) (*Catalog, error) {
 	var ops options
 	if err := fromProps(p, &ops); err != nil {
 		return nil, err
+	}
+
+	for _, opt := range opts {
+		opt(&ops)
 	}
 
 	r := &Catalog{name: name}
