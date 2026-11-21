@@ -44,6 +44,15 @@ func CollectDeadPositionDeletes(
 	snap *Snapshot,
 	rewrittenPaths map[string]struct{},
 ) ([]iceberg.DataFile, error) {
+	return collectDeadPositionDeletes(ctx, fs, snap, rewrittenPaths, nil)
+}
+
+func collectDeadPositionDeletes(
+	ctx context.Context,
+	fs iceio.IO,
+	snap *Snapshot,
+	rewrittenPaths, expectedDeletePaths map[string]struct{},
+) ([]iceberg.DataFile, error) {
 	if snap == nil || len(rewrittenPaths) == 0 {
 		return nil, nil
 	}
@@ -53,7 +62,7 @@ func CollectDeadPositionDeletes(
 		return nil, err
 	}
 
-	candidates, hasPartitionScoped, err := collectPositionDeleteCandidates(ctx, fs, manifests)
+	candidates, hasPartitionScoped, err := collectPositionDeleteCandidates(ctx, fs, manifests, expectedDeletePaths)
 	if err != nil {
 		return nil, err
 	}
@@ -76,7 +85,9 @@ type positionDeleteCandidate struct {
 	seq              int64
 }
 
-func collectPositionDeleteCandidates(ctx context.Context, fs iceio.IO, manifests []iceberg.ManifestFile) (candidates []positionDeleteCandidate, hasPartitionScoped bool, err error) {
+func collectPositionDeleteCandidates(
+	ctx context.Context, fs iceio.IO, manifests []iceberg.ManifestFile, expectedPaths map[string]struct{},
+) (candidates []positionDeleteCandidate, hasPartitionScoped bool, err error) {
 	seen := make(map[string]struct{})
 	for _, m := range manifests {
 		if cerr := ctx.Err(); cerr != nil {
@@ -94,6 +105,9 @@ func collectPositionDeleteCandidates(ctx context.Context, fs iceio.IO, manifests
 				continue
 			}
 			path := df.FilePath()
+			if _, expected := expectedPaths[path]; len(expectedPaths) > 0 && !expected {
+				continue
+			}
 			if _, ok := seen[path]; ok {
 				continue
 			}
@@ -118,6 +132,12 @@ func collectPositionDeleteCandidates(ctx context.Context, fs iceio.IO, manifests
 					seq:          seq,
 				})
 			}
+		}
+	}
+
+	for path := range expectedPaths {
+		if _, live := seen[path]; !live {
+			return nil, false, fmt.Errorf("cannot remove automatic delete files that do not belong to the table: %q", path)
 		}
 	}
 
