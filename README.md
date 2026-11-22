@@ -25,7 +25,7 @@
 
 ### Prerequisites
 
-* Go 1.26 or later
+* Go 1.26.3 or later for builds from `main`. For a tagged release, see the Go requirement in that tag's `go.mod`.
 
 ### Build
 
