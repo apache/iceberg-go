@@ -2175,16 +2175,32 @@ func TestAddColumnStoresBinaryDefaultAsHex(t *testing.T) {
 // array or object otherwise). Those defaults are Go maps and slices, which ==
 // cannot compare, so they must not break evolving any other column.
 func TestUpdateSchemaWithNestedTypeWriteDefault(t *testing.T) {
+	newTxn := func(t *testing.T, field string) *Transaction {
+		t.Helper()
+
+		var current iceberg.Schema
+		require.NoError(t, json.Unmarshal([]byte(`{"type":"struct","schema-id":0,"fields":[`+
+			`{"id":1,"name":"id","required":true,"type":"long"},`+field+`]}`), &current))
+
+		meta, err := NewMetadata(&current, iceberg.UnpartitionedSpec, UnsortedSortOrder, "",
+			iceberg.Properties{PropertyFormatVersion: "3"})
+		require.NoError(t, err)
+
+		return New([]string{"tbl"}, meta, "", nil, nil).NewTransaction()
+	}
+
 	tests := []struct {
-		name         string
-		field        string
-		writeDefault any
+		name           string
+		field          string
+		writeDefault   any
+		initialDefault any
 	}{
 		{
 			name: "struct",
 			field: `{"id":2,"name":"point","required":false,"initial-default":{},"write-default":{},` +
 				`"type":{"type":"struct","fields":[{"id":3,"name":"x","required":false,"type":"int"}]}}`,
-			writeDefault: map[string]any{},
+			writeDefault:   map[string]any{},
+			initialDefault: map[string]any{},
 		},
 		{
 			name: "list",
@@ -2202,14 +2218,7 @@ func TestUpdateSchemaWithNestedTypeWriteDefault(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			var current iceberg.Schema
-			require.NoError(t, json.Unmarshal([]byte(`{"type":"struct","schema-id":0,"fields":[`+
-				`{"id":1,"name":"id","required":true,"type":"long"},`+tt.field+`]}`), &current))
-
-			meta, err := NewMetadata(&current, iceberg.UnpartitionedSpec, UnsortedSortOrder, "",
-				iceberg.Properties{PropertyFormatVersion: "3"})
-			require.NoError(t, err)
-			txn := New([]string{"tbl"}, meta, "", nil, nil).NewTransaction()
+			txn := newTxn(t, tt.field)
 
 			require.NoError(t, txn.UpdateSchema(true, false).
 				AddColumn([]string{"name"}, iceberg.PrimitiveTypes.String, "", false, nil).
@@ -2224,6 +2233,25 @@ func TestUpdateSchemaWithNestedTypeWriteDefault(t *testing.T) {
 			field, ok := applied.FindFieldByID(2)
 			require.True(t, ok)
 			assert.Equal(t, tt.writeDefault, field.WriteDefault)
+		})
+
+		// Renaming the nested column itself rebuilds the field, which must keep
+		// both of its defaults.
+		t.Run(tt.name+" renamed", func(t *testing.T) {
+			txn := newTxn(t, tt.field)
+
+			before, ok := txn.meta.CurrentSchema().FindFieldByID(2)
+			require.True(t, ok)
+
+			require.NoError(t, txn.UpdateSchema(true, false).
+				RenameColumn([]string{before.Name}, "renamed").
+				Commit())
+
+			field, ok := txn.meta.CurrentSchema().FindFieldByID(2)
+			require.True(t, ok)
+			assert.Equal(t, "renamed", field.Name)
+			assert.Equal(t, tt.writeDefault, field.WriteDefault)
+			assert.Equal(t, tt.initialDefault, field.InitialDefault)
 		})
 	}
 }
