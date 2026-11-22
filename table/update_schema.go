@@ -302,8 +302,8 @@ func (u *UpdateSchema) findParentID(fieldID int) int {
 // being renamed, which may keep its own name with different case, or
 // TableRootID when adding a column. A column that is deleted, or renamed to
 // another name, in this update gives up its name, so another column may take
-// it. Java rejects the renamed-away case; we allow it because the resulting
-// schema is valid.
+// it. Java's addColumn rejects the renamed-away case; we allow it because the
+// resulting schema is valid.
 func (u *UpdateSchema) nameTaken(parentID int, name, fullName string, selfID int) bool {
 	for _, add := range u.adds[parentID] {
 		if u.sameName(add.Name, name) {

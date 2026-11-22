@@ -544,30 +544,68 @@ func TestRenameColumnNameAlreadyExists(t *testing.T) {
 		})
 	}
 
-	t.Run("same column with different case in case-insensitive mode", func(t *testing.T) {
+	allowed := []struct {
+		name          string
+		caseSensitive bool
+		build         func(*UpdateSchema) *UpdateSchema
+		wantIDs       map[string]int
+	}{
+		{
+			name:          "same column with different case in case-insensitive mode",
+			caseSensitive: false,
+			build: func(u *UpdateSchema) *UpdateSchema {
+				return u.RenameColumn([]string{"name"}, "Name")
+			},
+			wantIDs: map[string]int{"Name": 2},
+		},
+		{
+			name:          "same column with different case in case-sensitive mode",
+			caseSensitive: true,
+			build: func(u *UpdateSchema) *UpdateSchema {
+				return u.RenameColumn([]string{"name"}, "Name")
+			},
+			wantIDs: map[string]int{"Name": 2},
+		},
+		{
+			name:          "name of a column renamed away",
+			caseSensitive: true,
+			build: func(u *UpdateSchema) *UpdateSchema {
+				return u.RenameColumn([]string{"name"}, "full_name").
+					RenameColumn([]string{"age"}, "name")
+			},
+			wantIDs: map[string]int{"full_name": 2, "name": 3},
+		},
+	}
+
+	for _, tt := range allowed {
+		t.Run(tt.name, func(t *testing.T) {
+			txn := New([]string{"id"}, testMetadata, "", nil, nil).NewTransaction()
+
+			applied, err := tt.build(NewUpdateSchema(txn, tt.caseSensitive, false)).Apply()
+			require.NoError(t, err)
+
+			require.NoError(t, tt.build(NewUpdateSchema(txn, tt.caseSensitive, false)).Commit())
+
+			for _, s := range []*iceberg.Schema{applied, txn.meta.CurrentSchema()} {
+				for name, id := range tt.wantIDs {
+					f, ok := s.FindFieldByName(name)
+					require.True(t, ok, name)
+					assert.Equal(t, id, f.ID)
+				}
+			}
+		})
+	}
+
+	// The first rename of a swap asks for a name that is still in use.
+	t.Run("swapped names", func(t *testing.T) {
 		txn := New([]string{"id"}, testMetadata, "", nil, nil).NewTransaction()
 
-		s, err := NewUpdateSchema(txn, false, false).RenameColumn([]string{"name"}, "Name").Apply()
-		require.NoError(t, err)
-		f, ok := s.FindFieldByName("Name")
-		require.True(t, ok)
-		assert.Equal(t, 2, f.ID)
-	})
-
-	t.Run("name of a column renamed away", func(t *testing.T) {
-		txn := New([]string{"id"}, testMetadata, "", nil, nil).NewTransaction()
-
-		s, err := NewUpdateSchema(txn, true, false).
-			RenameColumn([]string{"name"}, "full_name").
+		_, err := NewUpdateSchema(txn, true, false).
+			RenameColumn([]string{"name"}, "age").
 			RenameColumn([]string{"age"}, "name").
 			Apply()
-		require.NoError(t, err)
-		f, ok := s.FindFieldByName("name")
-		require.True(t, ok)
-		assert.Equal(t, 3, f.ID)
-		f, ok = s.FindFieldByName("full_name")
-		require.True(t, ok)
-		assert.Equal(t, 2, f.ID)
+		require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+		require.ErrorContains(t, err, "cannot rename column, name already exists: age")
 	})
 }
 
