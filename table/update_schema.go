@@ -1136,6 +1136,9 @@ func (u *UpdateSchema) BuildUpdates() ([]Update, []Requirement, error) {
 		// field IDs cannot be resolved for added or renamed columns.
 		nameMapping := u.nameMapping
 		if nameMapping == nil {
+			// NameMapping returns nil when the property is unset or can't be
+			// parsed. Leaving an unparsable value as it is, rather than failing
+			// the schema change, is deliberate: Java keeps it too.
 			nameMapping = meta.NameMapping()
 		}
 		if nameMapping != nil {
