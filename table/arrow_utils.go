@@ -530,6 +530,24 @@ func ArrowSchemaToIcebergWithOptions(sc *arrow.Schema, opts ArrowToIcebergOption
 	}
 }
 
+// dataFileSchemaToIceberg converts the Arrow schema of a data or delete file
+// that is being read. A file that has a field ID at any depth is resolved by
+// ID only: its fields without an ID, its lists without an element ID and its
+// maps without a key or value ID are absent, and the name mapping is not used.
+// The name mapping applies to a file with no field IDs.
+//
+// ArrowSchemaToIcebergWithOptions keeps rejecting such a schema, because
+// dropping a field is only correct for a file that is read, not for data that
+// is written.
+func dataFileSchemaToIceberg(sc *arrow.Schema, opts ArrowToIcebergOptions) (*iceberg.Schema, error) {
+	if tblutils.HasAnyFieldID(sc) {
+		sc = tblutils.DropFieldsWithoutIDs(sc)
+		opts.NameMapping = nil
+	}
+
+	return ArrowSchemaToIcebergWithOptions(sc, opts)
+}
+
 func ArrowSchemaToIcebergWithFreshIDs(sc *arrow.Schema, downcastNsTimestamp bool) (*iceberg.Schema, error) {
 	schemaWithoutIDs, err := arrowToSchemaWithoutIDs(sc, downcastNsTimestamp)
 	if err != nil {

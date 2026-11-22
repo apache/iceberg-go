@@ -1206,7 +1206,7 @@ func readEqualityDeleteFile(ctx context.Context, fs iceio.IO, tableSchema *icebe
 	if hasFieldIDs {
 		fieldRefsByID = resolveArrowFieldsByMetadata(projectedSchema, fieldIDs)
 	} else {
-		fileSchema, err = ArrowSchemaToIcebergWithOptions(projectedSchema, ArrowToIcebergOptions{
+		fileSchema, err = dataFileSchemaToIceberg(projectedSchema, ArrowToIcebergOptions{
 			NameMapping: nameMapping,
 			TableSchema: tableSchema,
 		})

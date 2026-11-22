@@ -3156,6 +3156,18 @@ func pruneParquetColumns(manifest *pqarrow.SchemaManifest, selected map[int]stru
 		indices:   []int{},
 	}
 
+	// The decision is made on the full file schema, so that it does not depend
+	// on the projection. A file that has a field ID at any depth is resolved by
+	// ID only: the name mapping applies to files without field IDs.
+	for _, f := range manifest.Fields {
+		if fieldHasAnyID(*f.Field) {
+			visitor.fileHasIDs = true
+			mapping = nil
+
+			break
+		}
+	}
+
 	result, err := visitParquetManifest(manifest, visitor, &iceberg.MappedField{Fields: mapping})
 	if err != nil {
 		return nil, nil, err
@@ -3183,17 +3195,139 @@ func getFieldID(f arrow.Field) *int {
 	return &id
 }
 
+// HasAnyFieldID reports whether a field at any depth of the file schema has a
+// field ID. Such a file is resolved by ID only, and the name mapping is not
+// used for it.
+func HasAnyFieldID(sc *arrow.Schema) bool {
+	return slices.ContainsFunc(sc.Fields(), fieldHasAnyID)
+}
+
+func fieldHasAnyID(f arrow.Field) bool {
+	if getFieldID(f) != nil {
+		return true
+	}
+
+	switch dt := f.Type.(type) {
+	case *arrow.StructType:
+		return slices.ContainsFunc(dt.Fields(), fieldHasAnyID)
+	case *arrow.MapType:
+		return fieldHasAnyID(dt.KeyField()) || fieldHasAnyID(dt.ItemField())
+	case arrow.ListLikeType:
+		return fieldHasAnyID(dt.ElemField())
+	}
+
+	return false
+}
+
+// absentWithoutID reports whether a field of a file that has field IDs cannot
+// be resolved: it has no ID, or it is a list without an element ID or a map
+// without a key or value ID. Such a field is not present in the file.
+func absentWithoutID(f arrow.Field) bool {
+	if getFieldID(f) == nil {
+		return true
+	}
+
+	switch dt := f.Type.(type) {
+	case *arrow.MapType:
+		return getFieldID(dt.KeyField()) == nil || getFieldID(dt.ItemField()) == nil
+	case arrow.ListLikeType:
+		return getFieldID(dt.ElemField()) == nil
+	}
+
+	return false
+}
+
+// DropFieldsWithoutIDs removes from the schema of a file that has field IDs
+// every field that is absent because of a missing ID, at any depth. A list or
+// map is removed as a whole when its element, key or value is.
+func DropFieldsWithoutIDs(sc *arrow.Schema) *arrow.Schema {
+	md := sc.Metadata()
+
+	return arrow.NewSchema(keepFieldsWithIDs(sc.Fields()), &md)
+}
+
+func keepFieldsWithIDs(fields []arrow.Field) []arrow.Field {
+	kept := make([]arrow.Field, 0, len(fields))
+	for _, f := range fields {
+		if absentWithoutID(f) {
+			continue
+		}
+		if f.Type = keepTypeWithIDs(f.Type); f.Type != nil {
+			kept = append(kept, f)
+		}
+	}
+
+	return kept
+}
+
+// keepTypeWithIDs returns nil when the type cannot be kept.
+func keepTypeWithIDs(dt arrow.DataType) arrow.DataType {
+	switch dt := dt.(type) {
+	case *arrow.StructType:
+		return arrow.StructOf(keepFieldsWithIDs(dt.Fields())...)
+	case *arrow.MapType:
+		key, item := dt.KeyField(), dt.ItemField()
+		if absentWithoutID(key) || absentWithoutID(item) {
+			return nil
+		}
+		if key.Type = keepTypeWithIDs(key.Type); key.Type == nil {
+			return nil
+		}
+		if item.Type = keepTypeWithIDs(item.Type); item.Type == nil {
+			return nil
+		}
+		if arrow.TypeEqual(key.Type, dt.KeyType()) && arrow.TypeEqual(item.Type, dt.ItemType()) {
+			return dt
+		}
+		result := arrow.MapOfFields(key, item)
+		result.KeysSorted = dt.KeysSorted
+
+		return result
+	case arrow.ListLikeType:
+		elem := dt.ElemField()
+		if absentWithoutID(elem) {
+			return nil
+		}
+		if elem.Type = keepTypeWithIDs(elem.Type); elem.Type == nil {
+			return nil
+		}
+		if arrow.TypeEqual(elem.Type, dt.Elem()) {
+			return dt
+		}
+
+		switch dt := dt.(type) {
+		case *arrow.ListType:
+			return arrow.ListOfField(elem)
+		case *arrow.LargeListType:
+			return arrow.LargeListOfField(elem)
+		case *arrow.ListViewType:
+			return arrow.ListViewOfField(elem)
+		case *arrow.LargeListViewType:
+			return arrow.LargeListViewOfField(elem)
+		case *arrow.FixedSizeListType:
+			return arrow.FixedSizeListOfField(dt.Len(), elem)
+		}
+
+		return nil
+	}
+
+	return dt
+}
+
 type pruneParquetSchema struct {
 	selected  map[int]struct{}
 	fullTypes bool
 	manifest  *pqarrow.SchemaManifest
+	// fileHasIDs is set when the file has a field ID at any depth. Fields
+	// without an ID are then absent, and no name mapping is applied.
+	fileHasIDs bool
 
 	indices []int
 }
 
 func (p *pruneParquetSchema) fieldID(field arrow.Field, mapping *iceberg.MappedField) int {
-	// Embedded Parquet field IDs are authoritative. Name mappings are only a
-	// fallback for files and fields that do not carry their own IDs.
+	// A file is resolved either by its embedded field IDs or, when it has
+	// none at all, by the name mapping. The two are never mixed.
 	if id := getFieldID(field); id != nil {
 		return *id
 	}
@@ -3255,6 +3389,10 @@ func (p *pruneParquetSchema) Struct(field pqarrow.SchemaField, children []arrow.
 }
 
 func (p *pruneParquetSchema) Field(field pqarrow.SchemaField, result arrow.Field, mapping *iceberg.MappedField) arrow.Field {
+	if p.fileHasIDs && absentWithoutID(*field.Field) {
+		return arrow.Field{}
+	}
+
 	_, ok := p.selected[p.fieldID(*field.Field, mapping)]
 	if !ok {
 		if result.Type != nil {
@@ -3296,6 +3434,10 @@ func (p *pruneParquetSchema) List(field pqarrow.SchemaField, elemResult arrow.Fi
 		elemMapping, _ = mapping.FindFieldByName("element")
 	}
 
+	if p.fileHasIDs && getFieldID(*field.Children[0].Field) == nil {
+		return arrow.Field{}
+	}
+
 	_, ok := p.selected[p.fieldID(*field.Children[0].Field, elemMapping)]
 	if !ok {
 		if elemResult.Type != nil {
@@ -3334,6 +3476,11 @@ func (p *pruneParquetSchema) Map(field pqarrow.SchemaField, keyResult, valResult
 	var valMapping *iceberg.MappedField
 	if mapping != nil {
 		valMapping, _ = mapping.FindFieldByName("value")
+	}
+
+	if p.fileHasIDs && (getFieldID(*field.Children[0].Children[0].Field) == nil ||
+		getFieldID(*field.Children[0].Children[1].Field) == nil) {
+		return arrow.Field{}
 	}
 
 	_, ok := p.selected[p.fieldID(*field.Children[0].Children[1].Field, valMapping)]
