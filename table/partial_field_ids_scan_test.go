@@ -270,3 +270,56 @@ func TestScanDataFileWithPartialFieldIDsFilters(t *testing.T) {
 		})
 	}
 }
+
+// AddDataFilesByPath computes column metrics from the file. A scan reads a
+// field without an ID as absent, so metrics keyed by name would prune rows the
+// scan returns as null; the file is rejected instead.
+func TestAddDataFilesByPathRejectsPartialFieldIDs(t *testing.T) {
+	ctx := t.Context()
+	cat, err := hadoop.NewCatalog(ctx, "local", t.TempDir(), nil)
+	require.NoError(t, err)
+	require.NoError(t, cat.CreateNamespace(ctx, catalog.ToIdentifier("db"), nil))
+
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "extra", Type: iceberg.PrimitiveTypes.String},
+	)
+	mappingJSON, err := json.Marshal(iceberg.NameMapping{
+		{FieldID: new(1), Names: []string{"id"}},
+		{FieldID: new(2), Names: []string{"extra"}},
+	})
+	require.NoError(t, err)
+	tbl, err := cat.CreateTable(ctx, catalog.ToIdentifier("db", "by_path"), schema,
+		catalog.WithProperties(iceberg.Properties{
+			table.DefaultNameMappingKey: string(mappingJSON),
+		}))
+	require.NoError(t, err)
+
+	write := func(name string, fields ...arrow.Field) string {
+		data, err := array.TableFromJSON(memory.DefaultAllocator, arrow.NewSchema(fields, nil),
+			[]string{`[{"extra":"x1","id":1},{"extra":"x2","id":2}]`})
+		require.NoError(t, err)
+		defer data.Release()
+
+		filePath := tbl.Location() + "/data/" + name
+		writer, err := (iceio.LocalFS{}).Create(ctx, filePath)
+		require.NoError(t, err)
+		require.NoError(t, pqarrow.WriteTable(data, writer, 2,
+			parquet.NewWriterProperties(), pqarrow.DefaultWriterProps()))
+
+		return filePath
+	}
+	extra := arrow.Field{Name: "extra", Type: arrow.BinaryTypes.String, Nullable: true}
+	id := arrow.Field{Name: "id", Type: arrow.PrimitiveTypes.Int64}
+
+	// Both names are in the mapping, but only "id" has a field ID.
+	withID := id
+	withID.Metadata = parquetFieldID("1")
+	err = tbl.NewTransaction().AddDataFilesByPath(ctx, []string{write("partial.parquet", extra, withID)}, nil, false)
+	require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+	require.ErrorContains(t, err, "only some of its fields have a field ID")
+
+	// A file without field IDs is still registered through the name mapping.
+	require.NoError(t, tbl.NewTransaction().AddDataFilesByPath(
+		ctx, []string{write("no_ids.parquet", extra, id)}, nil, false))
+}

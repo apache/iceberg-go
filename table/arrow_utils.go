@@ -2107,20 +2107,22 @@ func fileToDataFile(ctx context.Context, fileIO iceio.IO, filePath string, curre
 	defer rdr.Close()
 
 	arrSchema := must(rdr.Schema())
-	// The file is registered to be read, so it is checked and its metrics
-	// are keyed the way a scan resolves it: by ID only when it has a field ID
-	// at any depth, without the fields that are absent for lack of one.
-	resolvedSchema, fileHasIDs := arrSchema, tblutils.HasAnyFieldID(arrSchema)
-	if fileHasIDs {
-		resolvedSchema = tblutils.DropFieldsWithoutIDs(arrSchema)
+	// A scan resolves a file that has a field ID at any depth by ID only, and
+	// treats its fields without one as absent. Column metrics cannot be keyed
+	// for such fields, and metrics keyed by name would prune rows that the
+	// scan reads as null, so the file is rejected instead of registered.
+	fileHasIDs := tblutils.HasAnyFieldID(arrSchema)
+	if fileHasIDs && !tblutils.DropFieldsWithoutIDs(arrSchema).Equal(arrSchema) {
+		panic(fmt.Errorf("%w: cannot add %s: only some of its fields have a field ID",
+			iceberg.ErrInvalidSchema, filePath))
 	}
-	if err := checkArrowSchemaCompatWithProperties(currentSchema, resolvedSchema, false, props); err != nil {
+	if err := checkArrowSchemaCompatWithProperties(currentSchema, arrSchema, false, props); err != nil {
 		panic(err)
 	}
 
 	pathToIDSchema := currentSchema
 	if fileHasIDs {
-		pathToIDSchema = must(ArrowSchemaToIcebergWithOptions(resolvedSchema, ArrowToIcebergOptions{
+		pathToIDSchema = must(ArrowSchemaToIcebergWithOptions(arrSchema, ArrowToIcebergOptions{
 			TableSchema:     currentSchema,
 			TableProperties: props,
 		}))
