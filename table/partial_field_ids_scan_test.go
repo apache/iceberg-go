@@ -42,7 +42,8 @@ func parquetFieldID(id string) arrow.Metadata {
 // v2/partial-field-ids-parquet-data, plus one top-level column without an ID.
 //
 // The data file has field IDs on c1, c2, c3 and its fields, c4 and c5. It has
-// none on the list element, the map key, the map value or the column "extra".
+// none on the list element, the map key, the map value, the column "extra",
+// the struct "orphan" or the element of the list c9.
 // The name mapping lists "element", "key", "value" and "extra", and none of
 // the names of the columns that carry an ID.
 func newPartialFieldIDsTable(t *testing.T) *table.Table {
@@ -57,31 +58,45 @@ func newPartialFieldIDsTable(t *testing.T) *table.Table {
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
 		iceberg.NestedField{ID: 2, Name: "name", Type: iceberg.PrimitiveTypes.String},
 		iceberg.NestedField{ID: 3, Name: "location", Type: iceberg.NewStructType(
-			iceberg.NestedField{ID: 8, Name: "lat", Type: iceberg.PrimitiveTypes.Float64},
-			iceberg.NestedField{ID: 9, Name: "lon", Type: iceberg.PrimitiveTypes.Float64},
+			iceberg.NestedField{ID: 10, Name: "lat", Type: iceberg.PrimitiveTypes.Float64},
+			iceberg.NestedField{ID: 11, Name: "lon", Type: iceberg.PrimitiveTypes.Float64},
 		)},
-		iceberg.NestedField{ID: 4, Name: "tags", Type: iceberg.NewListType(10, iceberg.PrimitiveTypes.String, false)},
+		iceberg.NestedField{ID: 4, Name: "tags", Type: iceberg.NewListType(12, iceberg.PrimitiveTypes.String, false)},
 		iceberg.NestedField{ID: 5, Name: "props", Type: iceberg.NewMapType(
-			11, iceberg.PrimitiveTypes.String, 12, iceberg.PrimitiveTypes.Int32, false)},
+			13, iceberg.PrimitiveTypes.String, 14, iceberg.PrimitiveTypes.Int32, false)},
 		iceberg.NestedField{ID: 6, Name: "added", Type: iceberg.PrimitiveTypes.String},
 		iceberg.NestedField{ID: 7, Name: "extra", Type: iceberg.PrimitiveTypes.String},
+		iceberg.NestedField{ID: 8, Name: "orphan", Type: iceberg.NewStructType(
+			iceberg.NestedField{ID: 15, Name: "inner", Type: iceberg.PrimitiveTypes.Int64},
+		)},
+		iceberg.NestedField{ID: 9, Name: "items", Type: iceberg.NewListType(16, iceberg.NewStructType(
+			iceberg.NestedField{ID: 17, Name: "v", Type: iceberg.PrimitiveTypes.Int64},
+		), false)},
 	)
 	mapping := iceberg.NameMapping{
 		{FieldID: new(1), Names: []string{"id"}},
 		{FieldID: new(2), Names: []string{"name"}},
 		{FieldID: new(3), Names: []string{"location"}, Fields: []iceberg.MappedField{
-			{FieldID: new(8), Names: []string{"lat"}},
-			{FieldID: new(9), Names: []string{"lon"}},
+			{FieldID: new(10), Names: []string{"lat"}},
+			{FieldID: new(11), Names: []string{"lon"}},
 		}},
 		{FieldID: new(4), Names: []string{"tags", "c4"}, Fields: []iceberg.MappedField{
-			{FieldID: new(10), Names: []string{"element"}},
+			{FieldID: new(12), Names: []string{"element"}},
 		}},
 		{FieldID: new(5), Names: []string{"props", "c5"}, Fields: []iceberg.MappedField{
-			{FieldID: new(11), Names: []string{"key"}},
-			{FieldID: new(12), Names: []string{"value"}},
+			{FieldID: new(13), Names: []string{"key"}},
+			{FieldID: new(14), Names: []string{"value"}},
 		}},
 		{FieldID: new(6), Names: []string{"added"}},
 		{FieldID: new(7), Names: []string{"extra"}},
+		{FieldID: new(8), Names: []string{"orphan"}, Fields: []iceberg.MappedField{
+			{FieldID: new(15), Names: []string{"inner"}},
+		}},
+		{FieldID: new(9), Names: []string{"items", "c9"}, Fields: []iceberg.MappedField{
+			{FieldID: new(16), Names: []string{"element"}, Fields: []iceberg.MappedField{
+				{FieldID: new(17), Names: []string{"v"}},
+			}},
+		}},
 	}
 	mappingJSON, err := json.Marshal(mapping)
 	require.NoError(t, err)
@@ -95,6 +110,15 @@ func newPartialFieldIDsTable(t *testing.T) *table.Table {
 
 	// The physical column order differs from the table schema's.
 	fileSchema := arrow.NewSchema([]arrow.Field{
+		// A struct without an ID whose field has one, and a list without an
+		// element ID whose element's field has one. Both come before the
+		// columns that are read, so a leaked leaf would shift them.
+		{Name: "orphan", Type: arrow.StructOf(
+			arrow.Field{Name: "c15", Type: arrow.PrimitiveTypes.Int64, Nullable: true, Metadata: parquetFieldID("15")},
+		), Nullable: true},
+		{Name: "c9", Type: arrow.ListOf(arrow.StructOf(
+			arrow.Field{Name: "c17", Type: arrow.PrimitiveTypes.Int64, Nullable: true, Metadata: parquetFieldID("17")},
+		)), Nullable: true, Metadata: parquetFieldID("9")},
 		{
 			Name: "c5", Type: arrow.MapOf(arrow.BinaryTypes.String, arrow.PrimitiveTypes.Int32),
 			Nullable: true, Metadata: parquetFieldID("5"),
@@ -103,15 +127,15 @@ func newPartialFieldIDsTable(t *testing.T) *table.Table {
 		{Name: "c2", Type: arrow.BinaryTypes.String, Nullable: true, Metadata: parquetFieldID("2")},
 		{Name: "c4", Type: arrow.ListOf(arrow.BinaryTypes.String), Nullable: true, Metadata: parquetFieldID("4")},
 		{Name: "c3", Type: arrow.StructOf(
-			arrow.Field{Name: "c9", Type: arrow.PrimitiveTypes.Float64, Nullable: true, Metadata: parquetFieldID("9")},
-			arrow.Field{Name: "c8", Type: arrow.PrimitiveTypes.Float64, Nullable: true, Metadata: parquetFieldID("8")},
+			arrow.Field{Name: "c11", Type: arrow.PrimitiveTypes.Float64, Nullable: true, Metadata: parquetFieldID("11")},
+			arrow.Field{Name: "c10", Type: arrow.PrimitiveTypes.Float64, Nullable: true, Metadata: parquetFieldID("10")},
 		), Nullable: true, Metadata: parquetFieldID("3")},
 		{Name: "c1", Type: arrow.PrimitiveTypes.Int64, Nullable: false, Metadata: parquetFieldID("1")},
 	}, nil)
 	data, err := array.TableFromJSON(memory.DefaultAllocator, fileSchema, []string{`[
-		{"c5":[{"key":"k","value":1}],"extra":"x1","c2":"alpha","c4":["a","b"],"c3":{"c9":-74.006,"c8":40.7128},"c1":1},
-		{"c5":null,"extra":"x2","c2":null,"c4":null,"c3":null,"c1":2},
-		{"c5":[],"extra":"x3","c2":"charlie","c4":[],"c3":{"c9":-0.1278,"c8":51.5074},"c1":3}
+		{"orphan":{"c15":100},"c9":[{"c17":7}],"c5":[{"key":"k","value":1}],"extra":"x1","c2":"alpha","c4":["a","b"],"c3":{"c11":-74.006,"c10":40.7128},"c1":1},
+		{"orphan":{"c15":1},"c9":[],"c5":null,"extra":"x2","c2":null,"c4":null,"c3":null,"c1":2},
+		{"orphan":{"c15":100},"c9":null,"c5":[],"extra":"x3","c2":"charlie","c4":[],"c3":{"c11":-0.1278,"c10":51.5074},"c1":3}
 	]`})
 	require.NoError(t, err)
 	defer data.Release()
@@ -175,9 +199,9 @@ func TestScanDataFileWithPartialFieldIDs(t *testing.T) {
 		expected string
 	}{
 		{"all fields", []string{"*"}, `[
-			{"id":1,"name":"alpha","location":{"lat":40.7128,"lon":-74.006},"tags":null,"props":null,"added":null,"extra":null},
-			{"id":2,"name":null,"location":null,"tags":null,"props":null,"added":null,"extra":null},
-			{"id":3,"name":"charlie","location":{"lat":51.5074,"lon":-0.1278},"tags":null,"props":null,"added":null,"extra":null}
+			{"id":1,"name":"alpha","location":{"lat":40.7128,"lon":-74.006},"tags":null,"props":null,"added":null,"extra":null,"orphan":null,"items":null},
+			{"id":2,"name":null,"location":null,"tags":null,"props":null,"added":null,"extra":null,"orphan":null,"items":null},
+			{"id":3,"name":"charlie","location":{"lat":51.5074,"lon":-0.1278},"tags":null,"props":null,"added":null,"extra":null,"orphan":null,"items":null}
 		]`},
 		{"only fields with an id", []string{"id", "name"}, `[
 			{"id":1,"name":"alpha"},{"id":2,"name":null},{"id":3,"name":"charlie"}
@@ -192,6 +216,12 @@ func TestScanDataFileWithPartialFieldIDs(t *testing.T) {
 			[]string{"extra"},
 			`[{"extra":null},{"extra":null},{"extra":null}]`,
 		},
+		{"struct without an id whose field has one", []string{"orphan", "id"}, `[
+			{"orphan":null,"id":1},{"orphan":null,"id":2},{"orphan":null,"id":3}
+		]`},
+		{"list without an element id whose element has fields with ids", []string{"items", "name"}, `[
+			{"items":null,"name":"alpha"},{"items":null,"name":null},{"items":null,"name":"charlie"}
+		]`},
 		{"absent fields beside a field with an id", []string{"tags", "id", "extra"}, `[
 			{"tags":null,"id":1,"extra":null},{"tags":null,"id":2,"extra":null},{"tags":null,"id":3,"extra":null}
 		]`},
@@ -219,6 +249,8 @@ func TestScanDataFileWithPartialFieldIDsFilters(t *testing.T) {
 		{"absent column is not null", iceberg.NotNull(iceberg.Reference("extra")), `[]`},
 		{"absent column equals its file value", iceberg.EqualTo(iceberg.Reference("extra"), "x1"), `[]`},
 		{"column with an id", iceberg.EqualTo(iceberg.Reference("name"), "charlie"), `[{"id":3}]`},
+		{"field with an id under a struct without one", iceberg.GreaterThan(iceberg.Reference("orphan.inner"), int64(50)), `[]`},
+		{"nested field with an id", iceberg.LessThan(iceberg.Reference("location.lon"), float64(-1)), `[{"id":1}]`},
 	}
 
 	for _, tt := range tests {
@@ -226,6 +258,15 @@ func TestScanDataFileWithPartialFieldIDsFilters(t *testing.T) {
 			got := scanToJSON(t, tbl.Scan(
 				table.WithSelectedFields("id"), table.WithRowFilter(tt.filter)))
 			require.JSONEq(t, tt.expected, got)
+
+			// The same rows match when every column is read.
+			var all, matched []map[string]any
+			require.NoError(t, json.Unmarshal([]byte(scanToJSON(t, tbl.Scan(table.WithRowFilter(tt.filter)))), &all))
+			require.NoError(t, json.Unmarshal([]byte(tt.expected), &matched))
+			require.Len(t, all, len(matched))
+			for i := range matched {
+				require.EqualValues(t, matched[i]["id"], all[i]["id"])
+			}
 		})
 	}
 }

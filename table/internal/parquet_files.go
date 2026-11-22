@@ -3390,7 +3390,7 @@ func (p *pruneParquetSchema) Struct(field pqarrow.SchemaField, children []arrow.
 
 func (p *pruneParquetSchema) Field(field pqarrow.SchemaField, result arrow.Field, mapping *iceberg.MappedField) arrow.Field {
 	if p.fileHasIDs && absentWithoutID(*field.Field) {
-		return arrow.Field{}
+		return p.dropAbsent(field)
 	}
 
 	_, ok := p.selected[p.fieldID(*field.Field, mapping)]
@@ -3435,7 +3435,7 @@ func (p *pruneParquetSchema) List(field pqarrow.SchemaField, elemResult arrow.Fi
 	}
 
 	if p.fileHasIDs && getFieldID(*field.Children[0].Field) == nil {
-		return arrow.Field{}
+		return p.dropAbsent(field)
 	}
 
 	_, ok := p.selected[p.fieldID(*field.Children[0].Field, elemMapping)]
@@ -3480,7 +3480,7 @@ func (p *pruneParquetSchema) Map(field pqarrow.SchemaField, keyResult, valResult
 
 	if p.fileHasIDs && (getFieldID(*field.Children[0].Children[0].Field) == nil ||
 		getFieldID(*field.Children[0].Children[1].Field) == nil) {
-		return arrow.Field{}
+		return p.dropAbsent(field)
 	}
 
 	_, ok := p.selected[p.fieldID(*field.Children[0].Children[1].Field, valMapping)]
@@ -3532,6 +3532,22 @@ func (p *pruneParquetSchema) projectSelectedStruct(projected arrow.DataType) *ar
 	}
 
 	panic("expected a struct")
+}
+
+// dropAbsent removes an absent field from the projection. Its children are
+// visited before it, so a child that has an ID may already have selected its
+// leaf columns; they are not read, because the field they belong to is absent.
+func (p *pruneParquetSchema) dropAbsent(field pqarrow.SchemaField) arrow.Field {
+	selected := p.indices
+	p.indices = nil
+	p.collectLeafIndices(field)
+	absent := p.indices
+
+	p.indices = slices.DeleteFunc(selected, func(idx int) bool {
+		return slices.Contains(absent, idx)
+	})
+
+	return arrow.Field{}
 }
 
 func (p *pruneParquetSchema) collectLeafIndices(field pqarrow.SchemaField) {

@@ -2107,13 +2107,20 @@ func fileToDataFile(ctx context.Context, fileIO iceio.IO, filePath string, curre
 	defer rdr.Close()
 
 	arrSchema := must(rdr.Schema())
-	if err := checkArrowSchemaCompatWithProperties(currentSchema, arrSchema, false, props); err != nil {
+	// The file is registered to be read, so it is checked and its metrics
+	// are keyed the way a scan resolves it: by ID only when it has a field ID
+	// at any depth, without the fields that are absent for lack of one.
+	resolvedSchema, fileHasIDs := arrSchema, tblutils.HasAnyFieldID(arrSchema)
+	if fileHasIDs {
+		resolvedSchema = tblutils.DropFieldsWithoutIDs(arrSchema)
+	}
+	if err := checkArrowSchemaCompatWithProperties(currentSchema, resolvedSchema, false, props); err != nil {
 		panic(err)
 	}
 
 	pathToIDSchema := currentSchema
-	if fileHasIDs := must(VisitArrowSchema(arrSchema, hasIDs{})); fileHasIDs {
-		pathToIDSchema = must(ArrowSchemaToIcebergWithOptions(arrSchema, ArrowToIcebergOptions{
+	if fileHasIDs {
+		pathToIDSchema = must(ArrowSchemaToIcebergWithOptions(resolvedSchema, ArrowToIcebergOptions{
 			TableSchema:     currentSchema,
 			TableProperties: props,
 		}))
