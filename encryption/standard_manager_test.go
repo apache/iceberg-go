@@ -917,7 +917,7 @@ func (f *slowReadFile) ReadAt(p []byte, off int64) (int, error) {
 func TestStandardEncryptionManager_ConcurrentReadAtOverlaps(t *testing.T) {
 	const (
 		numBlocks = 8
-		delay     = 20 * time.Millisecond
+		delay     = 100 * time.Millisecond
 	)
 	mgr := newTestManager()
 	ciphertext, keyMetadata := encryptAll(t, mgr, testData(numBlocks*plainBlockSize))

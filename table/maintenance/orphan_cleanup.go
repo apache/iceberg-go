@@ -44,6 +44,7 @@ import (
 	"github.com/apache/iceberg-go/internal/fileuri"
 	"github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
+	"github.com/google/uuid"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -113,8 +114,9 @@ func WithCleanupLocation(location string) OrphanCleanupOption {
 }
 
 // WithCleanupFilesOlderThan only considers files last modified before now minus
-// duration, so recently written files are never treated as orphans. Defaults to
-// 72h. The duration must be non-negative.
+// duration. The duration must be non-negative and defaults to 72 hours. Keep
+// it longer than the longest expected write so cleanup does not delete files
+// from commits that are still in flight.
 func WithCleanupFilesOlderThan(duration time.Duration) OrphanCleanupOption {
 	return func(cfg *orphanCleanupConfig) {
 		rejectPlanOption(cfg, "WithCleanupFilesOlderThan")
@@ -249,7 +251,15 @@ type OrphanCleanupPlan struct {
 	orphanFiles         []OrphanFile
 	totalSizeBytes      int64
 	cutoff              time.Time
+	tableUUID           uuid.UUID
+	metadataWithoutUUID table.Metadata
+	metadataLocation    string
 }
+
+// ErrStaleOrphanCleanupPlan marks a plan that cannot be safely executed against
+// the current table. Execution refreshes a copy of the table, so callers must
+// refresh or reload their table before planning again after this error.
+var ErrStaleOrphanCleanupPlan = errors.New("orphan cleanup plan is stale")
 
 // Files returns a copy of the files in the cleanup plan.
 func (p OrphanCleanupPlan) Files() []string {
@@ -321,6 +331,12 @@ func rejectPlanOption(cfg *orphanCleanupConfig, name string) {
 //
 // The table filesystem must implement io.ListableIO so orphan cleanup can
 // fully enumerate candidate files before deciding what is safe to delete.
+// A non-dry run requires a catalog-backed table. It refreshes a copy of tbl
+// before planning and refreshes again to verify that the plan still matches
+// the table before deleting files. Use an age threshold longer than the
+// longest expected write (default 72 hours) to protect writes that commit
+// after the second refresh.
+// Dry runs plan from the supplied table metadata.
 // Orphan cleanup, including dry runs, is rejected when garbage collection is disabled via gc.enabled.
 func DeleteOrphanFiles(ctx context.Context, tbl *table.Table, opts ...OrphanCleanupOption) (OrphanCleanupResult, error) {
 	cfg := newOrphanCleanupConfig(opts...)
@@ -331,6 +347,14 @@ func DeleteOrphanFiles(ctx context.Context, tbl *table.Table, opts ...OrphanClea
 		return OrphanCleanupResult{}, err
 	}
 
+	if !cfg.dryRun {
+		refreshed, err := refreshOrphanCleanupTable(ctx, tbl)
+		if err != nil {
+			return OrphanCleanupResult{}, err
+		}
+		tbl = refreshed
+	}
+
 	plan, err := planOrphanFiles(ctx, tbl, cfg)
 	if err != nil {
 		return OrphanCleanupResult{}, err
@@ -339,7 +363,7 @@ func DeleteOrphanFiles(ctx context.Context, tbl *table.Table, opts ...OrphanClea
 		return plan.result(), nil
 	}
 
-	return executeOrphanCleanup(ctx, tbl, plan, cfg)
+	return executeOrphanCleanupPlan(ctx, tbl, plan, cfg)
 }
 
 // PlanOrphanFiles identifies orphan files without deleting anything. The
@@ -357,8 +381,13 @@ func PlanOrphanFiles(ctx context.Context, tbl *table.Table, opts ...OrphanCleanu
 	return planOrphanFiles(ctx, tbl, cfg)
 }
 
-// ExecuteOrphanCleanup deletes exactly the files in plan. It does not perform
-// another orphan scan, so files appearing after planning are not included.
+// ExecuteOrphanCleanup deletes the files in plan if the table metadata has not
+// changed since planning. Execution requires a catalog-backed table so it can
+// refresh metadata and reject plans that are already stale. This check does
+// not coordinate with commits that happen after the refresh; use an age
+// threshold longer than the longest expected write (the default is 72 hours).
+// If this returns ErrStaleOrphanCleanupPlan, tbl is unchanged; refresh or
+// reload it before planning again.
 // Orphan cleanup is rejected when garbage collection is disabled via gc.enabled.
 func ExecuteOrphanCleanup(ctx context.Context, tbl *table.Table, plan OrphanCleanupPlan, opts ...OrphanCleanupOption) (OrphanCleanupResult, error) {
 	cfg := newExecutionOrphanCleanupConfig(opts...)
@@ -375,7 +404,50 @@ func ExecuteOrphanCleanup(ctx context.Context, tbl *table.Table, plan OrphanClea
 		return plan.result(), nil
 	}
 
-	return executeOrphanCleanup(ctx, tbl, plan, cfg)
+	return executeOrphanCleanupPlan(ctx, tbl, plan, cfg)
+}
+
+func executeOrphanCleanupPlan(ctx context.Context, tbl *table.Table, plan OrphanCleanupPlan, cfg *orphanCleanupConfig) (OrphanCleanupResult, error) {
+	if len(plan.orphanFileLocations) == 0 {
+		return plan.result(), nil
+	}
+
+	refreshed, err := refreshOrphanCleanupTable(ctx, tbl)
+	if err != nil {
+		return OrphanCleanupResult{}, err
+	}
+	if plan.metadataLocation == "" {
+		return OrphanCleanupResult{}, fmt.Errorf("%w: plan has no metadata location", ErrStaleOrphanCleanupPlan)
+	}
+	if currentUUID := refreshed.Metadata().TableUUID(); currentUUID != plan.tableUUID {
+		return OrphanCleanupResult{}, fmt.Errorf("%w: table UUID changed from %q to %q",
+			ErrStaleOrphanCleanupPlan, plan.tableUUID, currentUUID)
+	}
+	if refreshed.MetadataLocation() != plan.metadataLocation {
+		return OrphanCleanupResult{}, fmt.Errorf("%w: metadata location changed from %q to %q",
+			ErrStaleOrphanCleanupPlan, plan.metadataLocation, refreshed.MetadataLocation())
+	}
+
+	// Format v1 metadata may have no UUID. The metadata location alone
+	// cannot confirm that a legacy catalog still points to the same state.
+	if plan.tableUUID == uuid.Nil &&
+		(plan.metadataWithoutUUID == nil || !plan.metadataWithoutUUID.Equals(refreshed.Metadata())) {
+		return OrphanCleanupResult{}, fmt.Errorf("%w: table metadata changed without a UUID", ErrStaleOrphanCleanupPlan)
+	}
+
+	return executeOrphanCleanup(ctx, refreshed, plan, cfg)
+}
+
+func refreshOrphanCleanupTable(ctx context.Context, tbl *table.Table) (*table.Table, error) {
+	refreshed := *tbl
+	if err := refreshed.Refresh(ctx); err != nil {
+		return nil, fmt.Errorf("failed to refresh table before orphan cleanup: %w", err)
+	}
+	if err := validateOrphanCleanupGC(&refreshed); err != nil {
+		return nil, err
+	}
+
+	return &refreshed, nil
 }
 
 func validateOrphanCleanupGC(tbl *table.Table) error {
@@ -446,6 +518,11 @@ func planOrphanFiles(ctx context.Context, tbl *table.Table, cfg *orphanCleanupCo
 		return OrphanCleanupPlan{}, err
 	}
 	plan.cutoff = cutoff
+	plan.tableUUID = tbl.Metadata().TableUUID()
+	if plan.tableUUID == uuid.Nil {
+		plan.metadataWithoutUUID = tbl.Metadata()
+	}
+	plan.metadataLocation = tbl.MetadataLocation()
 
 	return plan, nil
 }
@@ -489,9 +566,6 @@ func findOrphanFiles(
 }
 
 func executeOrphanCleanup(ctx context.Context, tbl *table.Table, plan OrphanCleanupPlan, cfg *orphanCleanupConfig) (OrphanCleanupResult, error) {
-	if err := validateOrphanCleanupGC(tbl); err != nil {
-		return OrphanCleanupResult{}, err
-	}
 	fs, err := tbl.FS(ctx)
 	if err != nil {
 		return OrphanCleanupResult{}, fmt.Errorf("failed to get filesystem: %w", err)

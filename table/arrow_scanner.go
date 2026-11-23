@@ -43,7 +43,7 @@ import (
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table/dv"
 	tblutils "github.com/apache/iceberg-go/table/internal"
-	"github.com/apache/iceberg-go/table/substrait"
+	"github.com/apache/iceberg-go/table/internal/substrait"
 	"github.com/substrait-io/substrait-go/v8/expr"
 	"golang.org/x/sync/errgroup"
 )
@@ -1074,10 +1074,6 @@ func readPositionDeleteBitmapsForPaths(
 	}
 
 	return bitmaps, nil
-}
-
-func readDeletes(ctx context.Context, fs iceio.IO, dataFile iceberg.DataFile) (map[string]*arrow.Chunked, error) {
-	return readDeletesForPaths(ctx, fs, dataFile, nil)
 }
 
 func readDeletesForPaths(ctx context.Context, fs iceio.IO, dataFile iceberg.DataFile,

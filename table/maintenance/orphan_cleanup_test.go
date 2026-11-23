@@ -184,7 +184,7 @@ func TestOrphanCleanupPlanDoesNotExpandAfterPlanning(t *testing.T) {
 		meta,
 		metadataLocation,
 		func(context.Context) (iceio.IO, error) { return fs, nil },
-		nil,
+		&orphanCleanupTestCatalog{metadata: meta, location: metadataLocation, fsF: testFSF(fs)},
 	)
 
 	plan, err := PlanOrphanFiles(ctx, tbl, WithCleanupFilesOlderThan(time.Hour))
@@ -2004,7 +2004,11 @@ func TestDeleteOrphanFilesPrefixMismatchModes(t *testing.T) {
 				meta,
 				"s3://bucket/table/metadata/v1.metadata.json",
 				func(context.Context) (iceio.IO, error) { return fsys, nil },
-				nil,
+				&orphanCleanupTestCatalog{
+					metadata: meta,
+					location: "s3://bucket/table/metadata/v1.metadata.json",
+					fsF:      func(context.Context) (iceio.IO, error) { return fsys, nil },
+				},
 			)
 
 			for _, mode := range []PrefixMismatchMode{

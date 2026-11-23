@@ -36,7 +36,7 @@ import (
 	"github.com/apache/iceberg-go"
 	iceberginternal "github.com/apache/iceberg-go/internal"
 	"github.com/apache/iceberg-go/io"
-	"github.com/apache/iceberg-go/table/substrait"
+	"github.com/apache/iceberg-go/table/internal/substrait"
 	"github.com/google/uuid"
 )
 
@@ -804,11 +804,24 @@ func getRetentionInt64(props iceberg.Properties, standardKey, legacyKey string, 
 // committing. A transaction containing only expiries with no updates makes no
 // commit attempt and never refreshes or replans.
 //
+// Snapshot expiration requires complete history even when the plan is empty.
+// On a refs-only REST table, expiration loads full history on demand for the
+// transaction's metadata revision. Staging fails with ErrInvalidOperation
+// if the catalog cannot supply that history or the table has advanced.
+// Retries also request full history before replaying the expiration.
+// Use [Transaction.ExpireSnapshotsWithContext] to control the staging request.
+//
 // The replay failures that make the transaction unusable are listed on
 // ErrTransactionUnusable.
 //
 // The "iceberg expire-snapshots" CLI command wraps the same operation.
 func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
+	return t.ExpireSnapshotsWithContext(context.Background(), opts...)
+}
+
+// ExpireSnapshotsWithContext stages expiration like [Transaction.ExpireSnapshots],
+// using ctx to load complete snapshot history when the table was loaded refs-only.
+func (t *Transaction) ExpireSnapshotsWithContext(ctx context.Context, opts ...ExpireSnapshotsOpt) error {
 	var (
 		cfg   = expireSnapshotsCfg{postCommit: true}
 		nowMs = time.Now().UnixMilli()
@@ -820,29 +833,6 @@ func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 	if cfg.validationErr != nil {
 		return cfg.validationErr
 	}
-	meta, err := t.txnMeta()
-	if err != nil {
-		return err
-	}
-	if err := validateGCEnabledForSnapshotExpiration(meta.props); err != nil {
-		return err
-	}
-
-	updates, walked, err := planExpiration(meta, cfg, nowMs)
-	if err != nil {
-		return err
-	}
-
-	return t.stageExpiration(expirationRecord{
-		cfg:           cfg,
-		nowMs:         nowMs,
-		walked:        walked,
-		removedBranch: removesRef(updates, cmp.Or(t.branch, MainBranch)),
-	}, updates)
-}
-
-// Record positions under the same lock as the updates they locate.
-func (t *Transaction) stageExpiration(rec expirationRecord, updates []Update) error {
 	if err := t.checkNotNil(); err != nil {
 		return err
 	}
@@ -853,10 +843,40 @@ func (t *Transaction) stageExpiration(rec expirationRecord, updates []Update) er
 	if err != nil {
 		return err
 	}
-	rec.pos = len(meta.updates)
-	if err := t.applyLocked(updates, nil); err != nil {
+	if err := t.checkUsable(); err != nil {
 		return err
 	}
+	if err := validateGCEnabledForSnapshotExpiration(meta.props); err != nil {
+		return err
+	}
+	base := t.tbl
+	if base.snapshotHistoryRefsOnly {
+		base, meta, err = loadExpirationHistory(ctx, base, meta)
+		if err != nil {
+			return err
+		}
+	}
+
+	updates, walked, err := planExpiration(meta, cfg, nowMs)
+	if err != nil {
+		return err
+	}
+
+	rec := expirationRecord{
+		cfg:           cfg,
+		nowMs:         nowMs,
+		walked:        walked,
+		removedBranch: removesRef(updates, cmp.Or(t.branch, MainBranch)),
+	}
+	rec.pos = len(meta.updates)
+	original := t.meta
+	t.meta = meta
+	if err := t.applyLocked(updates, nil); err != nil {
+		t.meta = original
+
+		return err
+	}
+	t.tbl = base
 	rec.count = len(t.meta.updates) - rec.pos
 	t.expirations = append(t.expirations, rec)
 

@@ -2322,10 +2322,10 @@ func TestSetReservedPropertiesFails(t *testing.T) {
 	// Test setting multiple properties where one is reserved
 	err = builder.SetProperties(iceberg.Properties{
 		"custom-property":         "allowed",
-		PropertyCurrentSnapshotId: "12345",
+		PropertyCurrentSnapshotID: "12345",
 		"another-custom-property": "also-allowed",
 	})
-	require.ErrorContains(t, err, "can't set reserved property "+PropertyCurrentSnapshotId)
+	require.ErrorContains(t, err, "can't set reserved property "+PropertyCurrentSnapshotID)
 }
 
 func TestSnapshotTimestampReservedPropertyKey(t *testing.T) {
@@ -2383,10 +2383,10 @@ func TestRemoveReservedPropertiesFails(t *testing.T) {
 	// Test removing multiple properties where one is reserved
 	err := builder.RemoveProperties([]string{
 		"custom-property",
-		PropertyUuid,
+		PropertyUUID,
 		"another-custom-property",
 	})
-	require.ErrorContains(t, err, "can't remove reserved property "+PropertyUuid)
+	require.ErrorContains(t, err, "can't remove reserved property "+PropertyUUID)
 
 	// Add some custom properties first, then test that removing non-reserved properties works
 	require.NoError(t, builder.SetProperties(iceberg.Properties{
@@ -4147,4 +4147,21 @@ func fillNonZero(v reflect.Value, seen map[reflect.Type]bool) bool {
 // reflect.ValueOf(ptr).Elem()); UnsafeAddr panics otherwise.
 func fieldValue(f reflect.Value) reflect.Value {
 	return reflect.NewAt(f.Type(), unsafe.Pointer(f.UnsafeAddr())).Elem()
+}
+
+func TestAddSchemaRejectsDuplicateFieldIDs(t *testing.T) {
+	// Reading metadata rejects a schema with duplicate IDs, so the builder
+	// must not write one.
+	meta, err := ParseMetadataString(ExampleTableMetadataV2)
+	require.NoError(t, err)
+	b, err := MetadataBuilderFromBase(meta, "")
+	require.NoError(t, err)
+
+	sc := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 0, Name: "a", Type: iceberg.PrimitiveTypes.Int32},
+		iceberg.NestedField{ID: 0, Name: "b", Type: iceberg.PrimitiveTypes.String})
+
+	err = b.AddSchema(sc)
+	require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+	assert.ErrorContains(t, err, "multiple fields for id 0: a and b")
 }

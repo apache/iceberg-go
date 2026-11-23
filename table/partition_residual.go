@@ -162,6 +162,12 @@ func (b *partitionResidualBuilder) VisitBound(pred iceberg.BoundPredicate) *part
 
 	projections := make([]partitionResidualProjection, 0, len(parts))
 	for _, part := range parts {
+		if part.HasMultipleSourcesForBuiltInTransform() {
+			// Do not simplify a row predicate from a historical field whose
+			// built-in transform has an unsupported number of sources.
+			continue
+		}
+
 		projection, err := newPartitionResidualProjection(
 			b.partitionSchema, part, pred, b.caseSensitive)
 		if err != nil {

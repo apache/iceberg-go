@@ -71,7 +71,7 @@ const (
 	// The ID of the Glue Data Catalog where the tables reside. If none is provided, Glue
 	// automatically uses the caller's AWS account ID by default.
 	// See: https://docs.aws.amazon.com/glue/latest/dg/aws-glue-api-catalog-databases.html
-	CatalogIdKey = "glue.id"
+	CatalogIDKey = "glue.id"
 
 	// Skip archiving old table versions on commits. Recommended for high-frequency
 	// streaming workloads to avoid hitting Glue's archive limits.
@@ -168,6 +168,8 @@ type Catalog struct {
 	// reporter builds and caches the catalog's metrics reporter once, so it is
 	// constructed per-catalog rather than per table load. Released by Close.
 	reporter metrics.CachedReporter
+
+	ioRegistry *io.Registry
 }
 
 // NewCatalog creates a new instance of glue.Catalog with the given options.
@@ -194,18 +196,19 @@ func NewCatalog(opts ...Option) (*Catalog, error) {
 	}
 
 	var catalogId *string
-	if val, ok := glueOps.awsProperties[CatalogIdKey]; ok {
+	if val, ok := glueOps.awsProperties[CatalogIDKey]; ok {
 		catalogId = &val
 	} else {
 		catalogId = nil
 	}
 
 	cat := &Catalog{
-		name:      glueOps.name,
-		glueSvc:   glue.NewFromConfig(glueOps.awsConfig),
-		catalogId: catalogId,
-		awsCfg:    &glueOps.awsConfig,
-		props:     iceberg.Properties(glueOps.awsProperties),
+		name:       glueOps.name,
+		glueSvc:    glue.NewFromConfig(glueOps.awsConfig),
+		catalogId:  catalogId,
+		awsCfg:     &glueOps.awsConfig,
+		props:      iceberg.Properties(glueOps.awsProperties),
+		ioRegistry: glueOps.ioRegistry,
 	}
 
 	// Resolve the metrics reporter once, up front. CachedReporter caches the
@@ -323,7 +326,7 @@ func (c *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 	// metrics-reporter-impl already failed there — no per-op guard is needed
 	// before mutating the catalog, and the trailing LoadTable reuses the cached
 	// reporter.
-	staged, err := internal.CreateStagedTable(ctx, c.props, c.namespacePropsFn(db), identifier, schema, opts...)
+	staged, err := internal.CreateStagedTable(ctx, c.props, c.namespacePropsFn(db), identifier, schema, c.ioRegistry, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -473,7 +476,7 @@ func (c *Catalog) commitS3TablesTable(ctx context.Context, database, tableName s
 	copy(stagedOpts, opts)
 	stagedOpts = append(stagedOpts, catalog.WithLocation(managedLocation))
 
-	staged, err := internal.CreateStagedTable(ctx, c.props, c.LoadNamespaceProperties, identifier, schema, stagedOpts...)
+	staged, err := internal.CreateStagedTable(ctx, c.props, c.LoadNamespaceProperties, identifier, schema, c.ioRegistry, stagedOpts...)
 	if err != nil {
 		return err
 	}
@@ -522,7 +525,7 @@ func (c *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier
 		ctx,
 		[]string{tableName},
 		metadataLocation,
-		io.LoadFSFunc(c.props, metadataLocation),
+		internal.LoadFSFuncWithRegistry(c.ioRegistry, c.props, metadataLocation),
 		c,
 		table.WithScanPlanningIOProperties(c.props),
 	)
@@ -567,7 +570,7 @@ func (c *Catalog) CommitTable(ctx context.Context, identifier table.Identifier, 
 	}
 
 	// Create a staging table with the updates applied
-	staged, err := internal.UpdateAndStageTable(ctx, c.props, current, identifier, requirements, updates, c)
+	staged, err := internal.UpdateAndStageTable(ctx, c.props, current, identifier, requirements, updates, c, c.ioRegistry)
 	if err != nil {
 		return nil, "", err
 	}
@@ -1124,7 +1127,7 @@ func (c *Catalog) convertGlueToIceberg(ctx context.Context, glueTable *types.Tab
 		awsconfig.NewContext(ctx, c.awsCfg),
 		TableIdentifier(database, tableName),
 		metadataLocation,
-		io.LoadFSFunc(c.props, metadataLocation),
+		internal.LoadFSFuncWithRegistry(c.ioRegistry, c.props, metadataLocation),
 		c,
 		table.WithMetricsReporter(reporter),
 		table.WithScanPlanningIOProperties(c.props),

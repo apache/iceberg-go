@@ -35,7 +35,7 @@ import (
 	"github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table/dv"
 	tblutils "github.com/apache/iceberg-go/table/internal"
-	"github.com/apache/iceberg-go/table/substrait"
+	"github.com/apache/iceberg-go/table/internal/substrait"
 	"github.com/google/uuid"
 	"golang.org/x/sync/errgroup"
 )
@@ -68,6 +68,7 @@ func (t *Transaction) performCopyOnWriteDeletion(ctx context.Context, operation 
 
 	commitUUID := uuid.New()
 	updater := t.updateSnapshot(wfs, snapshotProps, operation).mergeOverwrite(&commitUUID, filter)
+	updater.setOverwriteCaseSensitive(caseSensitive)
 	updater.setManifestConcurrency(concurrency)
 
 	filesToDelete, entriesToRewrite, err := t.classifyFilesForDeletions(ctx, fs, filter, caseSensitive, concurrency)
@@ -157,6 +158,7 @@ func (t *Transaction) performMergeOnReadDeletion(ctx context.Context, snapshotPr
 
 	commitUUID := uuid.New()
 	updater := t.updateSnapshot(wfs, snapshotProps, OpDelete).mergeOverwrite(&commitUUID, filter)
+	updater.setOverwriteCaseSensitive(caseSensitive)
 	updater.setManifestConcurrency(concurrency)
 
 	filesToDelete, withPartialDeletions, err := t.classifyFilesForDeletions(ctx, fs, filter, caseSensitive, concurrency)

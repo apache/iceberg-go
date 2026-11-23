@@ -31,7 +31,13 @@ import (
 )
 
 func runExpireSnapshots(ctx context.Context, output Output, cat catalog.Catalog, cmd *ExpireSnapshotsCmd) {
-	tbl := loadTable(ctx, output, cat, cmd.TableID)
+	// The preview compares the base and staged snapshot lists, so both
+	// must include history that an ordinary refs-only load can omit.
+	load := cat.LoadTable
+	if loader, ok := cat.(table.FullSnapshotHistoryLoader); ok {
+		load = loader.LoadTableWithFullSnapshotHistory
+	}
+	tbl := loadTableUsing(ctx, output, load, cmd.TableID)
 
 	var opts []table.ExpireSnapshotsOpt
 
@@ -52,7 +58,7 @@ func runExpireSnapshots(ctx context.Context, output Output, cat catalog.Catalog,
 	opts = append(opts, table.WithPostCommit(false))
 
 	tx := tbl.NewTransaction()
-	if err := tx.ExpireSnapshots(opts...); err != nil {
+	if err := tx.ExpireSnapshotsWithContext(ctx, opts...); err != nil {
 		output.Error(fmt.Errorf("expire snapshots failed: %w", err))
 		osExit(1)
 	}
@@ -100,7 +106,7 @@ func runExpireSnapshots(ctx context.Context, output Output, cat catalog.Catalog,
 	}
 
 	realTx := tbl.NewTransaction()
-	if err := realTx.ExpireSnapshots(realOpts...); err != nil {
+	if err := realTx.ExpireSnapshotsWithContext(ctx, realOpts...); err != nil {
 		output.Error(fmt.Errorf("expire snapshots failed: %w", err))
 		osExit(1)
 	}

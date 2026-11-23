@@ -413,7 +413,7 @@ func TestDefaultDataFileWriterReusesExactBatch(t *testing.T) {
 	record.Retain()
 
 	_, err = writer.writeFile(t.Context(), nil, WriteTask{
-		Uuid: uuid.New(), ID: 1, FileCount: 1, Schema: schema,
+		UUID: uuid.New(), ID: 1, FileCount: 1, Schema: schema,
 		Batches: []arrow.RecordBatch{record},
 	})
 	require.NoError(t, err)
@@ -476,7 +476,7 @@ func TestRollingDataWriterReusesExactBatch(t *testing.T) {
 	factory.format = format
 
 	output := make(chan iceberg.DataFile, 1)
-	writer := factory.newRollingDataWriter(t.Context(), "", nil, output)
+	writer := factory.newRollingDataWriter(t.Context(), "", nil, output, factory.currentSpec)
 	record := projectionTestRecord(t, mem, arrowSchema, []byte(`{"id": 1}`))
 	defer record.Release()
 

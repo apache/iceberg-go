@@ -598,11 +598,11 @@ for _, s := range tbl.Metadata().Snapshots() {
 
 ### Comparing physical files between snapshots (v1-v3)
 
-Use `tbl.Inspect().DiffSnapshotFiles` to compare the live content files
+Use `tbl.DiffSnapshotFiles` to compare the live content files
 referenced by two snapshot IDs, including snapshots on different branches:
 
 ```go
-diff, err := tbl.Inspect().DiffSnapshotFiles(ctx, fromSnapshotID, toSnapshotID)
+diff, err := tbl.DiffSnapshotFiles(ctx, fromSnapshotID, toSnapshotID)
 if err != nil {
     return err
 }
@@ -704,7 +704,7 @@ changing table data. This is especially useful for checking imported v1 tables
 before allowing them into production.
 
 ```go
-report, err := tbl.Inspect().ValidateSnapshot(ctx, snapshotID)
+report, err := tbl.ValidateSnapshot(ctx, snapshotID)
 if err != nil {
     return err // I/O failed or the scan was canceled; report may be incomplete.
 }
@@ -853,6 +853,19 @@ if err != nil { /* ... */ }
 newTbl, err := txn.Commit(ctx)
 ```
 
+Snapshot expiration needs complete ancestry to honor branch retention and snapshot
+references. When a REST table was loaded with `snapshot-loading-mode=refs`,
+expiration requests `snapshots=all` for the transaction's metadata revision
+and keeps any updates already staged in the transaction. Use
+`Transaction.ExpireSnapshotsWithContext(ctx, ...)` to control that request.
+
+If the catalog cannot supply complete history or the metadata revision has
+changed, staging returns an error matching `table.ErrInvalidOperation`.
+Reload the table and start a new transaction if the revision changed.
+Commit retries and resumed commits also request full history before replanning
+expiration. If the catalog still returns refs-only history, the commit stops
+before resubmitting and returns an error matching `table.ErrTransactionUnusable`.
+
 Pass `table.WithPostCommit(true)` to delete the unreferenced data and metadata files after the commit lands. The `iceberg expire-snapshots` CLI command wraps the same operation - see [CLI](./cli.md).
 
 ## Views
@@ -886,6 +899,14 @@ v.Properties()            // iceberg.Properties
 ```
 
 `view.New(ident, meta, metadataLocation)` constructs a view from already-loaded metadata; `view.NewFromLocation(ctx, ident, metadataLocation, fsysFactory)` loads metadata from disk or object storage.
+
+Pass `view.WithIORegistry(registry)` to `view.CreateView`,
+`view.CreateViewWithIOProperties`, `view.CreateViewFromVersion`, or
+`view.WriteMetadata` to use isolated FileIO. For `view.NewFromLocation`,
+pass a filesystem factory from the registry. The IO-properties helpers
+keep filesystem configuration (`ioProps`) separate from persisted view
+properties (`metadataProps`). See
+[FileIO configuration](./configuration.md#file-system-credentials).
 
 ## Iceberg ↔ Arrow types
 

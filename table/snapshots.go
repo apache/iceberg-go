@@ -31,6 +31,7 @@ import (
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/internal"
 	iceio "github.com/apache/iceberg-go/io"
+	tblutils "github.com/apache/iceberg-go/table/internal"
 )
 
 type Operation string
@@ -60,7 +61,7 @@ func ValidOperation(s string) (Operation, error) {
 }
 
 const (
-	operationKey = "operation"
+	operationKey = tblutils.SummaryOperationKey
 
 	addedDataFilesKey         = "added-data-files"
 	addedDeleteFilesKey       = "added-delete-files"

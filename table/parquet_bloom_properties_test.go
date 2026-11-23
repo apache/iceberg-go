@@ -81,7 +81,7 @@ func TestParquetBloomLogicalPathsOnDisk(t *testing.T) {
 				}, builder, fileSchema, 1048576, withFactoryFileSchema(fileSchema))
 				require.NoError(t, err)
 				defer factory.stopCount()
-				writer, err := factory.openFileWriter(t.Context(), "", nil, 0, 1, nil)
+				writer, err := factory.openFileWriter(t.Context(), "", nil, 0, 1, nil, factory.currentSpec)
 				require.NoError(t, err)
 				require.NoError(t, writer.Write(batch))
 				df, err = writer.Close()
@@ -91,7 +91,7 @@ func TestParquetBloomLogicalPathsOnDisk(t *testing.T) {
 				require.NoError(t, err)
 				batch.Retain()
 				df, err = writer.writeFile(t.Context(), nil, WriteTask{
-					Uuid: uuid.New(), Schema: fileSchema, Batches: []arrow.RecordBatch{batch}, FileCount: 1,
+					UUID: uuid.New(), Schema: fileSchema, Batches: []arrow.RecordBatch{batch}, FileCount: 1,
 				})
 				require.NoError(t, err)
 			}

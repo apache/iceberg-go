@@ -320,6 +320,42 @@ func TestCollectPartitionStatisticsDecimalFromManifest(t *testing.T) {
 	require.Equal(t, amount.Val, partition.Field(0).(*array.Decimal128).Value(0))
 }
 
+func TestCollectPartitionStatisticsPromotedIdentitySource(t *testing.T) {
+	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{1}, FieldID: 1000, Name: "p", Transform: iceberg.IdentityTransform{},
+	})
+	partitionType := iceberg.NewStructType(
+		iceberg.NestedField{ID: 1000, Name: "p", Type: iceberg.PrimitiveTypes.Int64},
+	)
+	const snapshotID = int64(7)
+	fs := iceio.NewMemFS()
+	// Manifests written before the int to long promotion decode p as int32,
+	// later ones as int64. Both must count toward the same partition.
+	writeManifest := func(name string, sourceType iceberg.Type, value any, count int64) string {
+		schema := iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "p", Type: sourceType, Required: true})
+		df := newTestDataFileWithCount(t, spec, "mem://stats/"+name+".parquet", map[int]any{1000: value}, count)
+		path := "mem://stats/" + name + "-manifest.avro"
+		var encoded bytes.Buffer
+		_, err := iceberg.WriteManifest(path, &encoded, 1, spec, schema, snapshotID,
+			[]iceberg.ManifestEntry{iceberg.NewManifestEntry(iceberg.EntryStatusADDED, new(snapshotID), nil, nil, df)})
+		require.NoError(t, err)
+		require.NoError(t, fs.WriteFile(t.Context(), path, encoded.Bytes()))
+
+		return path
+	}
+	snapshot := Snapshot{SnapshotID: snapshotID, ManifestLocations: []string{
+		writeManifest("before", iceberg.PrimitiveTypes.Int32, int32(5), 4),
+		writeManifest("after", iceberg.PrimitiveTypes.Int64, int64(5), 6),
+	}}
+
+	rows, err := collectPartitionStatistics(t.Context(), fs, snapshot, partitionType, []iceberg.PartitionSpec{spec}, 1, nil)
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	require.Equal(t, int64(5), rows[0].Partition[1000])
+	require.Equal(t, int64(10), rows[0].DataRecordCount)
+	require.Equal(t, int32(2), rows[0].DataFileCount)
+}
+
 func TestTransactionPartitionStatisticsRegistration(t *testing.T) {
 	tbl := inspectTestTable(Identifier{"db", "stats"}, map[string]SnapshotRef{
 		MainBranch: {SnapshotID: 103, Type: BranchRef},

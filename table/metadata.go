@@ -33,6 +33,7 @@ import (
 
 	"github.com/apache/iceberg-go"
 	iceinternal "github.com/apache/iceberg-go/internal"
+	tblutils "github.com/apache/iceberg-go/table/internal"
 	"github.com/google/uuid"
 )
 
@@ -810,6 +811,11 @@ func (b *MetadataBuilder) currentSnapshotForRef(ref string) *Snapshot {
 
 func (b *MetadataBuilder) AddSchema(schema *iceberg.Schema) error {
 	if err := checkSchemaCompatibility(schema, b.formatVersion); err != nil {
+		return err
+	}
+	// The schema is stored with the caller's IDs, and reading metadata rejects
+	// duplicate IDs, including 0 and negatives, so reject them here too.
+	if err := validateUniqueFieldIDs(schema); err != nil {
 		return err
 	}
 
@@ -1779,11 +1785,7 @@ func (b *MetadataBuilder) NameMapping() iceberg.NameMapping {
 }
 
 func validateNameMappingProperty(props iceberg.Properties, mapping iceberg.NameMapping) error {
-	if _, exists := props[DefaultNameMappingKey]; exists && mapping == nil {
-		return fmt.Errorf("%w: invalid %s", ErrInvalidMetadata, DefaultNameMappingKey)
-	}
-
-	return nil
+	return tblutils.ValidateNameMappingProperty(props, DefaultNameMappingKey, mapping, ErrInvalidMetadata)
 }
 
 func (b *MetadataBuilder) TrimMetadataLogs(maxEntries int) *MetadataBuilder {
@@ -2184,7 +2186,10 @@ func ParseMetadataBytes(b []byte) (Metadata, error) {
 		return nil, err
 	}
 
-	var ret Metadata
+	var ret interface {
+		Metadata
+		json.Unmarshaler
+	}
 	switch formatVersion {
 	case 1:
 		ret = &metadataV1{}
@@ -2201,7 +2206,10 @@ func ParseMetadataBytes(b []byte) (Metadata, error) {
 		return nil, err
 	}
 
-	if err := json.Unmarshal(normalized, ret); err != nil {
+	// Preflight already checked JSON syntax. Call the decoder directly to avoid
+	// scanning the entire document again before entering UnmarshalJSON.
+	start, end := trimJSONSpan(normalized, 0, len(normalized))
+	if err := ret.UnmarshalJSON(normalized[start:end]); err != nil {
 		if errors.Is(err, ErrInvalidMetadata) {
 			return nil, err
 		}
@@ -2251,29 +2259,6 @@ func preflightMetadataBytes(b []byte) (map[string]json.RawMessage, int, error) {
 	}
 
 	return metadata, formatVersion, nil
-}
-
-func requirePartitionSpecIDs(b []byte) error {
-	var metadata map[string]json.RawMessage
-	if err := json.Unmarshal(b, &metadata); err != nil {
-		return fmt.Errorf("%w: %w", ErrInvalidMetadata, err)
-	}
-
-	return requirePartitionSpecIDsFromMetadata(metadata)
-}
-
-func requirePartitionSpecIDsFromMetadata(metadata map[string]json.RawMessage) error {
-	rawSpecs, ok := metadata["partition-specs"]
-	if !ok {
-		return nil
-	}
-
-	var specs []rawPartitionSpec
-	if err := json.Unmarshal(rawSpecs, &specs); err != nil {
-		return fmt.Errorf("%w: invalid partition-specs: %w", ErrInvalidMetadata, err)
-	}
-
-	return validatePartitionSpecIDs(specs)
 }
 
 type rawPartitionSpec struct {
@@ -3764,13 +3749,13 @@ func NewMetadataWithUUID(sc *iceberg.Schema, partitions *iceberg.PartitionSpec, 
 	return builder.Build()
 }
 
-type ReassignedIds struct {
+type ReassignedIDs struct {
 	schema        *iceberg.Schema
 	partitionSpec *iceberg.PartitionSpec
 	sortOrder     SortOrder
 }
 
-func reassignIDs(sc *iceberg.Schema, partitions *iceberg.PartitionSpec, sortOrder SortOrder) (*ReassignedIds, error) {
+func reassignIDs(sc *iceberg.Schema, partitions *iceberg.PartitionSpec, sortOrder SortOrder) (*ReassignedIDs, error) {
 	previousMapFn := sc.FindColumnName
 	freshSc, err := iceberg.AssignFreshSchemaIDs(sc, nil)
 	if err != nil {
@@ -3807,7 +3792,7 @@ func reassignIDs(sc *iceberg.Schema, partitions *iceberg.PartitionSpec, sortOrde
 		return nil, fmt.Errorf("%w: %w", ErrInvalidMetadata, err)
 	}
 
-	return &ReassignedIds{
+	return &ReassignedIDs{
 		schema:        freshSc,
 		partitionSpec: &freshPartitions,
 		sortOrder:     freshSortOrder,

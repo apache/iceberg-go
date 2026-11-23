@@ -1013,19 +1013,19 @@ func NewCatalog(ctx context.Context, name, uri string, opts ...Option) (*Catalog
 }
 
 // defaultOAuthTimeout bounds a single OAuth token-refresh request made by the
-// built-in Oauth2AuthManager. oauth2's TokenSource.Token() takes no context, so
+// built-in OAuth2AuthManager. oauth2's TokenSource.Token() takes no context, so
 // this Timeout on the refresh client is what keeps a stalled or black-holing
 // token endpoint from blocking auth — and therefore any request that triggers a
 // refresh, including asynchronous metrics reports — indefinitely.
 const defaultOAuthTimeout = 60 * time.Second
 
-// setupOAuthManager creates an Oauth2AuthManager based on the provided options.
+// setupOAuthManager creates an OAuth2AuthManager based on the provided options.
 // It uses golang.org/x/oauth2 for token management, caching, and thread-safe refresh.
 // The returned cleanup closes an internally-created OAuth transport, if any.
 func setupOAuthManager(r *Catalog, cl *http.Client, opts *options) (AuthManager, func()) {
 	// If a static token is provided, use it directly.
 	if opts.oauthToken != "" {
-		return &Oauth2AuthManager{
+		return &OAuth2AuthManager{
 			tokenSource: oauth2.StaticTokenSource(&oauth2.Token{
 				AccessToken: opts.oauthToken,
 				TokenType:   "Bearer",
@@ -1100,7 +1100,7 @@ func setupOAuthManager(r *Catalog, cl *http.Client, opts *options) (AuthManager,
 	}
 	ctx = context.WithValue(ctx, oauth2.HTTPClient, oauthClient)
 
-	return &Oauth2AuthManager{
+	return &OAuth2AuthManager{
 		tokenSource: cfg.TokenSource(ctx),
 	}, closeIdleConnections
 }
@@ -1755,8 +1755,24 @@ func (r *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 	if cfg.SortOrder.Fields() == nil && cfg.SortOrder.OrderID() == 0 {
 		cfg.SortOrder = table.UnsortedSortOrder
 	}
+	if cfg.PartitionSpec != nil {
+		// REST create-table sends the caller's spec directly. Validate it against
+		// the schema in this request before encoding the payload, since ordinary
+		// PartitionSpec JSON must remain lenient for historical metadata.
+		if _, err := cfg.PartitionSpec.BindToSchema(schema, nil, nil); err != nil {
+			return nil, err
+		}
+	}
 
 	stagedCreate := len(cfg.StagedUpdates) > 0
+	if stagedCreate {
+		// Phase two runs after the server has created the staged table. Check
+		// that its updates can be encoded now, before the first POST can leave an
+		// orphaned staged table on a local serialization error.
+		if _, err := json.Marshal(cfg.StagedUpdates); err != nil {
+			return nil, fmt.Errorf("failed to encode staged create updates: %w", err)
+		}
+	}
 
 	payload := createTableRequest{
 		Name:          identPath.rawName,
@@ -2032,6 +2048,16 @@ func (r *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier
 // snapshot-loading-mode "all" or omit the property entirely.
 func (r *Catalog) LoadTable(ctx context.Context, identifier table.Identifier) (*table.Table, error) {
 	return r.loadTableWithMode(ctx, identifier, r.snapshotMode)
+}
+
+// LoadTableWithFullSnapshotHistory requests all valid snapshots for this load.
+// The catalog's configured mode still applies to regular LoadTable calls.
+func (r *Catalog) LoadTableWithFullSnapshotHistory(ctx context.Context, identifier table.Identifier) (*table.Table, error) {
+	if r.snapshotMode != SnapshotModeRefs {
+		return r.LoadTable(ctx, identifier)
+	}
+
+	return r.loadTableWithMode(ctx, identifier, SnapshotModeAll)
 }
 
 func (r *Catalog) loadTableWithMode(ctx context.Context, identifier table.Identifier, mode SnapshotMode) (*table.Table, error) {

@@ -111,7 +111,7 @@ func TestDeleteParquetSettingsOnDisk(t *testing.T) {
 					defer factory.stopCount()
 					writerProps = factory.writeProps.([]parquet.WriterProperty)
 					rowGroupBytes = factory.rowGroupBytes
-					writer, err := factory.openFileWriter(ctx, "", nil, 0, 1, nil)
+					writer, err := factory.openFileWriter(ctx, "", nil, 0, 1, nil, factory.currentSpec)
 					require.NoError(t, err)
 					for _, rec := range batches {
 						require.NoError(t, writer.Write(rec))
@@ -128,7 +128,7 @@ func TestDeleteParquetSettingsOnDisk(t *testing.T) {
 						rec.Retain()
 					}
 					df, err = writer.writeFile(ctx, nil, WriteTask{
-						Uuid: uuid.New(), Schema: fileSchema, Batches: batches, FileCount: 1,
+						UUID: uuid.New(), Schema: fileSchema, Batches: batches, FileCount: 1,
 					})
 					require.NoError(t, err)
 				}
@@ -318,7 +318,7 @@ func TestDeleteParquetCodecOverrideWithoutLevelWrites(t *testing.T) {
 				withContent(content), withFileSchema(schema), withEqualityFieldIDs(equalityIDs))
 			require.NoError(t, err)
 			record.Retain()
-			dataFile, err := writer.writeFile(t.Context(), nil, WriteTask{Uuid: uuid.New(), Schema: schema, Batches: []arrow.RecordBatch{record}, FileCount: 1})
+			dataFile, err := writer.writeFile(t.Context(), nil, WriteTask{UUID: uuid.New(), Schema: schema, Batches: []arrow.RecordBatch{record}, FileCount: 1})
 			require.NoError(t, err)
 			input, err := fs.Open(t.Context(), dataFile.FilePath())
 			require.NoError(t, err)

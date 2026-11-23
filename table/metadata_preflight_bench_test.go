@@ -20,6 +20,7 @@ package table
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"testing"
 )
 
@@ -27,18 +28,20 @@ var metadataParseBenchmarkSink int
 
 func BenchmarkParseMetadataBytes(b *testing.B) {
 	for _, tc := range []struct {
-		name               string
-		schemaCount        int
-		partitionSpecCount int
-		snapshotCount      int
-		propertyCount      int
+		name                 string
+		schemaCount          int
+		partitionSpecCount   int
+		snapshotCount        int
+		propertyCount        int
+		summaryPropertyCount int
 	}{
 		{name: "schemas=1/specs=1/snapshots=10", schemaCount: 1, partitionSpecCount: 1, snapshotCount: 10},
+		{name: "schemas=1/specs=1/snapshots=64", schemaCount: 1, partitionSpecCount: 1, snapshotCount: 64, summaryPropertyCount: 14},
 		{name: "schemas=32/specs=32/snapshots=1000", schemaCount: 32, partitionSpecCount: 32, snapshotCount: 1_000, propertyCount: 16},
 		{name: "schemas=256/specs=256/snapshots=10000", schemaCount: 256, partitionSpecCount: 256, snapshotCount: 10_000, propertyCount: 64},
 	} {
 		b.Run(tc.name, func(b *testing.B) {
-			data := benchmarkMetadataJSON(tc.schemaCount, tc.partitionSpecCount, tc.snapshotCount, tc.propertyCount)
+			data := benchmarkMetadataJSON(tc.schemaCount, tc.partitionSpecCount, tc.snapshotCount, tc.propertyCount, tc.summaryPropertyCount)
 			if _, err := ParseMetadataBytes(data); err != nil {
 				b.Fatal(err)
 			}
@@ -58,7 +61,7 @@ func BenchmarkParseMetadataBytes(b *testing.B) {
 	}
 }
 
-func benchmarkMetadataJSON(schemaCount, partitionSpecCount, snapshotCount, propertyCount int) []byte {
+func benchmarkMetadataJSON(schemaCount, partitionSpecCount, snapshotCount, propertyCount, summaryPropertyCount int) []byte {
 	const minuteInMS = int64(60_000)
 
 	metadata := map[string]any{
@@ -76,7 +79,7 @@ func benchmarkMetadataJSON(schemaCount, partitionSpecCount, snapshotCount, prope
 		"schemas":               benchmarkSchemas(schemaCount),
 		"partition-specs":       benchmarkPartitionSpecs(partitionSpecCount),
 		"properties":            benchmarkMetadataProperties(propertyCount),
-		"snapshots":             benchmarkParseMetadataSnapshots(snapshotCount, minuteInMS),
+		"snapshots":             benchmarkParseMetadataSnapshots(snapshotCount, minuteInMS, summaryPropertyCount),
 		"snapshot-log":          benchmarkParseMetadataSnapshotLogEntries(snapshotCount, minuteInMS),
 		"metadata-log":          []any{map[string]any{"metadata-file": "s3://bucket/metadata/v1.json", "timestamp-ms": int64(0)}},
 		"current-snapshot-id":   int64(snapshotCount),
@@ -135,15 +138,19 @@ func benchmarkMetadataProperties(count int) map[string]string {
 	return properties
 }
 
-func benchmarkParseMetadataSnapshots(count int, minuteInMS int64) []any {
+func benchmarkParseMetadataSnapshots(count int, minuteInMS int64, summaryPropertyCount int) []any {
 	snapshots := make([]any, count)
 	for i := range snapshots {
 		id := int64(i + 1)
+		summary := map[string]string{"operation": "append"}
+		for property := range summaryPropertyCount {
+			summary[fmt.Sprintf("metric-%d", property)] = strconv.Itoa(i + property)
+		}
 		snapshot := map[string]any{
 			"snapshot-id":     id,
 			"timestamp-ms":    id * minuteInMS,
 			"sequence-number": i + 1,
-			"summary":         map[string]any{"operation": "append"},
+			"summary":         summary,
 			"manifest-list":   fmt.Sprintf("s3://bucket/manifests/%d.avro", id),
 		}
 		if i > 0 {

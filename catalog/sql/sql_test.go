@@ -1946,6 +1946,53 @@ func (s *SqliteCatalogTestSuite) TestStaleSchemaUpdateIsRefusedOnRecommit() {
 	s.Equal(peerMeta.MetadataLocation(), current.MetadataLocation(), "nothing may be committed")
 }
 
+// The peer's add and drop leave the schema ID unchanged, so only
+// last-assigned-field-id stops the stale writer from reusing field ID 2.
+func (s *SqliteCatalogTestSuite) TestStaleSchemaUpdateDoesNotReuseDroppedFieldID() {
+	ctx := context.Background()
+	cat := s.getCatalogSqlite()
+	defer cat.Close()
+	tblID := s.createStringTable(ctx, cat, nil)
+
+	stale, err := cat.LoadTable(ctx, tblID)
+	s.Require().NoError(err)
+	tx := s.addStringColumn(ctx, stale, "x")
+
+	peer, err := cat.LoadTable(ctx, tblID)
+	s.Require().NoError(err)
+	peer, err = s.addStringColumn(ctx, peer, "y").Commit(ctx)
+	s.Require().NoError(err)
+
+	arrowSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "foo", Type: arrow.BinaryTypes.String},
+		{Name: "y", Type: arrow.BinaryTypes.String, Nullable: true},
+	}, nil)
+	rec, _, err := array.RecordFromJSON(memory.DefaultAllocator, arrowSchema,
+		strings.NewReader(`[{"foo": "seed", "y": "42"}]`))
+	s.Require().NoError(err)
+	defer rec.Release()
+	arrTable := array.NewTableFromRecords(arrowSchema, []arrow.RecordBatch{rec})
+	defer arrTable.Release()
+	appendTx := peer.NewTransaction()
+	s.Require().NoError(appendTx.AppendTable(ctx, arrTable, 1024, nil))
+	peer, err = appendTx.Commit(ctx)
+	s.Require().NoError(err)
+
+	dropTx := peer.NewTransaction()
+	s.Require().NoError(dropTx.UpdateSchema(true, false).DeleteColumn([]string{"y"}).Commit())
+	peer, err = dropTx.Commit(ctx)
+	s.Require().NoError(err)
+	s.Require().Equal(stale.Metadata().CurrentSchema().ID, peer.Metadata().CurrentSchema().ID)
+	s.Require().Equal(2, peer.Metadata().LastColumnID())
+
+	_, err = tx.Commit(ctx)
+	s.Require().ErrorIs(err, table.ErrCommitFailed)
+
+	current, err := cat.LoadTable(ctx, tblID)
+	s.Require().NoError(err)
+	s.Require().Equal(peer.MetadataLocation(), current.MetadataLocation(), "nothing may be committed")
+}
+
 func (s *SqliteCatalogTestSuite) TestRejectedUpdateResumesThenEndsWhenReplayCannotApply() {
 	ctx := context.Background()
 	cat := s.getCatalogSqlite()
@@ -3502,6 +3549,30 @@ func (s *SqliteCatalogTestSuite) TestCommitTable() {
 	}
 }
 
+func (s *SqliteCatalogTestSuite) TestCommitTableRejectsDuplicateFieldIDs() {
+	// A schema with two fields at ID 0 would be written and then fail to load,
+	// so the commit must fail and leave the table unchanged.
+	ctx := context.Background()
+	cat := s.getCatalogSqlite()
+	tblID := s.randomTableIdentifier()
+	s.Require().NoError(cat.CreateNamespace(ctx, catalog.NamespaceFromIdent(tblID), nil))
+
+	tbl, err := cat.CreateTable(ctx, tblID, tableSchemaNested)
+	s.Require().NoError(err)
+
+	dup := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 0, Name: "a", Type: iceberg.PrimitiveTypes.Int32},
+		iceberg.NestedField{ID: 0, Name: "b", Type: iceberg.PrimitiveTypes.String})
+	_, _, err = cat.CommitTable(ctx, tblID, nil, []table.Update{table.NewAddSchemaUpdate(dup)})
+	s.Require().ErrorIs(err, iceberg.ErrInvalidSchema)
+	s.ErrorContains(err, "multiple fields for id 0: a and b")
+
+	loaded, err := cat.LoadTable(ctx, tblID)
+	s.Require().NoError(err)
+	s.Equal(tbl.MetadataLocation(), loaded.MetadataLocation())
+	s.Len(loaded.Metadata().Schemas(), 1)
+}
+
 func (s *SqliteCatalogTestSuite) TestCommitTableWithStatisticsUpdate() {
 	ctx := context.Background()
 	cat := s.getCatalogSqlite()
@@ -3597,6 +3668,29 @@ func (s *SqliteCatalogTestSuite) TestCreateView() {
 		foundNested = true
 	}
 	s.True(foundNested)
+}
+
+func (s *SqliteCatalogTestSuite) TestCreateViewRejectsDuplicateFieldIDs() {
+	// A view schema with two fields at ID 0 would be written and then fail to
+	// load, so CreateView must fail and not create the view.
+	ctx := context.Background()
+	db := s.getCatalogSqlite()
+	s.Require().NoError(db.CreateSQLTables(ctx))
+
+	nsName := databaseName()
+	viewID := table.Identifier{nsName, tableName()}
+	s.Require().NoError(db.CreateNamespace(ctx, []string{nsName}, nil))
+
+	dup := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 0, Name: "a", Type: iceberg.PrimitiveTypes.Int32},
+		iceberg.NestedField{ID: 0, Name: "b", Type: iceberg.PrimitiveTypes.String})
+	err := createTestView(ctx, db, viewID, dup, view.Representation{SQL: "SELECT 1", Dialect: "spark"}, nil)
+	s.Require().ErrorIs(err, iceberg.ErrInvalidSchema)
+	s.ErrorContains(err, "multiple fields for id 0: a and b")
+
+	exists, err := db.CheckViewExists(ctx, viewID)
+	s.Require().NoError(err)
+	s.False(exists)
 }
 
 func TestViewOperationsRejectInvalidIdentifiers(t *testing.T) {
@@ -4030,6 +4124,45 @@ func (s *SqliteCatalogTestSuite) TestDropViewRemovesLegacyInvalidView() {
 		db.Name(), nsName, viewName, sqlcat.ViewType,
 	).Scan(&count))
 	s.Zero(count)
+}
+
+func (s *SqliteCatalogTestSuite) TestDropViewWithDuplicateFieldIDs() {
+	// Older releases could write a view whose schema has two fields at ID 0.
+	// Such a view no longer loads, but DropView must still remove it, so it
+	// can be recreated.
+	ctx := context.Background()
+	db := s.getCatalogSqlite()
+	s.Require().NoError(db.CreateSQLTables(ctx))
+
+	nsName := databaseName()
+	viewID := table.Identifier{nsName, tableName()}
+	s.Require().NoError(db.CreateNamespace(ctx, []string{nsName}, nil))
+
+	sc := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "a", Type: iceberg.PrimitiveTypes.Int32},
+		iceberg.NestedField{ID: 2, Name: "b", Type: iceberg.PrimitiveTypes.String})
+	version := &view.Version{Representations: []view.Representation{
+		view.NewRepresentation(view.Representation{SQL: "SELECT 1", Dialect: "spark"}),
+	}}
+	created, err := db.CreateView(ctx, viewID, version, sc)
+	s.Require().NoError(err)
+
+	// Rewrite the metadata file so both fields have ID 0.
+	path := strings.TrimPrefix(created.MetadataLocation(), "file://")
+	data, err := os.ReadFile(path)
+	s.Require().NoError(err)
+	bad := strings.Replace(string(data), `"id":1,"name":"a"`, `"id":0,"name":"a"`, 1)
+	bad = strings.Replace(bad, `"id":2,"name":"b"`, `"id":0,"name":"b"`, 1)
+	s.Require().NotEqual(string(data), bad)
+	s.Require().NoError(os.WriteFile(path, []byte(bad), 0o644))
+
+	_, err = db.LoadView(ctx, viewID)
+	s.Require().ErrorIs(err, iceberg.ErrInvalidSchema)
+
+	s.Require().NoError(db.DropView(ctx, viewID))
+	exists, err := db.CheckViewExists(ctx, viewID)
+	s.Require().NoError(err)
+	s.False(exists)
 }
 
 func (s *SqliteCatalogTestSuite) TestDropViewWithInvalidMetadataLocation() {

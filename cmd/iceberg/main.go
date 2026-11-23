@@ -875,7 +875,11 @@ func describe(ctx context.Context, output Output, cat catalog.Catalog, id string
 }
 
 func loadTable(ctx context.Context, output Output, cat catalog.Catalog, id string) *table.Table {
-	tbl, err := cat.LoadTable(ctx, catalog.ToIdentifier(id))
+	return loadTableUsing(ctx, output, cat.LoadTable, id)
+}
+
+func loadTableUsing(ctx context.Context, output Output, load func(context.Context, table.Identifier) (*table.Table, error), id string) *table.Table {
+	tbl, err := load(ctx, catalog.ToIdentifier(id))
 	if err != nil {
 		output.Error(err)
 		osExit(1)
