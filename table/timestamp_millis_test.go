@@ -614,3 +614,85 @@ func TestScanTimestampMillisOverflowReturnsError(t *testing.T) {
 	}
 	require.ErrorIs(t, scanErr, iceberg.ErrInvalidArgument)
 }
+
+func TestScanTimestampMillisWithDictionaryColumns(t *testing.T) {
+	t0 := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	t1 := t0.Add(1500 * time.Millisecond)
+	t2 := t0.Add(12 * time.Hour)
+
+	fieldIDMeta := func(id string) arrow.Metadata {
+		return arrow.MetadataFrom(map[string]string{"PARQUET:field_id": id})
+	}
+
+	alloc := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer alloc.AssertSize(t, 0)
+	ctx := compute.WithAllocator(t.Context(), alloc)
+
+	iceSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "label", Type: iceberg.PrimitiveTypes.String, Required: true},
+		iceberg.NestedField{ID: 3, Name: "ts", Type: iceberg.PrimitiveTypes.Timestamp, Required: true},
+	)
+	tbl := newTimestampMillisTestTable(t, iceSchema, iceberg.UnpartitionedSpec)
+
+	arrowSc := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: false, Metadata: fieldIDMeta("1")},
+		{Name: "label", Type: arrow.BinaryTypes.String, Nullable: false, Metadata: fieldIDMeta("2")},
+		{Name: "ts", Type: &arrow.TimestampType{Unit: arrow.Millisecond}, Nullable: false, Metadata: fieldIDMeta("3")},
+	}, nil)
+
+	rb := array.NewRecordBuilder(alloc, arrowSc)
+	rb.Field(0).(*array.Int64Builder).AppendValues([]int64{1, 2, 3}, nil)
+	rb.Field(1).(*array.StringBuilder).AppendValues([]string{"a", "b", "a"}, nil)
+	rb.Field(2).(*array.TimestampBuilder).AppendValues(
+		[]arrow.Timestamp{
+			arrow.Timestamp(t0.UnixMilli()),
+			arrow.Timestamp(t1.UnixMilli()),
+			arrow.Timestamp(t2.UnixMilli()),
+		}, nil)
+	rec := rb.NewRecordBatch()
+	rb.Release()
+
+	dataPath := filepath.Join(tbl.Location(), "data", "dict_and_millis.parquet")
+	writeArrowParquetFile(t, alloc, dataPath, arrowSc, rec,
+		parquet.NewWriterProperties(parquet.WithDictionaryDefault(true)))
+	rec.Release()
+
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.AddDataFilesByPath(ctx, []string{filepath.ToSlash(dataPath)}, nil, false))
+	tbl, err := tx.Commit(ctx)
+	require.NoError(t, err)
+
+	outSchema, itr, err := tbl.Scan(
+		table.WithSelectedFields("id", "label", "ts"),
+		table.WithDictionaryColumns("label"),
+		table.WithRowFilter(iceberg.GreaterThanEqual(iceberg.Reference("ts"), iceberg.Timestamp(t1.UnixMicro()))),
+	).ToArrowRecords(ctx)
+	require.NoError(t, err)
+
+	assert.Equal(t, arrow.DICTIONARY, outSchema.Field(1).Type.ID())
+	tsType, ok := outSchema.Field(2).Type.(*arrow.TimestampType)
+	require.True(t, ok)
+	assert.Equal(t, arrow.Microsecond, tsType.Unit)
+
+	var ids, vals []int64
+	var labels []string
+	for batch, err := range itr {
+		require.NoError(t, err)
+		idCol := batch.Column(0).(*array.Int64)
+		labelCol, ok := batch.Column(1).(*array.Dictionary)
+		require.True(t, ok, "expected dictionary-encoded label column, got %T", batch.Column(1))
+		tsCol := batch.Column(2).(*array.Timestamp)
+		assert.Equal(t, arrow.Microsecond, tsCol.DataType().(*arrow.TimestampType).Unit)
+		for i := range int(batch.NumRows()) {
+			ids = append(ids, idCol.Value(i))
+			labels = append(labels, labelCol.ValueStr(i))
+			vals = append(vals, int64(tsCol.Value(i)))
+		}
+		batch.Release()
+	}
+
+	assert.Equal(t, []int64{2, 3}, ids)
+	assert.Equal(t, []string{"b", "a"}, labels)
+	assert.Equal(t, []int64{t1.UnixMicro(), t2.UnixMicro()}, vals)
+}
