@@ -255,6 +255,11 @@ iceberg clean-orphan-files --older-than 5d my_db.events
 iceberg clean-orphan-files --location s3://old-warehouse/my_db/events my_db.events
 ```
 
+Orphan cleanup, including `--dry-run`, requires complete snapshot history and
+`gc.enabled=true`. The CLI uses the REST server's snapshot-loading settings.
+If the server uses `snapshot-loading-mode=refs`, configure it to use
+`snapshot-loading-mode=all` before running cleanup.
+
 ## File maintenance
 
 ### Data-file compaction

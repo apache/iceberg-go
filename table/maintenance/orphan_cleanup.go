@@ -338,12 +338,15 @@ func rejectPlanOption(cfg *orphanCleanupConfig, name string) {
 // after the second refresh.
 // Dry runs plan from the supplied table metadata.
 // Orphan cleanup, including dry runs, is rejected when garbage collection is disabled via gc.enabled.
+// It also rejects REST refs-only snapshot history, which can omit still-live files.
+// Configure the REST catalog with snapshot-loading-mode=all and reload the
+// table before cleanup. A server override can force refs mode.
 func DeleteOrphanFiles(ctx context.Context, tbl *table.Table, opts ...OrphanCleanupOption) (OrphanCleanupResult, error) {
 	cfg := newOrphanCleanupConfig(opts...)
 	if cfg.validationErr != nil {
 		return OrphanCleanupResult{}, cfg.validationErr
 	}
-	if err := validateOrphanCleanupGC(tbl); err != nil {
+	if err := validateOrphanCleanupTable(tbl); err != nil {
 		return OrphanCleanupResult{}, err
 	}
 
@@ -368,13 +371,14 @@ func DeleteOrphanFiles(ctx context.Context, tbl *table.Table, opts ...OrphanClea
 
 // PlanOrphanFiles identifies orphan files without deleting anything. The
 // returned plan can be shown to a user and passed to ExecuteOrphanCleanup to
-// delete exactly that set.
+// delete exactly that set. Like DeleteOrphanFiles, it requires GC enabled and
+// complete snapshot history; REST refs-only loads fail with table.ErrInvalidOperation.
 func PlanOrphanFiles(ctx context.Context, tbl *table.Table, opts ...OrphanCleanupOption) (OrphanCleanupPlan, error) {
 	cfg := newOrphanCleanupConfig(opts...)
 	if cfg.validationErr != nil {
 		return OrphanCleanupPlan{}, cfg.validationErr
 	}
-	if err := validateOrphanCleanupGC(tbl); err != nil {
+	if err := validateOrphanCleanupTable(tbl); err != nil {
 		return OrphanCleanupPlan{}, err
 	}
 
@@ -389,6 +393,7 @@ func PlanOrphanFiles(ctx context.Context, tbl *table.Table, opts ...OrphanCleanu
 // If this returns ErrStaleOrphanCleanupPlan, tbl is unchanged; refresh or
 // reload it before planning again.
 // Orphan cleanup is rejected when garbage collection is disabled via gc.enabled.
+// When REST loaded only snapshot refs, it returns table.ErrInvalidOperation.
 func ExecuteOrphanCleanup(ctx context.Context, tbl *table.Table, plan OrphanCleanupPlan, opts ...OrphanCleanupOption) (OrphanCleanupResult, error) {
 	cfg := newExecutionOrphanCleanupConfig(opts...)
 	if cfg.validationErr != nil {
@@ -397,7 +402,7 @@ func ExecuteOrphanCleanup(ctx context.Context, tbl *table.Table, plan OrphanClea
 	if cfg.invalidPlanOption != nil {
 		return OrphanCleanupResult{}, cfg.invalidPlanOption
 	}
-	if err := validateOrphanCleanupGC(tbl); err != nil {
+	if err := validateOrphanCleanupTable(tbl); err != nil {
 		return OrphanCleanupResult{}, err
 	}
 	if cfg.dryRun {
@@ -443,16 +448,21 @@ func refreshOrphanCleanupTable(ctx context.Context, tbl *table.Table) (*table.Ta
 	if err := refreshed.Refresh(ctx); err != nil {
 		return nil, fmt.Errorf("failed to refresh table before orphan cleanup: %w", err)
 	}
-	if err := validateOrphanCleanupGC(&refreshed); err != nil {
+	if err := validateOrphanCleanupTable(&refreshed); err != nil {
 		return nil, err
 	}
 
 	return &refreshed, nil
 }
 
-func validateOrphanCleanupGC(tbl *table.Table) error {
+func validateOrphanCleanupTable(tbl *table.Table) error {
 	if !table.IsGCEnabled(tbl.Properties()) {
 		return errors.New("cannot delete orphan files: GC is disabled (deleting files may corrupt other tables)")
+	}
+	// Refs-only responses can omit still-live historical snapshots, making
+	// their data appear unreferenced.
+	if tbl.SnapshotHistoryLimitedToRefs() {
+		return fmt.Errorf("%w: table snapshot history is incomplete under REST snapshot-loading-mode=refs; configure the catalog with snapshot-loading-mode=all and reload the table", table.ErrInvalidOperation)
 	}
 
 	return nil
@@ -1467,6 +1477,11 @@ func pathPrefix(path string) (scheme, authority string, ok bool) {
 // does not get out of sync with storage. Non-bulk deletion invokes Remove
 // concurrently and is bounded to defaultPurgeMaxConcurrency operations because
 // it is typically I/O-bound.
+//
+// Unlike orphan cleanup, purge is allowed with REST refs-only snapshot history:
+// the catalog entry may already be gone, so a full reload is impossible. A
+// location walk removes files under the table root when GC is enabled; paths
+// outside that root omitted by refs-only metadata may remain for later cleanup.
 func PurgeFiles(ctx context.Context, tbl *table.Table) error {
 	gcEnabled := table.IsGCEnabled(tbl.Properties())
 
