@@ -18,11 +18,18 @@
 package table
 
 import (
+	"context"
 	"encoding/json"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	"github.com/apache/iceberg-go"
+	iceio "github.com/apache/iceberg-go/io"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -2794,4 +2801,184 @@ func TestRenameColumnDoesNotMutatePath(t *testing.T) {
 	f, ok := sc.FindFieldByName("address.town")
 	require.True(t, ok)
 	assert.Equal(t, "the town", f.Doc)
+}
+
+func newNameMappingTestTable(t *testing.T, mapping string) (*Table, string) {
+	t.Helper()
+
+	dir := filepath.ToSlash(t.TempDir())
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{ID: 2, Name: "data", Type: iceberg.PrimitiveTypes.String},
+	)
+	props := iceberg.Properties{}
+	if mapping != "" {
+		props[DefaultNameMappingKey] = mapping
+	}
+	meta, err := NewMetadata(schema, iceberg.UnpartitionedSpec, UnsortedSortOrder, dir, props)
+	require.NoError(t, err)
+
+	tbl := New(Identifier{"default", "name_mapping"}, meta, dir+"/metadata/00000.json",
+		func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil },
+		&countingCatalog{metadata: meta},
+	)
+
+	return tbl, dir
+}
+
+func mappedNames(mapping iceberg.NameMapping, id int) []string {
+	var names []string
+	var visit func([]iceberg.MappedField)
+	visit = func(fields []iceberg.MappedField) {
+		for _, field := range fields {
+			if field.FieldID != nil && *field.FieldID == id {
+				names = append(names, field.Names...)
+			}
+			visit(field.Fields)
+		}
+	}
+	visit(mapping)
+
+	return names
+}
+
+// A schema update must keep the table's name mapping in step with the schema,
+// as Java's SchemaUpdate and PyIceberg's UpdateSchema do, or files without
+// field IDs cannot be read for added or renamed columns.
+func TestUpdateSchemaUpdatesTableNameMapping(t *testing.T) {
+	ctx := context.Background()
+	tbl, _ := newNameMappingTestTable(t,
+		`[{"field-id":1,"names":["id"]},{"field-id":2,"names":["data"]}]`)
+
+	txn := tbl.NewTransaction()
+	require.NoError(t, txn.UpdateSchema(true, false).
+		AddColumn([]string{"category"}, iceberg.PrimitiveTypes.String, "", false, nil).
+		RenameColumn([]string{"data"}, "payload").
+		Commit())
+	tbl, err := txn.Commit(ctx)
+	require.NoError(t, err)
+
+	mapping := tbl.Metadata().NameMapping()
+	require.NotNil(t, mapping)
+	assert.Equal(t, []string{"id"}, mappedNames(mapping, 1))
+	assert.Equal(t, []string{"data", "payload"}, mappedNames(mapping, 2))
+	assert.Equal(t, []string{"category"}, mappedNames(mapping, 3))
+}
+
+// Without a name mapping property the update must not add one.
+func TestUpdateSchemaWithoutNameMappingLeavesPropertyUnset(t *testing.T) {
+	ctx := context.Background()
+	tbl, _ := newNameMappingTestTable(t, "")
+
+	txn := tbl.NewTransaction()
+	require.NoError(t, txn.UpdateSchema(true, false).
+		AddColumn([]string{"category"}, iceberg.PrimitiveTypes.String, "", false, nil).
+		Commit())
+	tbl, err := txn.Commit(ctx)
+	require.NoError(t, err)
+
+	assert.NotContains(t, tbl.Metadata().Properties(), DefaultNameMappingKey)
+}
+
+// A mapping with no named entries is valid. A rename or delete must write it
+// back as [] rather than null, which scans and add-files reject.
+func TestUpdateSchemaKeepsEmptyNameMappingValid(t *testing.T) {
+	rename := func(u *UpdateSchema) *UpdateSchema { return u.RenameColumn([]string{"data"}, "payload") }
+	deleteData := func(u *UpdateSchema) *UpdateSchema { return u.DeleteColumn([]string{"data"}) }
+
+	tests := []struct {
+		name    string
+		mapping string
+		update  func(*UpdateSchema) *UpdateSchema
+	}{
+		{"empty mapping rename", `[]`, rename},
+		{"empty mapping delete", `[]`, deleteData},
+		{"empty names rename", `[{"field-id":1,"names":[]}]`, rename},
+		{"empty names delete", `[{"field-id":1,"names":[]},{"field-id":2,"names":[]}]`, deleteData},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tbl, _ := newNameMappingTestTable(t, tt.mapping)
+
+			txn := tbl.NewTransaction()
+			require.NoError(t, tt.update(txn.UpdateSchema(true, false)).Commit())
+			tbl, err := txn.Commit(context.Background())
+			require.NoError(t, err)
+
+			props := tbl.Metadata().Properties()
+			assert.JSONEq(t, `[]`, props[DefaultNameMappingKey])
+			require.NoError(t, validateNameMappingProperty(props, tbl.Metadata().NameMapping()))
+		})
+	}
+}
+
+// End to end: AddDataFilesByPath sets the name mapping, a column is added, and
+// a later file without field IDs that carries the new column is added. Adding
+// that file must succeed and the scan must read the new column from it.
+func TestAddFilesAfterAddColumnReadsNewColumnByName(t *testing.T) {
+	ctx := context.Background()
+	tbl, dir := newNameMappingTestTable(t, "")
+	fs := iceio.LocalFS{}
+
+	writeParquet := func(path string, fields []arrow.Field, cols ...arrow.Array) {
+		sc := arrow.NewSchema(fields, nil)
+		rec := array.NewRecordBatch(sc, cols, int64(cols[0].Len()))
+		defer rec.Release()
+		arrTbl := array.NewTableFromRecords(sc, []arrow.RecordBatch{rec})
+		defer arrTbl.Release()
+
+		fo, err := fs.Create(ctx, path)
+		require.NoError(t, err)
+		require.NoError(t, pqarrow.WriteTable(arrTbl, fo, arrTbl.NumRows(), nil, pqarrow.DefaultWriterProps()))
+	}
+	int32s := func(vals ...int32) arrow.Array {
+		b := array.NewInt32Builder(memory.DefaultAllocator)
+		defer b.Release()
+		b.AppendValues(vals, nil)
+
+		return b.NewArray()
+	}
+	strs := func(vals ...string) arrow.Array {
+		b := array.NewStringBuilder(memory.DefaultAllocator)
+		defer b.Release()
+		b.AppendValues(vals, nil)
+
+		return b.NewArray()
+	}
+
+	idField := arrow.Field{Name: "id", Type: arrow.PrimitiveTypes.Int32}
+	dataField := arrow.Field{Name: "data", Type: arrow.BinaryTypes.String, Nullable: true}
+	categoryField := arrow.Field{Name: "category", Type: arrow.BinaryTypes.String, Nullable: true}
+
+	first := dir + "/data/first.parquet"
+	writeParquet(first, []arrow.Field{idField, dataField}, int32s(1), strs("a"))
+	txn := tbl.NewTransaction()
+	require.NoError(t, txn.AddDataFilesByPath(ctx, []string{first}, nil, false))
+	tbl, err := txn.Commit(ctx)
+	require.NoError(t, err)
+	require.Contains(t, tbl.Metadata().Properties(), DefaultNameMappingKey)
+
+	txn = tbl.NewTransaction()
+	require.NoError(t, txn.UpdateSchema(true, false).
+		AddColumn([]string{"category"}, iceberg.PrimitiveTypes.String, "", false, nil).
+		Commit())
+	tbl, err = txn.Commit(ctx)
+	require.NoError(t, err)
+
+	second := dir + "/data/second.parquet"
+	writeParquet(second, []arrow.Field{idField, dataField, categoryField}, int32s(2), strs("b"), strs("books"))
+	txn = tbl.NewTransaction()
+	require.NoError(t, txn.AddDataFilesByPath(ctx, []string{second}, nil, false))
+	tbl, err = txn.Commit(ctx)
+	require.NoError(t, err)
+
+	result, err := tbl.Scan(WithRowFilter(iceberg.EqualTo(iceberg.Reference("id"), int32(2)))).ToArrowTable(ctx)
+	require.NoError(t, err)
+	defer result.Release()
+
+	require.EqualValues(t, 1, result.NumRows())
+	category := result.Column(result.Schema().FieldIndices("category")[0]).Data().Chunk(0).(*array.String)
+	require.False(t, category.IsNull(0), "category was read as null")
+	assert.Equal(t, "books", category.Value(0))
 }
