@@ -125,9 +125,10 @@ func (s *AzureBlobIOTestSuite) TestAzuriteWarehouseConnectionString() {
 
 func (s *AzureBlobIOTestSuite) createContainerIfNotExist(containerName string) error {
 	svcURL, err := azureblob.NewServiceURL(&azureblob.ServiceURLOptions{
-		AccountName:   accountName,
-		Protocol:      protocol,
-		StorageDomain: endpoint,
+		AccountName:     accountName,
+		Protocol:        protocol,
+		StorageDomain:   endpoint,
+		IsLocalEmulator: true,
 	})
 	if err != nil {
 		return err

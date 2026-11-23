@@ -45,19 +45,19 @@ type ContextAuthManager interface {
 	AuthHeaderWithContext(ctx context.Context) (string, string, error)
 }
 
-// Oauth2AuthManager is an implementation of the AuthManager interface which
+// OAuth2AuthManager is an implementation of the AuthManager interface which
 // uses an oauth2.TokenSource to provide bearer tokens. The token source
 // handles caching, thread-safe refresh, and expiry management.
-type Oauth2AuthManager struct {
+type OAuth2AuthManager struct {
 	tokenSource oauth2.TokenSource
 	// refresh shares one in-flight Token call, so a caller that stops waiting
 	// leaves nothing queued behind it.
 	refresh singleflight.Group
 }
 
-var _ ContextAuthManager = (*Oauth2AuthManager)(nil)
+var _ ContextAuthManager = (*OAuth2AuthManager)(nil)
 
-// NewOauth2AuthManager returns an AuthManager that sends tokens from ts, for
+// NewOAuth2AuthManager returns an AuthManager that sends tokens from ts, for
 // identity providers the built-in client-credentials flow can't reach, such as
 // Google Application Default Credentials for BigLake. Pass the result to
 // WithAuthManager.
@@ -74,17 +74,17 @@ var _ ContextAuthManager = (*Oauth2AuthManager)(nil)
 // http.DefaultClient, which has no timeout. AuthHeaderWithContext still
 // returns when its context is done.
 //
-// NewOauth2AuthManager panics if ts is nil.
-func NewOauth2AuthManager(ts oauth2.TokenSource) *Oauth2AuthManager {
+// NewOAuth2AuthManager panics if ts is nil.
+func NewOAuth2AuthManager(ts oauth2.TokenSource) *OAuth2AuthManager {
 	if ts == nil {
-		panic("rest: NewOauth2AuthManager called with a nil oauth2.TokenSource")
+		panic("rest: NewOAuth2AuthManager called with a nil oauth2.TokenSource")
 	}
 
-	return &Oauth2AuthManager{tokenSource: oauth2.ReuseTokenSource(nil, ts)}
+	return &OAuth2AuthManager{tokenSource: oauth2.ReuseTokenSource(nil, ts)}
 }
 
 // AuthHeader returns the authorization header with the bearer token.
-func (o *Oauth2AuthManager) AuthHeader() (string, string, error) {
+func (o *OAuth2AuthManager) AuthHeader() (string, string, error) {
 	tok, err, _ := o.refresh.Do("token", o.fetchToken)
 
 	return o.authHeader(tok, err)
@@ -95,7 +95,7 @@ func (o *Oauth2AuthManager) AuthHeader() (string, string, error) {
 // is required, the caller waits for it only until ctx is done; the refresh
 // itself keeps running, bounded by the token-refresh client's Timeout, and its
 // result serves later callers.
-func (o *Oauth2AuthManager) AuthHeaderWithContext(ctx context.Context) (string, string, error) {
+func (o *OAuth2AuthManager) AuthHeaderWithContext(ctx context.Context) (string, string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", "", err
 	}
@@ -109,11 +109,11 @@ func (o *Oauth2AuthManager) AuthHeaderWithContext(ctx context.Context) (string, 
 }
 
 // fetchToken adapts the token source to singleflight's untyped callback.
-func (o *Oauth2AuthManager) fetchToken() (any, error) {
+func (o *OAuth2AuthManager) fetchToken() (any, error) {
 	return o.tokenSource.Token()
 }
 
-func (o *Oauth2AuthManager) authHeader(tok any, err error) (string, string, error) {
+func (o *OAuth2AuthManager) authHeader(tok any, err error) (string, string, error) {
 	if err != nil {
 		if re, ok := errors.AsType[*oauth2.RetrieveError](err); ok {
 			return "", "", oauthError{

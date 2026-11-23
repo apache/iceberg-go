@@ -186,6 +186,29 @@ func TestCreateAzureBucketSharedKeyMissingAccountKey(t *testing.T) {
 		"Expected shared-key error but got: %v", err)
 }
 
+func TestCreateServiceURL(t *testing.T) {
+	tests := []struct {
+		name, protocol, endpoint, sasToken string
+		want                               string
+	}{
+		{name: "default", want: "https://acct.blob.core.windows.net"},
+		{name: "custom https endpoint", endpoint: "privatelink.blob.example.com", want: "https://acct.privatelink.blob.example.com"},
+		{name: "azurite", protocol: "http", endpoint: "127.0.0.1:10000", want: "http://127.0.0.1:10000/acct"},
+		{name: "localhost", protocol: "http", endpoint: "localhost:10000", want: "http://localhost:10000/acct"},
+		{name: "sas token", sasToken: "sv=1&sig=x", want: "https://acct.blob.core.windows.net?sv=1&sig=x"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := createServiceURL("acct", tt.protocol, tt.endpoint, tt.sasToken)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+
+	_, err := createServiceURL("acct", "ftp", "", "")
+	assert.ErrorContains(t, err, "invalid protocol")
+}
+
 func TestNewAdlsLocationUriParsing(t *testing.T) {
 	tests := []struct {
 		uri               string
@@ -342,7 +365,7 @@ func TestAdlsKeyExtractor(t *testing.T) {
 	}
 }
 
-func testADLSBlobFileIO(t *testing.T, ctx context.Context, root string, bucket *blob.Bucket) *blobfs.FileIO {
+func testADLSBlobFileIO(t *testing.T, ctx context.Context, root string, bucket *blob.Bucket) blobfs.FileIO {
 	t.Helper()
 
 	parsed, err := url.Parse(root)

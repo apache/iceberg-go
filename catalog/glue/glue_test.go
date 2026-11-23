@@ -33,12 +33,12 @@ import (
 	"time"
 
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/awsconfig"
 	"github.com/apache/iceberg-go/catalog"
 	cataloginternal "github.com/apache/iceberg-go/catalog/internal"
 	iceio "github.com/apache/iceberg-go/io"
 	_ "github.com/apache/iceberg-go/io/gocloud"
 	"github.com/apache/iceberg-go/table"
-	"github.com/apache/iceberg-go/utils"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/glue"
@@ -2983,7 +2983,7 @@ func TestGlueCreateTableS3TablesFederatedIntegration(t *testing.T) {
 	ctx := context.Background()
 	awsCfg, err := config.LoadDefaultConfig(ctx)
 	assert.NoError(err)
-	ctlg, err := NewCatalog(WithAWSConfig(awsCfg), WithAWSProperties(AWSProperties{CatalogIdKey: catalogID}))
+	ctlg, err := NewCatalog(WithAWSConfig(awsCfg), WithAWSProperties(AWSProperties{CatalogIDKey: catalogID}))
 	assert.NoError(err)
 
 	tableName := fmt.Sprintf("it_%d", time.Now().UnixNano())
@@ -3248,7 +3248,7 @@ func recordingMemFS(t *testing.T, scheme string) (*iceio.MemFS, *[]*aws.Config) 
 	recorded := new([]*aws.Config)
 	iceio.Unregister(scheme)
 	iceio.Register(scheme, func(ctx context.Context, _ *url.URL, _ map[string]string) (iceio.IO, error) {
-		*recorded = append(*recorded, utils.GetAWSConfig(ctx))
+		*recorded = append(*recorded, awsconfig.FromContext(ctx))
 
 		return memFS, nil
 	})

@@ -43,7 +43,7 @@ import (
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table/dv"
 	tblutils "github.com/apache/iceberg-go/table/internal"
-	"github.com/apache/iceberg-go/table/substrait"
+	"github.com/apache/iceberg-go/table/internal/substrait"
 	"github.com/substrait-io/substrait-go/v8/expr"
 	"golang.org/x/sync/errgroup"
 )
@@ -1638,6 +1638,8 @@ type arrowScan struct {
 	// read.parquet.batch-size property for this scan's reads.
 	arrowBatchSize int
 
+	dictionaryFieldIDs set[int]
+
 	// added is nil for a normal scan. A changelog deleted-row read sets it so
 	// rows matched by that snapshot's new deletes are kept.
 	added *addedDeleteState
@@ -1902,6 +1904,13 @@ func (s *recordSink) handOff() taskCredits {
 	return s.credits
 }
 
+func (as *arrowScan) emptyBatchSchema() (*arrow.Schema, error) {
+	return SchemaToArrowSchemaWithOptions(as.projectedSchema, ArrowSchemaOptions{
+		UseLargeTypes:      as.useLargeTypes,
+		dictionaryFieldIDs: as.dictionaryFieldIDs,
+	})
+}
+
 func (as *arrowScan) prepareToRead(
 	ctx context.Context,
 	file iceberg.DataFile,
@@ -1923,6 +1932,14 @@ func (as *arrowScan) prepareToRead(
 			_ = reader.Close()
 		}
 	}(rdr)
+
+	// Each reader needs this, including those that reuse a cached plan.
+	// Readers without dictionary support fall back to the projection's encode.
+	if dr, ok := rdr.(tblutils.DictionaryReader); ok && len(as.dictionaryFieldIDs) > 0 {
+		if err = dr.ReadDictionaries(as.dictionaryFieldIDs, invariants.nameMapping); err != nil {
+			return nil, nil, nil, err
+		}
+	}
 
 	readPrunedSchemaForIDs := func(projectedIDs map[int]struct{}) (*iceberg.Schema, []int, error) {
 		fileSchema, colIndices, err := rdr.PrunedSchema(projectedIDs, invariants.nameMapping)
@@ -1972,7 +1989,6 @@ func (as *arrowScan) prepareToRead(
 
 		return readPrunedSchemaForIDs(expandedIDs)
 	}
-
 	if !as.cacheFileReadPlan {
 		iceSchema, colIndices, err = readPrunedSchema()
 		if err != nil {
@@ -2735,7 +2751,7 @@ func (as *arrowScan) processRecordsWithPlans(
 		// an empty batch just like the dropFile path does; without it every
 		// record queued behind this task is silently discarded on close.
 		var emptySchema *arrow.Schema
-		emptySchema, err = SchemaToArrowSchema(as.projectedSchema, nil, false, as.useLargeTypes)
+		emptySchema, err = as.emptyBatchSchema()
 		if err != nil {
 			return err
 		}
@@ -2980,7 +2996,7 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task tblutils.Enumerat
 
 	if dropFile {
 		var emptySchema *arrow.Schema
-		emptySchema, err = SchemaToArrowSchema(as.projectedSchema, nil, false, as.useLargeTypes)
+		emptySchema, err = as.emptyBatchSchema()
 		if err != nil {
 			return err
 		}
@@ -3012,8 +3028,9 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task tblutils.Enumerat
 		}
 
 		return ToRequestedSchema(ctx, as.projectedSchema, readSchema, r, SchemaOptions{
-			UseLargeTypes:   as.useLargeTypes,
-			TableProperties: invariants.tableProperties,
+			UseLargeTypes:      as.useLargeTypes,
+			TableProperties:    invariants.tableProperties,
+			dictionaryFieldIDs: as.dictionaryFieldIDs,
 		})
 	})
 
@@ -3439,8 +3456,9 @@ func (as *arrowScan) prepareTaskReads(ctx context.Context, tasks []FileScanTask)
 	ctx = tblutils.WithTableProperties(ctx, tableProperties)
 
 	resultSchema, err := SchemaToArrowSchemaWithOptions(as.projectedSchema, ArrowSchemaOptions{
-		UseLargeTypes:   as.useLargeTypes,
-		TableProperties: tableProperties,
+		UseLargeTypes:      as.useLargeTypes,
+		TableProperties:    tableProperties,
+		dictionaryFieldIDs: as.dictionaryFieldIDs,
 	})
 	if err != nil {
 		return nil, nil, err

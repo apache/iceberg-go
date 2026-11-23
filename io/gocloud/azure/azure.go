@@ -77,19 +77,37 @@ func productionAzureCredentialFactories() azureCredentialFactories {
 	}
 }
 
-// createServiceURL creates an Azure blob service URL with the given parameters
+// createServiceURL creates an Azure blob service URL from adls.* properties.
+// Loopback endpoints such as Azurite use the emulator form
+// "<protocol>://<endpoint>/<account>"; other endpoints use
+// "<protocol>://<account>.<endpoint>". The endpoint is operator configuration,
+// so it is not checked against gocloud's azureblob.AllowedStorageDomains.
 func createServiceURL(accountName, protocol, endpoint, sasToken string) (string, error) {
-	svcURL, err := azureblob.NewServiceURL(&azureblob.ServiceURLOptions{
-		AccountName:   accountName,
-		SASToken:      sasToken,
-		Protocol:      protocol,
-		StorageDomain: endpoint,
-	})
-	if err != nil {
-		return "", err
+	if accountName == "" {
+		return "", errors.New("azure: account name is required")
+	}
+	if endpoint == "" {
+		endpoint = "blob.core.windows.net"
+	}
+	switch protocol {
+	case "":
+		protocol = "https"
+	case "http", "https":
+	default:
+		return "", fmt.Errorf("azure: invalid protocol %q", protocol)
 	}
 
-	return string(svcURL), nil
+	var svcURL string
+	if strings.HasPrefix(endpoint, "127.0.0.1") || strings.HasPrefix(endpoint, "localhost") {
+		svcURL = fmt.Sprintf("%s://%s/%s", protocol, endpoint, accountName)
+	} else {
+		svcURL = fmt.Sprintf("%s://%s.%s", protocol, accountName, endpoint)
+	}
+	if sasToken != "" {
+		svcURL += "?" + sasToken
+	}
+
+	return svcURL, nil
 }
 
 // createContainerURL creates a full container URL by building the service URL and joining with container name
@@ -148,7 +166,7 @@ func createAzureBucketWithOptions(
 	credentialFactories azureCredentialFactories,
 	clientOptions *container.ClientOptions,
 ) (*blob.Bucket, error) {
-	adlsSasTokens := propertiesWithPrefix(props, io.ADLSSasTokenPrefix)
+	adlsSasTokens := propertiesWithPrefix(props, io.ADLSSASTokenPrefix)
 	adlsConnectionStrings := propertiesWithPrefix(props, io.ADLSConnectionStringPrefix)
 
 	// Construct the client

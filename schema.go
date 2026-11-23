@@ -162,15 +162,28 @@ func (s *Schema) ValidateIdentifierFields() error {
 // checkDuplicateFieldIDs recursively walks a list of fields and returns an
 // error if any field ID appears more than once anywhere in the tree. The
 // seen map is lazily created on the first call so the top-level caller can
-// pass nil.
+// pass nil. IDs <= 0 are skipped, because they are used as unassigned
+// placeholders while a schema is being built (#879).
 func checkDuplicateFieldIDs(seen map[int]string, fields []NestedField) error {
+	return checkFieldIDs(seen, fields, false)
+}
+
+// checkAllDuplicateFieldIDs checks every ID, including 0 and negatives, for a
+// schema that is already complete. A schema read from metadata JSON has final
+// IDs, so a duplicate 0 is not a placeholder: it makes lookups by ID return an
+// arbitrary one of the two fields (#2540).
+func checkAllDuplicateFieldIDs(fields []NestedField) error {
+	return checkFieldIDs(nil, fields, true)
+}
+
+// checkFieldIDs is the shared walker. allIDs reports whether IDs <= 0 take
+// part in the uniqueness check.
+func checkFieldIDs(seen map[int]string, fields []NestedField, allIDs bool) error {
 	if seen == nil {
 		seen = make(map[int]string)
 	}
 	for _, f := range fields {
-		// Negative IDs (e.g. -1) are used as unassigned placeholders during
-		// schema construction; only positive IDs must be unique per the spec.
-		if f.ID > 0 {
+		if allIDs || f.ID > 0 {
 			if prev, ok := seen[f.ID]; ok {
 				return fmt.Errorf("%w: multiple fields for id %d: %s and %s",
 					ErrInvalidSchema, f.ID, prev, f.Name)
@@ -183,20 +196,20 @@ func checkDuplicateFieldIDs(seen map[int]string, fields []NestedField) error {
 		switch t := f.Type.(type) {
 		case *StructType:
 			if t != nil {
-				if err := checkDuplicateFieldIDs(seen, t.FieldList); err != nil {
+				if err := checkFieldIDs(seen, t.FieldList, allIDs); err != nil {
 					return err
 				}
 			}
 		case *ListType:
 			if t != nil {
 				elem := t.ElementField()
-				if err := checkDuplicateFieldIDs(seen, []NestedField{elem}); err != nil {
+				if err := checkFieldIDs(seen, []NestedField{elem}, allIDs); err != nil {
 					return err
 				}
 			}
 		case *MapType:
 			if t != nil {
-				if err := checkDuplicateFieldIDs(seen, []NestedField{t.KeyField(), t.ValueField()}); err != nil {
+				if err := checkFieldIDs(seen, []NestedField{t.KeyField(), t.ValueField()}, allIDs); err != nil {
 					return err
 				}
 			}
@@ -422,7 +435,7 @@ func (s *Schema) UnmarshalJSON(b []byte) error {
 		return fmt.Errorf("%w: invalid schema fields: %w", ErrInvalidSchema, err)
 	}
 
-	if err := checkDuplicateFieldIDs(nil, fields); err != nil {
+	if err := checkAllDuplicateFieldIDs(fields); err != nil {
 		return err
 	}
 

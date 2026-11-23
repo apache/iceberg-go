@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/awsconfig"
 	"github.com/apache/iceberg-go/catalog"
 	"github.com/apache/iceberg-go/catalog/internal"
 	internalaws "github.com/apache/iceberg-go/internal/awsconfig"
@@ -36,7 +37,6 @@ import (
 	"github.com/apache/iceberg-go/metrics"
 	"github.com/apache/iceberg-go/table"
 	"github.com/apache/iceberg-go/table/maintenance"
-	"github.com/apache/iceberg-go/utils"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
@@ -71,7 +71,7 @@ const (
 	// The ID of the Glue Data Catalog where the tables reside. If none is provided, Glue
 	// automatically uses the caller's AWS account ID by default.
 	// See: https://docs.aws.amazon.com/glue/latest/dg/aws-glue-api-catalog-databases.html
-	CatalogIdKey = "glue.id"
+	CatalogIDKey = "glue.id"
 
 	// Skip archiving old table versions on commits. Recommended for high-frequency
 	// streaming workloads to avoid hitting Glue's archive limits.
@@ -196,7 +196,7 @@ func NewCatalog(opts ...Option) (*Catalog, error) {
 	}
 
 	var catalogId *string
-	if val, ok := glueOps.awsProperties[CatalogIdKey]; ok {
+	if val, ok := glueOps.awsProperties[CatalogIDKey]; ok {
 		catalogId = &val
 	} else {
 		catalogId = nil
@@ -332,7 +332,7 @@ func (c *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 	}
 
 	// Use the catalog's AWS config, not the ambient chain, for the metadata write.
-	ctx = utils.WithAWSConfig(ctx, c.awsCfg)
+	ctx = awsconfig.NewContext(ctx, c.awsCfg)
 	if err := internal.WriteMetadata(ctx, staged.Table); err != nil {
 		return nil, err
 	}
@@ -449,7 +449,7 @@ func (c *Catalog) createS3TablesTable(ctx context.Context, database, tableName s
 // the Glue entry; the caller reloads, so a read failure never triggers rollback.
 func (c *Catalog) commitS3TablesTable(ctx context.Context, database, tableName string, identifier table.Identifier, schema *iceberg.Schema, opts ...catalog.CreateTableOpt) error {
 	// Use the catalog's AWS config for WriteMetadata and the staged.FS cleanup below.
-	ctx = utils.WithAWSConfig(ctx, c.awsCfg)
+	ctx = awsconfig.NewContext(ctx, c.awsCfg)
 
 	allocated, err := c.glueSvc.GetTable(ctx, &glue.GetTableInput{
 		CatalogId:    c.catalogId,
@@ -517,7 +517,7 @@ func (c *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier
 	}
 
 	// Load the metadata file to get table properties
-	ctx = utils.WithAWSConfig(ctx, c.awsCfg)
+	ctx = awsconfig.NewContext(ctx, c.awsCfg)
 	// Read the metadata file. The reporter is intentionally not wired here: the
 	// tail c.LoadTable(...) re-resolves it through convertGlueToIceberg, and the
 	// table built below is discarded after constructTableInput.
@@ -578,7 +578,7 @@ func (c *Catalog) CommitTable(ctx context.Context, identifier table.Identifier, 
 		return current.Metadata(), current.MetadataLocation(), nil
 	}
 	// Use the catalog's AWS config, not the ambient chain, for the metadata write.
-	ctx = utils.WithAWSConfig(ctx, c.awsCfg)
+	ctx = awsconfig.NewContext(ctx, c.awsCfg)
 	if err := internal.WriteMetadata(ctx, staged.Table); err != nil {
 		return nil, "", err
 	}
@@ -1124,7 +1124,7 @@ func (c *Catalog) convertGlueToIceberg(ctx context.Context, glueTable *types.Tab
 	}
 
 	icebergTable, err := table.NewFromLocation(
-		utils.WithAWSConfig(ctx, c.awsCfg),
+		awsconfig.NewContext(ctx, c.awsCfg),
 		TableIdentifier(database, tableName),
 		metadataLocation,
 		internal.LoadFSFuncWithRegistry(c.ioRegistry, c.props, metadataLocation),

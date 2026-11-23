@@ -55,7 +55,7 @@
 // Java. They use a client with the default transport and a 60-second timeout.
 // To use a specific client, put it in the context's oauth2.HTTPClient value
 // when loading the catalog, or build the source with TokenSource and pass
-// rest.NewOauth2AuthManager(ts) to rest.WithAuthManager. One exception: on
+// rest.NewOAuth2AuthManager(ts) to rest.WithAuthManager. One exception: on
 // Google Cloud compute, Application Default Credentials come from the metadata
 // server, which the Google library always reaches through its own client.
 package googleauth
@@ -98,7 +98,7 @@ func init() {
 			return nil, err
 		}
 
-		return rest.NewOauth2AuthManager(ts), nil
+		return rest.NewOAuth2AuthManager(ts), nil
 	})
 }
 

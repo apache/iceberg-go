@@ -2437,6 +2437,71 @@ func (w wrapPqArrowReader) PrunedSchema(projectedIDs map[int]struct{}, mapping i
 	return norm, cols, nil
 }
 
+// ReadDictionaries rebuilds the schema manifest because pqarrow decides
+// dictionary reads when it builds the manifest, not when it reads. The value
+// receiver is safe: the writes go through the embedded *pqarrow.FileReader.
+func (w wrapPqArrowReader) ReadDictionaries(fieldIDs map[int]struct{}, mapping iceberg.NameMapping) error {
+	leaves := &dictionaryLeafVisitor{fieldIDs: fieldIDs}
+	if _, err := visitParquetManifest(w.Manifest, leaves, &iceberg.MappedField{Fields: mapping}); err != nil {
+		return err
+	}
+	if len(leaves.colIndices) == 0 {
+		return nil
+	}
+
+	props := w.Props
+	for _, idx := range leaves.colIndices {
+		props.SetReadDict(idx, true)
+	}
+	meta := w.ParquetReader().MetaData()
+	manifest, err := pqarrow.NewSchemaManifest(meta.Schema, meta.KeyValueMetadata(), &props)
+	if err != nil {
+		return err
+	}
+	w.Props, w.Manifest = props, manifest
+
+	return nil
+}
+
+type dictionaryLeafVisitor struct {
+	fieldIDs   map[int]struct{}
+	colIndices []int
+}
+
+func (*dictionaryLeafVisitor) Manifest(*pqarrow.SchemaManifest, []struct{}, *iceberg.MappedField) struct{} {
+	return struct{}{}
+}
+
+func (*dictionaryLeafVisitor) Field(pqarrow.SchemaField, struct{}, *iceberg.MappedField) struct{} {
+	return struct{}{}
+}
+
+func (*dictionaryLeafVisitor) Struct(pqarrow.SchemaField, []struct{}, *iceberg.MappedField) struct{} {
+	return struct{}{}
+}
+
+func (*dictionaryLeafVisitor) List(pqarrow.SchemaField, struct{}, *iceberg.MappedField) struct{} {
+	return struct{}{}
+}
+
+func (*dictionaryLeafVisitor) Map(pqarrow.SchemaField, struct{}, struct{}, *iceberg.MappedField) struct{} {
+	return struct{}{}
+}
+
+func (v *dictionaryLeafVisitor) Primitive(field pqarrow.SchemaField, mapping *iceberg.MappedField) struct{} {
+	id := getFieldID(*field.Field)
+	if id == nil && mapping != nil {
+		id = mapping.FieldID
+	}
+	if id != nil {
+		if _, ok := v.fieldIDs[*id]; ok {
+			v.colIndices = append(v.colIndices, field.ColIndex)
+		}
+	}
+
+	return struct{}{}
+}
+
 // parquetRowGroupSplitOffset returns the same first-page offset used when
 // DataFileStatistics.SplitOffsets is built. RowGroup.file_offset is optional
 // in Parquet and Arrow returns zero when it is absent, so relying on it can

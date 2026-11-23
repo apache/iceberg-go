@@ -226,6 +226,12 @@ func (b *MetadataBuilder) AddSchema(schema *iceberg.Schema) *MetadataBuilder {
 }
 
 func (b *MetadataBuilder) addSchema(schema *iceberg.Schema) (int, error) {
+	// The schema is stored with the caller's IDs, and reading metadata rejects
+	// duplicate IDs, including 0 and negatives, so reject them here too.
+	if err := checkUniqueFieldIDs(make(map[int]string), schema.Fields()); err != nil {
+		return 0, err
+	}
+
 	newSchemaID := b.reuseOrCreateNewSchemaID(schema)
 
 	if _, ok := b.schemasById[newSchemaID]; ok {
@@ -244,6 +250,41 @@ func (b *MetadataBuilder) addSchema(schema *iceberg.Schema) (int, error) {
 	b.lastAddedSchemaID = &newSchemaID
 
 	return newSchemaID, nil
+}
+
+// checkUniqueFieldIDs returns an error if two fields share an ID, walking
+// struct, list and map children. Unlike NewSchema, it also checks 0 and
+// negative IDs.
+func checkUniqueFieldIDs(seen map[int]string, fields []iceberg.NestedField) error {
+	for _, f := range fields {
+		if prev, ok := seen[f.ID]; ok {
+			return fmt.Errorf("%w: multiple fields for id %d: %s and %s",
+				iceberg.ErrInvalidSchema, f.ID, prev, f.Name)
+		}
+		seen[f.ID] = f.Name
+
+		var children []iceberg.NestedField
+		switch t := f.Type.(type) {
+		case *iceberg.StructType:
+			if t != nil {
+				children = t.Fields()
+			}
+		case *iceberg.ListType:
+			if t != nil {
+				children = []iceberg.NestedField{t.ElementField()}
+			}
+		case *iceberg.MapType:
+			if t != nil {
+				children = []iceberg.NestedField{t.KeyField(), t.ValueField()}
+			}
+		}
+
+		if err := checkUniqueFieldIDs(seen, children); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 func (b *MetadataBuilder) RemoveProperties(keys []string) *MetadataBuilder {
