@@ -18,9 +18,12 @@
 package internal
 
 import (
+	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/arrow-go/v18/parquet"
+	"github.com/apache/arrow-go/v18/parquet/metadata"
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
+	"github.com/apache/iceberg-go"
 )
 
 // WrapParquetFileReader exposes wrapPqArrowReader for testing.
@@ -34,6 +37,16 @@ func WrapParquetFileReaderWithDictionarySource(fr *pqarrow.FileReader, source pa
 	return wrapPqArrowReader{
 		FileReader:       fr,
 		dictionarySource: source,
-		dictionaryMem:    memory.DefaultAllocator,
+		mem:              memory.DefaultAllocator,
 	}
+}
+
+// WrapStatsForType exposes wrapStatsForType for testing.
+func WrapStatsForType(stats metadata.TypedStatistics, typ iceberg.PrimitiveType) metadata.TypedStatistics {
+	return wrapStatsForType(stats, typ)
+}
+
+// NormalizeTimestampMillisArray exposes normalizeTimestampMillisArray for testing and benchmarks.
+func NormalizeTimestampMillisArray(alloc memory.Allocator, arr arrow.Array) (arrow.Array, error) {
+	return normalizeTimestampMillisArray(alloc, arr)
 }

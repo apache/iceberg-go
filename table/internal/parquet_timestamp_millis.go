@@ -19,10 +19,12 @@ package internal
 
 import (
 	"fmt"
+	"math"
 	"sync/atomic"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/bitutil"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/iceberg-go"
 )
@@ -138,6 +140,8 @@ func normalizeTimestampMillisType(dt arrow.DataType) (arrow.DataType, bool) {
 		}, true
 
 	default:
+		// Parquet-to-Arrow and Iceberg schema mapping do not produce union,
+		// run-end-encoded, or extension types wrapping timestamp[ms].
 		return dt, false
 	}
 }
@@ -169,6 +173,77 @@ func normalizeTimestampMillisSchema(sc *arrow.Schema) (*arrow.Schema, bool) {
 	return arrow.NewSchema(fields, &meta), true
 }
 
+func normalizeTimestampMillisLeaf(
+	alloc memory.Allocator, a *array.Timestamp, targetType *arrow.TimestampType,
+) (arrow.Array, error) {
+	const (
+		unitsPerMilli = 1000
+		maxMillis     = math.MaxInt64 / unitsPerMilli
+		minMillis     = math.MinInt64 / unitsPerMilli
+	)
+
+	n := a.Len()
+	if n == 0 {
+		newData := array.NewData(targetType, 0, []*memory.Buffer{nil, nil}, nil, 0, 0)
+		defer newData.Release()
+
+		return array.NewTimestampData(newData), nil
+	}
+
+	outBuf := memory.NewResizableBuffer(alloc)
+	defer outBuf.Release()
+	outBuf.Resize(arrow.TimestampTraits.BytesRequired(n))
+	dst := arrow.TimestampTraits.CastFromBytes(outBuf.Bytes())
+
+	var nulls int
+	if a.Data().Buffers()[0] != nil {
+		nulls = a.NullN()
+	}
+
+	if nulls < n {
+		src := a.TimestampValues()
+		_ = dst[n-1]
+		for i, v := range src {
+			if v > maxMillis || v < minMillis {
+				if nulls > 0 && a.IsNull(i) {
+					dst[i] = 0
+
+					continue
+				}
+
+				return nil, fmt.Errorf("%w: Parquet TIMESTAMP(MILLIS) value %d overflows int64 microseconds",
+					iceberg.ErrInvalidArgument, v)
+			}
+			dst[i] = v * unitsPerMilli
+		}
+	}
+
+	var nullBuf *memory.Buffer
+	if nulls > 0 {
+		srcNullBuf := a.Data().Buffers()[0]
+		offset := a.Data().Offset()
+		switch {
+		case offset == 0:
+			nullBuf = srcNullBuf
+		case offset%8 == 0:
+			sliced := memory.SliceBuffer(srcNullBuf, offset/8, int(bitutil.BytesForBits(int64(n))))
+			defer sliced.Release()
+			nullBuf = sliced
+		default:
+			copied := memory.NewResizableBuffer(alloc)
+			defer copied.Release()
+			copied.Resize(int(bitutil.BytesForBits(int64(n))))
+			bitutil.CopyBitmap(srcNullBuf.Bytes(), offset, n, copied.Bytes(), 0)
+			nullBuf = copied
+		}
+	}
+
+	newData := array.NewData(targetType, n, []*memory.Buffer{nullBuf, outBuf}, nil, nulls, 0)
+	defer newData.Release()
+
+	return array.NewTimestampData(newData), nil
+}
+
 func normalizeTimestampMillisArray(alloc memory.Allocator, arr arrow.Array) (arrow.Array, error) {
 	newType, changed := normalizeTimestampMillisType(arr.DataType())
 	if !changed {
@@ -179,25 +254,7 @@ func normalizeTimestampMillisArray(alloc memory.Allocator, arr arrow.Array) (arr
 
 	switch a := arr.(type) {
 	case *array.Timestamp:
-		bldr := array.NewTimestampBuilder(alloc, newType.(*arrow.TimestampType))
-		defer bldr.Release()
-		bldr.Reserve(a.Len())
-
-		for i := range a.Len() {
-			if a.IsNull(i) {
-				bldr.AppendNull()
-
-				continue
-			}
-			us, ok := millisToMicros(int64(a.Value(i)))
-			if !ok {
-				return nil, fmt.Errorf("%w: Parquet TIMESTAMP(MILLIS) value %d overflows int64 microseconds",
-					iceberg.ErrInvalidArgument, a.Value(i))
-			}
-			bldr.Append(arrow.Timestamp(us))
-		}
-
-		return bldr.NewArray(), nil
+		return normalizeTimestampMillisLeaf(alloc, a, newType.(*arrow.TimestampType))
 
 	case *array.Dictionary:
 		newDict, err := normalizeTimestampMillisArray(alloc, a.Dictionary())

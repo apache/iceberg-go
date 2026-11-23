@@ -144,7 +144,7 @@ func (parquetFormat) Open(ctx context.Context, fs iceio.IO, path string) (_ File
 	return wrapPqArrowReader{
 		FileReader:          arrRdr,
 		dictionarySource:    inputfile,
-		dictionaryMem:       alloc,
+		mem:                 alloc,
 		dictionaryReadProps: readProps,
 	}, nil
 }
@@ -1979,13 +1979,14 @@ func (p parquetFormat) DataFileStatsFromMeta(meta Metadata, statsCols map[int]St
 	pqmeta := meta.(*metadata.FileMetaData)
 	columns := resolveParquetStatsColumns(pqmeta, statsCols, colMapping, variantFieldIDs)
 	var (
-		colSizes        = make(map[int]int64)
-		valueCounts     = make(map[int]int64)
-		splitOffsets    = make([]int64, 0)
-		nullValueCounts = make(map[int]int64)
-		nanValueCounts  = make(map[int]int64)
-		invalidateCol   = make(map[int]struct{})
-		colAggs         = make(map[int]StatsAgg)
+		colSizes         = make(map[int]int64)
+		valueCounts      = make(map[int]int64)
+		splitOffsets     = make([]int64, 0)
+		nullValueCounts  = make(map[int]int64)
+		nanValueCounts   = make(map[int]int64)
+		invalidateCol    = make(map[int]struct{})
+		invalidateBounds = make(map[int]struct{})
+		colAggs          = make(map[int]StatsAgg)
 	)
 
 	for rg := range pqmeta.NumRowGroups() {
@@ -2064,6 +2065,18 @@ func (p parquetFormat) DataFileStatsFromMeta(meta Metadata, statsCols map[int]St
 				continue
 			}
 
+			if _, invalid := invalidateBounds[fieldID]; invalid {
+				continue
+			}
+
+			stats = wrapStatsForType(stats, statsCol.IcebergTyp)
+			if !stats.HasMinMax() {
+				invalidateBounds[fieldID] = struct{}{}
+				delete(colAggs, fieldID)
+
+				continue
+			}
+
 			agg, ok := colAggs[fieldID]
 			if !ok {
 				agg, err = p.createStatsAgg(statsCol.IcebergTyp, stats.Type().String(), statsCol.Mode.Len)
@@ -2072,15 +2085,6 @@ func (p parquetFormat) DataFileStatsFromMeta(meta Metadata, statsCols map[int]St
 				}
 
 				colAggs[fieldID] = agg
-			}
-
-			stats = wrapStatsForType(stats, statsCol.IcebergTyp)
-
-			if !stats.HasMinMax() {
-				invalidateCol[fieldID] = struct{}{}
-				delete(colAggs, fieldID)
-
-				continue
 			}
 
 			agg.Update(stats)
@@ -2115,8 +2119,23 @@ func (p parquetFormat) DataFileStatsFromMeta(meta Metadata, statsCols map[int]St
 	}
 }
 
+type statsWithoutMinMax struct {
+	metadata.TypedStatistics
+}
+
+func (statsWithoutMinMax) HasMinMax() bool { return false }
+
 // wrapStatsForType adapts Parquet stats so a StatsAgg reads Iceberg-typed min/max.
 func wrapStatsForType(stats metadata.TypedStatistics, typ iceberg.PrimitiveType) metadata.TypedStatistics {
+	if IsTimestampMillis(stats.Descr()) {
+		switch typ.(type) {
+		case iceberg.TimestampType, iceberg.TimestampTzType:
+			return TimestampMillisAsMicros(stats)
+		default:
+			return statsWithoutMinMax{stats}
+		}
+	}
+
 	switch t := typ.(type) {
 	case iceberg.BinaryType:
 		return &wrappedBinaryStats{stats.(*metadata.ByteArrayStatistics)}
@@ -2129,8 +2148,6 @@ func wrapStatsForType(stats metadata.TypedStatistics, typ iceberg.PrimitiveType)
 			FixedLenByteArrayStatistics: stats.(*metadata.FixedLenByteArrayStatistics),
 			expectedLen:                 t.Len(),
 		}
-	case iceberg.TimestampType, iceberg.TimestampTzType:
-		return TimestampMillisAsMicros(stats)
 	case iceberg.DecimalType:
 		switch s := stats.(type) {
 		case *metadata.FixedLenByteArrayStatistics:
@@ -2384,7 +2401,7 @@ type wrapPqArrowReader struct {
 	// dictionarySource is shared with FileReader. The temporary reader created
 	// from it wraps the source so it cannot close the main reader's input.
 	dictionarySource    parquet.ReaderAtSeeker
-	dictionaryMem       memory.Allocator
+	mem                 memory.Allocator
 	dictionaryReadProps *parquet.ReaderProperties
 }
 
@@ -2545,7 +2562,7 @@ func (w wrapPqArrowReader) GetRecords(ctx context.Context, cols []int, tester an
 				// section-read reader cannot be created, use the main reader and
 				// keep the existing conservative behaviour.
 				dictionaryReader, _ = newParquetDictionaryReader(
-					w.dictionarySource, fileMeta, w.dictionaryMem, w.dictionaryReadProps)
+					w.dictionarySource, fileMeta, w.mem, w.dictionaryReadProps)
 				if dictionaryReader != nil {
 					// The temporary reader owns only its buffers. Its source is
 					// wrapped so this cannot close the main reader's input.
@@ -2650,7 +2667,7 @@ func (w wrapPqArrowReader) GetRecords(ctx context.Context, cols []int, tester an
 		return rr, nil
 	}
 
-	alloc := w.dictionaryMem
+	alloc := w.mem
 	if alloc == nil {
 		alloc = compute.GetAllocator(ctx)
 	}
@@ -3203,7 +3220,7 @@ func (pfs *ParquetFileSource) GetReader(ctx context.Context) (result FileReader,
 		FileReader:          fr,
 		rowGroupInfos:       rowGroupInfos,
 		dictionarySource:    pf,
-		dictionaryMem:       pfs.mem,
+		mem:                 pfs.mem,
 		dictionaryReadProps: readProps,
 	}
 

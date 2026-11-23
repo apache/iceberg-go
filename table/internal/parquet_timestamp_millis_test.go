@@ -21,11 +21,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"fmt"
 	"math"
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/bitutil"
 	"github.com/apache/arrow-go/v18/arrow/compute"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/arrow-go/v18/parquet"
@@ -447,4 +449,354 @@ func TestTimestampMillisDictionaryEncodedNormalizesWithoutLeak(t *testing.T) {
 
 	assert.False(t, rr.Next())
 	require.NoError(t, rr.Err())
+}
+
+func TestWrapStatsForTypeMillisNonMicrosOmitsBounds(t *testing.T) {
+	node, err := schema.NewPrimitiveNodeLogical("ts", parquet.Repetitions.Optional,
+		schema.NewTimestampLogicalType(false, schema.TimeUnitMillis), parquet.Types.Int64, -1, 1)
+	require.NoError(t, err)
+
+	col := schema.NewColumn(node, 1, 0)
+	stats := metadata.NewInt64Statistics(col, memory.DefaultAllocator)
+	stats.Update([]int64{1_700_000_000_000, 1_700_000_001_500}, 2)
+
+	for _, typ := range []iceberg.PrimitiveType{
+		iceberg.PrimitiveTypes.TimestampNs,
+		iceberg.PrimitiveTypes.TimestampTzNs,
+		iceberg.PrimitiveTypes.Int64,
+	} {
+		t.Run(typ.String(), func(t *testing.T) {
+			wrapped := internal.WrapStatsForType(stats, typ)
+			assert.False(t, wrapped.HasMinMax(), "min/max bounds must be omitted for %s", typ)
+			assert.True(t, wrapped.HasNullCount())
+			assert.Equal(t, int64(2), wrapped.NullCount())
+		})
+	}
+}
+
+func TestDataFileStatsFromMetaPreservesNullCountsWhenMillisBoundsOmitted(t *testing.T) {
+	writeTwoRowGroupMillis := func(t *testing.T, utc bool, rg0Vals, rg1Vals []int64, rg0Def, rg1Def []int16) *metadata.FileMetaData {
+		t.Helper()
+
+		node, err := schema.NewPrimitiveNodeLogical("ts", parquet.Repetitions.Optional,
+			schema.NewTimestampLogicalType(utc, schema.TimeUnitMillis), parquet.Types.Int64, -1, 1)
+		require.NoError(t, err)
+		root, err := schema.NewGroupNode("schema", parquet.Repetitions.Required, schema.FieldList{node}, -1)
+		require.NoError(t, err)
+
+		var buf bytes.Buffer
+		pw := file.NewParquetWriter(&buf, root,
+			file.WithWriterProps(parquet.NewWriterProperties(parquet.WithStats(true))))
+
+		writeRG := func(vals []int64, defs []int16) {
+			rgw, err := pw.AppendRowGroupChecked()
+			require.NoError(t, err)
+			cw, err := rgw.NextColumn()
+			require.NoError(t, err)
+			_, err = cw.(*file.Int64ColumnChunkWriter).WriteBatch(vals, defs, nil)
+			require.NoError(t, err)
+			require.NoError(t, cw.Close())
+			require.NoError(t, rgw.Close())
+		}
+
+		writeRG(rg0Vals, rg0Def)
+		writeRG(rg1Vals, rg1Def)
+		require.NoError(t, pw.Close())
+
+		pqRdr, err := file.NewParquetReader(bytes.NewReader(buf.Bytes()))
+		require.NoError(t, err)
+		defer func() { require.NoError(t, pqRdr.Close()) }()
+
+		return pqRdr.MetaData()
+	}
+
+	const overflowMillis = math.MaxInt64/1000 + 1
+
+	tests := []struct {
+		name      string
+		utc       bool
+		icebergTy iceberg.PrimitiveType
+		rg0Vals   []int64
+		rg1Vals   []int64
+	}{
+		{
+			name:      "timestamp_ns",
+			utc:       false,
+			icebergTy: iceberg.PrimitiveTypes.TimestampNs,
+			rg0Vals:   []int64{1_700_000_000_000, 1_700_000_001_000},
+			rg1Vals:   []int64{1_700_000_002_000},
+		},
+		{
+			name:      "timestamptz_ns",
+			utc:       true,
+			icebergTy: iceberg.PrimitiveTypes.TimestampTzNs,
+			rg0Vals:   []int64{1_700_000_000_000, 1_700_000_001_000},
+			rg1Vals:   []int64{1_700_000_002_000},
+		},
+		{
+			name:      "overflowing_timestamp_micros",
+			utc:       false,
+			icebergTy: iceberg.PrimitiveTypes.Timestamp,
+			rg0Vals:   []int64{0, overflowMillis},
+			rg1Vals:   []int64{1_000},
+		},
+	}
+
+	format := internal.GetFileFormat(iceberg.ParquetFile)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// RG0: 2 non-null, 1 null. RG1: 1 non-null, 2 nulls. Total: 6 values, 3 nulls.
+			meta := writeTwoRowGroupMillis(t, tt.utc,
+				tt.rg0Vals, tt.rg1Vals,
+				[]int16{1, 0, 1},
+				[]int16{0, 1, 0},
+			)
+			collectors := map[int]internal.StatisticsCollector{
+				1: {
+					FieldID:    1,
+					IcebergTyp: tt.icebergTy,
+					Mode:       internal.MetricsMode{Typ: internal.MetricModeFull},
+				},
+			}
+			got := format.DataFileStatsFromMeta(internal.Metadata(meta), collectors, map[string]int{"ts": 1}, nil, nil)
+			_, hasAgg := got.ColAggs[1]
+			assert.False(t, hasAgg, "min/max aggregator must be omitted")
+			assert.Equal(t, int64(6), got.ValueCounts[1])
+			assert.Equal(t, int64(3), got.NullValueCounts[1])
+		})
+	}
+}
+
+func TestNormalizeTimestampMillisArrayEdgeCases(t *testing.T) {
+	msType := &arrow.TimestampType{Unit: arrow.Millisecond, TimeZone: "UTC"}
+
+	t.Run("sliced with nulls", func(t *testing.T) {
+		for _, offset := range []int64{3, 8} {
+			t.Run(fmt.Sprintf("offset_%d", offset), func(t *testing.T) {
+				alloc := memory.NewCheckedAllocator(memory.DefaultAllocator)
+				defer alloc.AssertSize(t, 0)
+
+				b := array.NewTimestampBuilder(alloc, msType)
+				for i := range 20 {
+					if i%3 == 0 {
+						b.AppendNull()
+					} else {
+						b.Append(arrow.Timestamp(1_000 + int64(i)))
+					}
+				}
+				full := b.NewArray()
+				b.Release()
+
+				sliced := array.NewSlice(full, offset, offset+9)
+				full.Release()
+
+				out, err := internal.NormalizeTimestampMillisArray(alloc, sliced)
+				require.NoError(t, err)
+				// Release the input before reading output to verify buffer ownership.
+				sliced.Release()
+				defer out.Release()
+
+				ts := out.(*array.Timestamp)
+				assert.Equal(t, arrow.Microsecond, ts.DataType().(*arrow.TimestampType).Unit)
+				assert.Equal(t, "UTC", ts.DataType().(*arrow.TimestampType).TimeZone)
+				require.Equal(t, 9, ts.Len())
+				for i := range 9 {
+					origIdx := int(offset) + i
+					if origIdx%3 == 0 {
+						assert.True(t, ts.IsNull(i), "index %d", i)
+					} else {
+						assert.False(t, ts.IsNull(i), "index %d", i)
+						assert.Equal(t, arrow.Timestamp((1_000+int64(origIdx))*1000), ts.Value(i), "index %d", i)
+					}
+				}
+			})
+		}
+	})
+
+	t.Run("out-of-range garbage in null slots", func(t *testing.T) {
+		alloc := memory.NewCheckedAllocator(memory.DefaultAllocator)
+		defer alloc.AssertSize(t, 0)
+
+		valBuf := memory.NewResizableBuffer(alloc)
+		valBuf.Resize(arrow.TimestampTraits.BytesRequired(4))
+		vals := arrow.TimestampTraits.CastFromBytes(valBuf.Bytes())
+		vals[0] = math.MaxInt64
+		vals[1] = 1_500
+		vals[2] = math.MinInt64
+		vals[3] = -2_500
+
+		nullBuf := memory.NewResizableBuffer(alloc)
+		nullBuf.Resize(int(bitutil.BytesForBits(4)))
+		bitutil.SetBitTo(nullBuf.Bytes(), 0, false)
+		bitutil.SetBitTo(nullBuf.Bytes(), 1, true)
+		bitutil.SetBitTo(nullBuf.Bytes(), 2, false)
+		bitutil.SetBitTo(nullBuf.Bytes(), 3, true)
+
+		data := array.NewData(msType, 4, []*memory.Buffer{nullBuf, valBuf}, nil, 2, 0)
+		valBuf.Release()
+		nullBuf.Release()
+		in := array.NewTimestampData(data)
+		data.Release()
+
+		out, err := internal.NormalizeTimestampMillisArray(alloc, in)
+		require.NoError(t, err)
+		in.Release()
+		defer out.Release()
+
+		ts := out.(*array.Timestamp)
+		require.Equal(t, 4, ts.Len())
+		assert.Equal(t, 2, ts.NullN())
+		assert.True(t, ts.IsNull(0))
+		assert.Equal(t, arrow.Timestamp(1_500_000), ts.Value(1))
+		assert.True(t, ts.IsNull(2))
+		assert.Equal(t, arrow.Timestamp(-2_500_000), ts.Value(3))
+	})
+
+	t.Run("all nulls", func(t *testing.T) {
+		alloc := memory.NewCheckedAllocator(memory.DefaultAllocator)
+		defer alloc.AssertSize(t, 0)
+
+		b := array.NewTimestampBuilder(alloc, msType)
+		for range 5 {
+			b.AppendNull()
+		}
+		in := b.NewArray()
+		b.Release()
+
+		out, err := internal.NormalizeTimestampMillisArray(alloc, in)
+		require.NoError(t, err)
+		in.Release()
+		defer out.Release()
+
+		ts := out.(*array.Timestamp)
+		assert.Equal(t, 5, ts.Len())
+		assert.Equal(t, 5, ts.NullN())
+		for i := range 5 {
+			assert.True(t, ts.IsNull(i))
+		}
+	})
+
+	t.Run("zero length", func(t *testing.T) {
+		alloc := memory.NewCheckedAllocator(memory.DefaultAllocator)
+		defer alloc.AssertSize(t, 0)
+
+		b := array.NewTimestampBuilder(alloc, msType)
+		in := b.NewArray()
+		b.Release()
+
+		out, err := internal.NormalizeTimestampMillisArray(alloc, in)
+		require.NoError(t, err)
+		in.Release()
+		defer out.Release()
+
+		ts := out.(*array.Timestamp)
+		assert.Equal(t, arrow.Microsecond, ts.DataType().(*arrow.TimestampType).Unit)
+		assert.Zero(t, ts.Len())
+		assert.Zero(t, ts.NullN())
+	})
+}
+
+func BenchmarkNormalizeTimestampMillisArray(b *testing.B) {
+	alloc := memory.DefaultAllocator
+	msType := &arrow.TimestampType{Unit: arrow.Millisecond, TimeZone: "UTC"}
+
+	makeArr := func(n int, kind string) arrow.Array {
+		switch kind {
+		case "no_nulls":
+			tb := array.NewTimestampBuilder(alloc, msType)
+			defer tb.Release()
+			tb.Reserve(n)
+			for i := range n {
+				tb.Append(arrow.Timestamp(1_700_000_000_000 + int64(i)))
+			}
+
+			return tb.NewArray()
+		case "nulls_10pct":
+			tb := array.NewTimestampBuilder(alloc, msType)
+			defer tb.Release()
+			tb.Reserve(n)
+			for i := range n {
+				if i%10 == 0 {
+					tb.AppendNull()
+				} else {
+					tb.Append(arrow.Timestamp(1_700_000_000_000 + int64(i)))
+				}
+			}
+
+			return tb.NewArray()
+		case "sliced_offset_3":
+			tb := array.NewTimestampBuilder(alloc, msType)
+			defer tb.Release()
+			tb.Reserve(n + 3)
+			for i := range n + 3 {
+				if i%10 == 0 {
+					tb.AppendNull()
+				} else {
+					tb.Append(arrow.Timestamp(1_700_000_000_000 + int64(i)))
+				}
+			}
+			full := tb.NewArray()
+			defer full.Release()
+
+			return array.NewSlice(full, 3, int64(n+3))
+		case "all_nulls":
+			tb := array.NewTimestampBuilder(alloc, msType)
+			defer tb.Release()
+			tb.Reserve(n)
+			for range n {
+				tb.AppendNull()
+			}
+
+			return tb.NewArray()
+		case "dictionary":
+			dictType := &arrow.DictionaryType{IndexType: arrow.PrimitiveTypes.Int32, ValueType: msType}
+			vb := array.NewTimestampBuilder(alloc, msType)
+			defer vb.Release()
+			for i := range 64 {
+				vb.Append(arrow.Timestamp(1_700_000_000_000 + int64(i)*1000))
+			}
+			dictVals := vb.NewArray()
+			defer dictVals.Release()
+
+			ib := array.NewInt32Builder(alloc)
+			defer ib.Release()
+			ib.Reserve(n)
+			for i := range n {
+				ib.Append(int32(i % 64))
+			}
+			indices := ib.NewArray()
+			defer indices.Release()
+
+			data := array.NewDataWithDictionary(
+				dictType, indices.Len(), indices.Data().Buffers(), indices.NullN(), indices.Data().Offset(),
+				dictVals.Data().(*array.Data),
+			)
+			defer data.Release()
+
+			return array.NewDictionaryData(data)
+		default:
+			b.Fatalf("unknown case %q", kind)
+
+			return nil
+		}
+	}
+
+	for _, c := range []string{"no_nulls", "nulls_10pct", "sliced_offset_3", "all_nulls", "dictionary"} {
+		for _, n := range []int{128, 4096, 131072} {
+			arr := makeArr(n, c)
+			b.Run(fmt.Sprintf("%s/%d", c, n), func(b *testing.B) {
+				b.ReportAllocs()
+				b.SetBytes(int64(n * 8))
+				b.ResetTimer()
+				for range b.N {
+					out, err := internal.NormalizeTimestampMillisArray(alloc, arr)
+					if err != nil {
+						b.Fatal(err)
+					}
+					out.Release()
+				}
+			})
+			arr.Release()
+		}
+	}
 }

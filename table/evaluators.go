@@ -958,6 +958,43 @@ type inclusiveMetricsEval struct {
 	metricsEvaluator
 	expr              iceberg.BooleanExpression
 	includeEmptyFiles bool
+	fieldTypes        map[int]iceberg.Type
+}
+
+type exprFieldTypesVisitor struct {
+	types map[int]iceberg.Type
+}
+
+func (exprFieldTypesVisitor) VisitTrue() struct{}                  { return struct{}{} }
+func (exprFieldTypesVisitor) VisitFalse() struct{}                 { return struct{}{} }
+func (exprFieldTypesVisitor) VisitNot(struct{}) struct{}           { return struct{}{} }
+func (exprFieldTypesVisitor) VisitAnd(struct{}, struct{}) struct{} { return struct{}{} }
+func (exprFieldTypesVisitor) VisitOr(struct{}, struct{}) struct{}  { return struct{}{} }
+func (exprFieldTypesVisitor) VisitUnbound(iceberg.UnboundPredicate) struct{} {
+	return struct{}{}
+}
+
+func (v exprFieldTypesVisitor) VisitBound(pred iceberg.BoundPredicate) struct{} {
+	field := pred.Ref().Field()
+	if prev, exists := v.types[field.ID]; exists {
+		if prev != nil && !prev.Equals(field.Type) {
+			v.types[field.ID] = nil
+		}
+
+		return struct{}{}
+	}
+	v.types[field.ID] = field.Type
+
+	return struct{}{}
+}
+
+func (m *inclusiveMetricsEval) fieldType(fieldID int) iceberg.Type {
+	if m.fieldTypes == nil {
+		m.fieldTypes = make(map[int]iceberg.Type)
+		_, _ = iceberg.VisitExpr(m.expr, exprFieldTypesVisitor{types: m.fieldTypes})
+	}
+
+	return m.fieldTypes[fieldID]
 }
 
 // intBackedDecimal reports whether a column's statistics are a decimal that
@@ -983,8 +1020,15 @@ func intBackedDecimal(descr *parquetschema.Column) bool {
 // and max. Any evaluator that populates bounds from raw Parquet statistics must
 // go through here rather than calling EncodeMin/EncodeMax directly, or
 // int-backed decimals and millisecond timestamps silently prune rows that match.
-func parquetStatsBounds(stats metadata.TypedStatistics) (lower, upper []byte, ok bool) {
-	stats = internal.TimestampMillisAsMicros(stats)
+func parquetStatsBounds(stats metadata.TypedStatistics, fieldType iceberg.Type) (lower, upper []byte, ok bool) {
+	if internal.IsTimestampMillis(stats.Descr()) {
+		switch fieldType.(type) {
+		case iceberg.TimestampType, iceberg.TimestampTzType:
+			stats = internal.TimestampMillisAsMicros(stats)
+		default:
+			return nil, nil, false
+		}
+	}
 	if !stats.HasMinMax() {
 		return nil, nil, false
 	}
@@ -1048,7 +1092,11 @@ func (m *inclusiveMetricsEval) TestRowGroup(rgmeta *metadata.RowGroupMetaData, c
 		if stats.HasNullCount() {
 			m.nullCounts[fieldID] = stats.NullCount()
 		}
-		if lower, upper, ok := parquetStatsBounds(stats); ok {
+		var fieldType iceberg.Type
+		if internal.IsTimestampMillis(stats.Descr()) {
+			fieldType = m.fieldType(fieldID)
+		}
+		if lower, upper, ok := parquetStatsBounds(stats, fieldType); ok {
 			if m.lowerBounds == nil {
 				// Lower and upper bounds are always allocated together.
 				m.lowerBounds = make(map[int][]byte, len(colIndices))
