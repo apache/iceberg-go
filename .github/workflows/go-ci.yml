@@ -96,7 +96,7 @@ jobs:
     - name: Vet (including integration-tagged files)
       if: matrix.os == 'ubuntu-latest' && matrix.go == '1.27.1'
       run: make vet
-    # Bump the ref to adopt new iceberg-verification reference tables.
+    # Bump the ref to adopt new iceberg-verification fixtures.
     - name: Check out iceberg-verification
       if: matrix.os == 'ubuntu-latest' && matrix.go == '1.27.1'
       uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -105,13 +105,14 @@ jobs:
         ref: fb0be4d6cb2af5529a176b976b4a775dc87b778f
         path: .iceberg-verification
         persist-credentials: false
-    - name: Read iceberg-verification reference tables
+    - name: Run iceberg-verification fixtures
       if: matrix.os == 'ubuntu-latest' && matrix.go == '1.27.1'
       env:
         ICEBERG_VERIFICATION_DIR: ${{ github.workspace }}/.iceberg-verification
       run: |
         ln -s "$ICEBERG_VERIFICATION_DIR" /tmp/iceberg-verification
         go test -v -run '^TestReferenceTables$' ./table
+        go test -v -run '^TestVerificationTypes$' .
     - name: Save Go module and build cache
       if: github.ref == 'refs/heads/main'
       uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
