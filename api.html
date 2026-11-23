@@ -428,6 +428,10 @@ scan := tbl.Scan(
 )
 </code></pre>
 <p>For the predicate vocabulary, see <a href="./row-filter-syntax.html">Row Filter Syntax</a>.</p>
+<h3 id="dictionary-encoded-columns"><a class="header" href="#dictionary-encoded-columns">Dictionary-encoded columns</a></h3>
+<pre><code class="language-go">scan := tbl.Scan(table.WithDictionaryColumns(&quot;region&quot;, &quot;event.name&quot;))
+</code></pre>
+<p><code>WithDictionaryColumns</code> returns the named string and binary columns as Arrow dictionary arrays. Requested columns always have type <code>dictionary&lt;int32, utf8&gt;</code> or <code>dictionary&lt;int32, binary&gt;</code>, even with <code>arrow.use_large_types</code>. The dictionary can change from one batch to the next, so don't rely on dictionary identity across batches. Filtering on a requested column decodes the dictionary for each batch to evaluate the predicate, so a filtered scan may not be faster.</p>
 <h3 id="time-travel"><a class="header" href="#time-travel">Time travel</a></h3>
 <pre><code class="language-go">// By snapshot ID
 scan := tbl.Scan(table.WithSnapshotID(snap.SnapshotID))
