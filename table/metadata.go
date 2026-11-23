@@ -813,6 +813,11 @@ func (b *MetadataBuilder) AddSchema(schema *iceberg.Schema) error {
 	if err := checkSchemaCompatibility(schema, b.formatVersion); err != nil {
 		return err
 	}
+	// The schema is stored with the caller's IDs, and reading metadata rejects
+	// duplicate IDs, including 0 and negatives, so reject them here too.
+	if err := validateUniqueFieldIDs(schema); err != nil {
+		return err
+	}
 
 	newSchemaID := b.reuseOrCreateNewSchemaID(schema)
 
@@ -3744,13 +3749,13 @@ func NewMetadataWithUUID(sc *iceberg.Schema, partitions *iceberg.PartitionSpec, 
 	return builder.Build()
 }
 
-type ReassignedIds struct {
+type ReassignedIDs struct {
 	schema        *iceberg.Schema
 	partitionSpec *iceberg.PartitionSpec
 	sortOrder     SortOrder
 }
 
-func reassignIDs(sc *iceberg.Schema, partitions *iceberg.PartitionSpec, sortOrder SortOrder) (*ReassignedIds, error) {
+func reassignIDs(sc *iceberg.Schema, partitions *iceberg.PartitionSpec, sortOrder SortOrder) (*ReassignedIDs, error) {
 	previousMapFn := sc.FindColumnName
 	freshSc, err := iceberg.AssignFreshSchemaIDs(sc, nil)
 	if err != nil {
@@ -3787,7 +3792,7 @@ func reassignIDs(sc *iceberg.Schema, partitions *iceberg.PartitionSpec, sortOrde
 		return nil, fmt.Errorf("%w: %w", ErrInvalidMetadata, err)
 	}
 
-	return &ReassignedIds{
+	return &ReassignedIDs{
 		schema:        freshSc,
 		partitionSpec: &freshPartitions,
 		sortOrder:     freshSortOrder,

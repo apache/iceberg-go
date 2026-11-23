@@ -106,7 +106,8 @@ func (t *PartitionAggregateTree) LookupPartition(
 ) *PartitionAggregate {
 	node := t
 	for i := range partitionType.NumFields() {
-		child, ok := node.child(partition[partitionType.Field(i).ID])
+		field := partitionType.Field(i)
+		child, ok := node.child(widenPartitionValue(partition[field.ID], field.Type))
 		if !ok {
 			return nil
 		}
@@ -139,13 +140,31 @@ func CoercePartition(values map[int]any, partitionType *iceberg.StructType) map[
 
 	coerced := make(map[int]any, partitionType.NumFields())
 	for i := range partitionType.NumFields() {
-		id := partitionType.Field(i).ID
-		if value, ok := values[id]; ok {
-			coerced[id] = value
+		field := partitionType.Field(i)
+		if value, ok := values[field.ID]; ok {
+			coerced[field.ID] = widenPartitionValue(value, field.Type)
 		}
 	}
 
 	return coerced
+}
+
+// widenPartitionValue applies the exact int to long and float to double
+// promotions, so values from manifests written before an identity source was
+// promoted aggregate with values written after it.
+func widenPartitionValue(value any, typ iceberg.Type) any {
+	switch v := value.(type) {
+	case int32:
+		if _, ok := typ.(iceberg.Int64Type); ok {
+			return int64(v)
+		}
+	case float32:
+		if _, ok := typ.(iceberg.Float64Type); ok {
+			return float64(v)
+		}
+	}
+
+	return value
 }
 
 func ClonePartition(partition map[int]any) map[int]any {

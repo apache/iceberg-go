@@ -71,7 +71,7 @@ const (
 	// The ID of the Glue Data Catalog where the tables reside. If none is provided, Glue
 	// automatically uses the caller's AWS account ID by default.
 	// See: https://docs.aws.amazon.com/glue/latest/dg/aws-glue-api-catalog-databases.html
-	CatalogIdKey = "glue.id"
+	CatalogIDKey = "glue.id"
 
 	// Skip archiving old table versions on commits. Recommended for high-frequency
 	// streaming workloads to avoid hitting Glue's archive limits.
@@ -196,7 +196,7 @@ func NewCatalog(opts ...Option) (*Catalog, error) {
 	}
 
 	var catalogId *string
-	if val, ok := glueOps.awsProperties[CatalogIdKey]; ok {
+	if val, ok := glueOps.awsProperties[CatalogIDKey]; ok {
 		catalogId = &val
 	} else {
 		catalogId = nil

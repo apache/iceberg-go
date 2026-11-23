@@ -65,9 +65,9 @@ func gcsEndpoint(props map[string]string) string {
 	return props[io.GCSEndpoint]
 }
 
-// ParseGCSConfig parses non-credential GCS blob options; credentials are set on
+// parseGCSConfig parses non-credential GCS blob options; credentials are set on
 // the client by gcsCredentials, which supersedes any credential option here.
-func ParseGCSConfig(props map[string]string) *gcsblob.Options {
+func parseGCSConfig(props map[string]string) *gcsblob.Options {
 	var o []option.ClientOption
 	if url := gcsEndpoint(props); url != "" {
 		o = append(o, option.WithEndpoint(url))
@@ -152,7 +152,7 @@ func gcsCredentialsWithDefault(
 
 // Construct a GCS bucket from a URL
 func createGCSBucket(ctx context.Context, parsed *url.URL, props map[string]string) (*blob.Bucket, error) {
-	gcscfg := ParseGCSConfig(props)
+	gcscfg := parseGCSConfig(props)
 
 	creds, err := gcsCredentials(ctx, props)
 	if err != nil {

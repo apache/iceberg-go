@@ -102,7 +102,7 @@ func (w *concurrentDataFileWriter) writeDeleteRecords(ctx context.Context, locat
 				count, _ := nextCount()
 				fileCount++
 				task := WriteTask{
-					Uuid: *args.writeUUID, ID: count, PartitionID: iceberg.UnpartitionedSpec.ID(),
+					UUID: *args.writeUUID, ID: count, PartitionID: iceberg.UnpartitionedSpec.ID(),
 					FileCount: fileCount, Schema: schema, Batches: batch,
 				}
 				if !yield(task) {

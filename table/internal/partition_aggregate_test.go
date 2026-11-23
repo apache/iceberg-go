@@ -161,6 +161,48 @@ func TestPartitionAggregateTreeLookupPartition(t *testing.T) {
 	require.Same(t, evolvedAggregate, tree.Lookup(evolvedRecord))
 }
 
+func TestPartitionAggregateTreeWidensPromotedValues(t *testing.T) {
+	tests := []struct {
+		name     string
+		typ      iceberg.Type
+		inserted any
+		wantType any
+		lookup   any
+		found    bool
+	}{
+		{"int found by long", iceberg.PrimitiveTypes.Int64, int32(5), int64(0), int64(5), true},
+		{"long found by int", iceberg.PrimitiveTypes.Int64, int64(5), int64(0), int32(5), true},
+		{"other long", iceberg.PrimitiveTypes.Int64, int32(5), int64(0), int64(6), false},
+		{"float found by double", iceberg.PrimitiveTypes.Float64, float32(1.5), float64(0), float64(1.5), true},
+		{"double found by float", iceberg.PrimitiveTypes.Float64, float64(1.5), float64(0), float32(1.5), true},
+		{"float NaN found by double NaN", iceberg.PrimitiveTypes.Float64, float32(math.NaN()), float64(0), math.NaN(), true},
+		// float32(0.1) widens exactly, so it stays distinct from float64(0.1).
+		{"float differs after widening", iceberg.PrimitiveTypes.Float64, float32(0.1), float64(0), float64(0.1), false},
+		{"int field keeps int", iceberg.PrimitiveTypes.Int32, int32(5), int32(0), int32(5), true},
+		{"int field does not widen", iceberg.PrimitiveTypes.Int32, int32(5), int32(0), int64(5), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			partitionType := iceberg.NewStructType(
+				iceberg.NestedField{ID: 1000, Name: "p", Type: tt.typ},
+			)
+			coerced := CoercePartition(map[int]any{1000: tt.inserted}, partitionType)
+			require.IsType(t, tt.wantType, coerced[1000])
+
+			aggregate := &PartitionAggregate{SpecID: 1}
+			tree := NewPartitionAggregateTree()
+			tree.Insert(NewPartitionRecord(coerced, partitionType), aggregate)
+
+			got := tree.LookupPartition(map[int]any{1000: tt.lookup}, partitionType)
+			if tt.found {
+				require.Same(t, aggregate, got)
+			} else {
+				require.Nil(t, got)
+			}
+		})
+	}
+}
+
 func TestClonePartitionClonesBinaryValues(t *testing.T) {
 	value := []byte{1, 2, 3}
 	cloned := ClonePartition(map[int]any{1000: value})

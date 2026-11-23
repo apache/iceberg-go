@@ -35,7 +35,7 @@ import (
 )
 
 func TestOauth2AuthManager_AuthHeader_StaticToken(t *testing.T) {
-	manager := &Oauth2AuthManager{
+	manager := &OAuth2AuthManager{
 		tokenSource: oauth2.StaticTokenSource(&oauth2.Token{
 			AccessToken: "static_token",
 			TokenType:   "Bearer",
@@ -78,7 +78,7 @@ func TestOauth2AuthManager_AuthHeader_FetchToken_Success(t *testing.T) {
 	}
 
 	ctx := context.WithValue(context.Background(), oauth2.HTTPClient, server.Client())
-	manager := &Oauth2AuthManager{
+	manager := &OAuth2AuthManager{
 		tokenSource: cfg.TokenSource(ctx),
 	}
 
@@ -110,7 +110,7 @@ func TestOauth2AuthManager_AuthHeader_FetchToken_ErrorResponse(t *testing.T) {
 	}
 
 	ctx := context.WithValue(context.Background(), oauth2.HTTPClient, server.Client())
-	manager := &Oauth2AuthManager{
+	manager := &OAuth2AuthManager{
 		tokenSource: cfg.TokenSource(ctx),
 	}
 
@@ -142,7 +142,7 @@ func TestOauth2AuthManager_AuthHeaderWithContext_CallerDeadline(t *testing.T) {
 	}
 
 	tokenCtx := context.WithValue(context.Background(), oauth2.HTTPClient, server.Client())
-	manager := &Oauth2AuthManager{
+	manager := &OAuth2AuthManager{
 		tokenSource: cfg.TokenSource(tokenCtx),
 	}
 
@@ -168,7 +168,7 @@ func (s *blockingTokenSource) Token() (*oauth2.Token, error) {
 
 func TestOauth2AuthManager_AuthHeaderWithContext_SharesRefresh(t *testing.T) {
 	source := &blockingTokenSource{release: make(chan struct{})}
-	manager := &Oauth2AuthManager{tokenSource: source}
+	manager := &OAuth2AuthManager{tokenSource: source}
 
 	// Concurrent callers give up before the refresh completes.
 	var callers sync.WaitGroup
@@ -213,7 +213,7 @@ func TestNewOauth2AuthManager_ReusesValidToken(t *testing.T) {
 	source := &sequenceTokenSource{tokens: []*oauth2.Token{
 		{AccessToken: "a", Expiry: time.Now().Add(time.Hour)},
 	}}
-	manager := NewOauth2AuthManager(source)
+	manager := NewOAuth2AuthManager(source)
 
 	for range 3 {
 		key, value, err := manager.AuthHeader()
@@ -229,7 +229,7 @@ func TestNewOauth2AuthManager_RefreshesExpiredToken(t *testing.T) {
 		{AccessToken: "a", TokenType: "Bearer", Expiry: time.Now().Add(-time.Minute)},
 		{AccessToken: "b", TokenType: "Bearer", Expiry: time.Now().Add(time.Hour)},
 	}}
-	manager := NewOauth2AuthManager(source)
+	manager := NewOAuth2AuthManager(source)
 
 	for _, want := range []string{"Bearer a", "Bearer b", "Bearer b"} {
 		_, value, err := manager.AuthHeaderWithContext(context.Background())
@@ -240,7 +240,7 @@ func TestNewOauth2AuthManager_RefreshesExpiredToken(t *testing.T) {
 }
 
 func TestNewOauth2AuthManager_RetrieveErrorIsOAuthError(t *testing.T) {
-	manager := NewOauth2AuthManager(&sequenceTokenSource{err: &oauth2.RetrieveError{
+	manager := NewOAuth2AuthManager(&sequenceTokenSource{err: &oauth2.RetrieveError{
 		ErrorCode:        "invalid_grant",
 		ErrorDescription: "Token has been expired or revoked.",
 	}})
@@ -253,7 +253,7 @@ func TestNewOauth2AuthManager_RetrieveErrorIsOAuthError(t *testing.T) {
 
 func TestNewOauth2AuthManager_CanceledContextSkipsSource(t *testing.T) {
 	source := &sequenceTokenSource{tokens: []*oauth2.Token{{AccessToken: "a"}}}
-	manager := NewOauth2AuthManager(source)
+	manager := NewOAuth2AuthManager(source)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -264,7 +264,7 @@ func TestNewOauth2AuthManager_CanceledContextSkipsSource(t *testing.T) {
 }
 
 func TestNewOauth2AuthManager_NilSourcePanics(t *testing.T) {
-	assert.PanicsWithValue(t, "rest: NewOauth2AuthManager called with a nil oauth2.TokenSource", func() {
-		NewOauth2AuthManager(nil)
+	assert.PanicsWithValue(t, "rest: NewOAuth2AuthManager called with a nil oauth2.TokenSource", func() {
+		NewOAuth2AuthManager(nil)
 	})
 }

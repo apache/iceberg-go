@@ -1017,19 +1017,19 @@ func NewCatalog(ctx context.Context, name, uri string, opts ...Option) (*Catalog
 }
 
 // defaultOAuthTimeout bounds a single OAuth token-refresh request made by the
-// built-in Oauth2AuthManager. oauth2's TokenSource.Token() takes no context, so
+// built-in OAuth2AuthManager. oauth2's TokenSource.Token() takes no context, so
 // this Timeout on the refresh client is what keeps a stalled or black-holing
 // token endpoint from blocking auth — and therefore any request that triggers a
 // refresh, including asynchronous metrics reports — indefinitely.
 const defaultOAuthTimeout = 60 * time.Second
 
-// setupOAuthManager creates an Oauth2AuthManager based on the provided options.
+// setupOAuthManager creates an OAuth2AuthManager based on the provided options.
 // It uses golang.org/x/oauth2 for token management, caching, and thread-safe refresh.
 // The returned cleanup closes an internally-created OAuth transport, if any.
 func setupOAuthManager(r *Catalog, cl *http.Client, opts *options) (AuthManager, func()) {
 	// If a static token is provided, use it directly.
 	if opts.oauthToken != "" {
-		return &Oauth2AuthManager{
+		return &OAuth2AuthManager{
 			tokenSource: oauth2.StaticTokenSource(&oauth2.Token{
 				AccessToken: opts.oauthToken,
 				TokenType:   "Bearer",
@@ -1104,7 +1104,7 @@ func setupOAuthManager(r *Catalog, cl *http.Client, opts *options) (AuthManager,
 	}
 	ctx = context.WithValue(ctx, oauth2.HTTPClient, oauthClient)
 
-	return &Oauth2AuthManager{
+	return &OAuth2AuthManager{
 		tokenSource: cfg.TokenSource(ctx),
 	}, closeIdleConnections
 }

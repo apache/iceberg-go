@@ -41,22 +41,22 @@ const (
 
 func TestParseGCSConfigUseJSONAPI(t *testing.T) {
 	t.Run("defaults to disabled", func(t *testing.T) {
-		cfg := ParseGCSConfig(map[string]string{})
+		cfg := parseGCSConfig(map[string]string{})
 		assert.Len(t, cfg.ClientOptions, 0)
 	})
 
 	t.Run("enables reads on true", func(t *testing.T) {
-		cfg := ParseGCSConfig(map[string]string{io.GCSUseJSONAPI: "true"})
+		cfg := parseGCSConfig(map[string]string{io.GCSUseJSONAPI: "true"})
 		assert.Len(t, cfg.ClientOptions, 1)
 	})
 
 	t.Run("does not enable on false", func(t *testing.T) {
-		cfg := ParseGCSConfig(map[string]string{io.GCSUseJSONAPI: "false"})
+		cfg := parseGCSConfig(map[string]string{io.GCSUseJSONAPI: "false"})
 		assert.Len(t, cfg.ClientOptions, 0)
 	})
 
 	t.Run("does not enable on invalid value", func(t *testing.T) {
-		cfg := ParseGCSConfig(map[string]string{io.GCSUseJSONAPI: "not-a-bool"})
+		cfg := parseGCSConfig(map[string]string{io.GCSUseJSONAPI: "not-a-bool"})
 		assert.Len(t, cfg.ClientOptions, 0)
 	})
 }

@@ -81,7 +81,7 @@ including zero or malformed values.
 
 | Group | Options |
 |---|---|
-| Authentication | `WithCredential`, `WithOAuthToken`, `WithAuthManager`, `NewOauth2AuthManager`, `WithAuthURI`, `WithScope`, `WithAudience`, `WithResource` |
+| Authentication | `WithCredential`, `WithOAuthToken`, `WithAuthManager`, `NewOAuth2AuthManager`, `WithAuthURI`, `WithScope`, `WithAudience`, `WithResource` |
 | AWS SigV4 | `WithSigV4`, `WithSigV4RegionSvc`, `WithSigner` |
 | HTTP | `WithHeaders`, `WithTLSConfig`, `WithOAuthTLSConfig`, `WithCustomTransport` |
 | Catalog routing | `WithPrefix`, `WithWarehouseLocation`, `WithMetadataLocation` |
@@ -155,7 +155,7 @@ config or proxy set with `WithCustomTransport`, `WithTLSConfig` or
 the default transport and a 60-second timeout. To use a specific client, put it
 in the context's `oauth2.HTTPClient` value when loading the catalog, or build
 the token source yourself (for example with `googleauth.TokenSource`) and pass
-`NewOauth2AuthManager(ts)` to `WithAuthManager`. One exception: on Google Cloud
+`NewOAuth2AuthManager(ts)` to `WithAuthManager`. One exception: on Google Cloud
 compute, Application Default Credentials come from the metadata server, which
 the Google library always reaches through its own client.
 
@@ -179,7 +179,7 @@ cat, err := catalog.Load(ctx, "biglake", iceberg.Properties{
 
 `WithCredential` uses the OAuth2 client-credentials flow against the catalog's
 token endpoint. For other identity providers, wrap any `oauth2.TokenSource` with
-`NewOauth2AuthManager` and pass it to `WithAuthManager`. The Google setup above
+`NewOAuth2AuthManager` and pass it to `WithAuthManager`. The Google setup above
 can also be written this way:
 
 ```go
@@ -188,7 +188,7 @@ if err != nil {
 	return err
 }
 cat, err := rest.NewCatalog(ctx, "biglake", "https://biglake.googleapis.com/iceberg/v1/restcatalog",
-	rest.WithAuthManager(rest.NewOauth2AuthManager(ts)),
+	rest.WithAuthManager(rest.NewOAuth2AuthManager(ts)),
 	rest.WithWarehouseLocation("gs://lakehouse-public-data"),
 	rest.WithHeaders(map[string]string{"x-goog-user-project": "my-project"}))
 ```
@@ -392,7 +392,7 @@ Tuning properties:
 |---|---|
 | `adls.auth.shared-key.account.name` (`io.ADLSSharedKeyAccountName`) | Account name. |
 | `adls.auth.shared-key.account.key` (`io.ADLSSharedKeyAccountKey`) | Account key. |
-| `adls.sas-token.<host>` (prefix `io.ADLSSasTokenPrefix`) | Per-host SAS token. |
+| `adls.sas-token.<host>` (prefix `io.ADLSSASTokenPrefix`) | Per-host SAS token. |
 | `adls.connection-string.<account-name>` (prefix `io.ADLSConnectionStringPrefix`) | Per-account connection string. |
 | `adls.token` (`io.ADLSToken`) | Static Azure Storage access token, without the `Bearer ` prefix. Subject to the precedence above; not refreshed. |
 | `adls.client-id` (`io.ADLSClientID`) | Client ID of a user-assigned managed identity. Used only when the explicit managed-identity authentication path is selected. |

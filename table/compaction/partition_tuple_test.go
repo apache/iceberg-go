@@ -50,6 +50,7 @@ func TestAppendPartitionTupleMatchesFmt(t *testing.T) {
 		math.Inf(1),
 		math.Copysign(0, -1),
 		float32(3.5),
+		float32(1.1),
 		[]byte{0, 255},
 		[]int{1, 2},
 		partitionTupleStringer("x"),
