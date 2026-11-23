@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"iter"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -847,5 +848,5 @@ func (w *writerFactory) writerList() []*RollingDataWriter {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	return w.created
+	return slices.Clone(w.created)
 }
