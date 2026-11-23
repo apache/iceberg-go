@@ -37,10 +37,10 @@ import (
 	"time"
 
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/awsconfig"
 	"github.com/apache/iceberg-go/catalog"
 	"github.com/apache/iceberg-go/catalog/catalogtest"
 	"github.com/apache/iceberg-go/table"
-	"github.com/apache/iceberg-go/utils"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	sdk "github.com/aws/aws-sdk-go-v2/service/dynamodb"
@@ -534,7 +534,7 @@ func TestDynamoDBRegistry(t *testing.T) {
 	c := localCatalog(t)
 	props := maps.Clone(c.props)
 	props["type"] = "dynamodb"
-	loaded, err := catalog.Load(utils.WithAWSConfig(t.Context(), &c.awsConfig), "registry", props)
+	loaded, err := catalog.Load(awsconfig.NewContext(t.Context(), &c.awsConfig), "registry", props)
 	require.NoError(t, err)
 	require.Equal(t, "registry", loaded.Name())
 	require.Equal(t, catalog.DynamoDB, loaded.CatalogType())
