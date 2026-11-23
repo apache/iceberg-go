@@ -1125,6 +1125,8 @@ func (VariantType) String() string { return "variant" }
 // same value.
 const DefaultGeoCRS = "OGC:CRS84"
 
+// GeometryType is the geometry type. The CRS may be held explicitly even when
+// it is the default, so compare values through CRS() rather than the field.
 type GeometryType struct {
 	crs string
 }
@@ -1184,6 +1186,9 @@ func toGeoArrowEdgeInterpolation(s string) (geoarrow.EdgeInterpolation, error) {
 	}
 }
 
+// GeographyType is the geography type. The CRS and algorithm may be held
+// explicitly even when they are the defaults, so compare values through CRS()
+// and Algorithm() rather than the fields.
 type GeographyType struct {
 	crs       string
 	algorithm string
