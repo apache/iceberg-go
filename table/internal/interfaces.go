@@ -75,6 +75,15 @@ type FileReader interface {
 	ReadTable(context.Context) (arrow.Table, error)
 }
 
+// DictionaryReader is a FileReader that can return selected string and binary
+// leaf columns as Arrow dictionaries.
+type DictionaryReader interface {
+	// ReadDictionaries requests dictionary reads for the leaves with the given
+	// field IDs. Call it before PrunedSchema or GetRecords. Readers may still
+	// return plain arrays when a file's stored Arrow schema requires them.
+	ReadDictionaries(fieldIDs map[int]struct{}, mapping iceberg.NameMapping) error
+}
+
 // FileWriter is an incremental single-file writer with open/write/close
 // lifecycle. It writes Arrow record batches and tracks bytes written for
 // rolling file decisions.
