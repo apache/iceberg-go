@@ -430,8 +430,10 @@ func (t Table) Overwrite(ctx context.Context, rdr array.RecordReader, snapshotPr
 // On a v3 table, every data file the delete removes or rewrites takes its deletion vector with it.
 // A merge-on-read delete replaces the existing deletion vector of a file it deletes rows from.
 //
-// A commit that removes a deletion vector is not replayed: if another writer commits first,
-// it fails with ErrCommitFailed instead of refreshing and retrying, so reload the table and run the delete again.
+// A commit that removes a deletion vector, or that drops v2 position delete files because the first deletion
+// vector of a file replaces them, is not replayed: if another writer commits first, it fails with ErrCommitFailed
+// instead of refreshing and retrying. On a table upgraded from v2 the first delete after the upgrade can hit
+// this, so reload the table and run the delete again.
 //
 // The concurrency parameter controls the level of parallelism for manifest processing and file rewriting and
 // can be overridden using the WithOverwriteConcurrency option. Defaults to runtime.GOMAXPROCS(0).

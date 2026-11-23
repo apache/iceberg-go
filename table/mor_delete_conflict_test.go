@@ -19,7 +19,11 @@ package table_test
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"path/filepath"
+	"runtime/pprof"
+	"strings"
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -28,6 +32,7 @@ import (
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
 
@@ -197,4 +202,167 @@ func TestMergeOnReadDeleteOfDataFileAddedInSameTransaction(t *testing.T) {
 	require.NoError(t, err)
 
 	require.Equal(t, []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12}, idsInTable(t, tbl))
+}
+
+type failPuffinOpenIO struct{ iceio.LocalFS }
+
+func (f failPuffinOpenIO) Open(ctx context.Context, name string) (iceio.File, error) {
+	if strings.HasSuffix(name, ".puffin") {
+		return nil, errors.New("puffin read failed")
+	}
+
+	return f.LocalFS.Open(ctx, name)
+}
+
+func deleteScanGoroutines() (scan, sequencer int) {
+	var b strings.Builder
+	_ = pprof.Lookup("goroutine").WriteTo(&b, 2)
+	for g := range strings.SplitSeq(b.String(), "\n\n") {
+		if strings.Contains(g, "makePositionDeleteRecordsForFilter") {
+			scan++
+		}
+		if strings.Contains(g, "MakeSequencedChanWithDiscard") {
+			sequencer++
+		}
+	}
+
+	return scan, sequencer
+}
+
+// A v3 merge-on-read delete whose deletion-vector read fails must not leave a
+// scan behind. Not parallel, so other tests' scans don't count.
+func TestMergeOnReadDeleteDVReadErrorStopsScan(t *testing.T) {
+	ctx := t.Context()
+	tbl := appendTenRows(t, newV3MoRConflictTestTable(t))
+	tbl, err := tbl.Delete(ctx, iceberg.EqualTo(iceberg.Reference("id"), int64(1)), nil)
+	require.NoError(t, err)
+
+	failing := table.New(tbl.Identifier(), tbl.Metadata(), tbl.MetadataLocation(),
+		func(context.Context) (iceio.IO, error) { return failPuffinOpenIO{}, nil }, nil)
+	scanBefore, seqBefore := deleteScanGoroutines()
+	err = failing.NewTransaction().Delete(ctx, iceberg.EqualTo(iceberg.Reference("id"), int64(3)), nil)
+	require.ErrorContains(t, err, "puffin read failed")
+	scanAfter, seqAfter := deleteScanGoroutines()
+	require.LessOrEqual(t, scanAfter, scanBefore)
+	require.LessOrEqual(t, seqAfter, seqBefore)
+}
+
+// A v2 merge-on-read delete whose existing position-delete file cannot be read
+// must report the read failure instead of writing deletes without it.
+func TestMergeOnReadDeletePositionDeleteReadErrorSurfaces(t *testing.T) {
+	ctx := t.Context()
+	tbl := appendTenRows(t, newV2MoRTestTable(t))
+	tbl, err := tbl.Delete(ctx, iceberg.EqualTo(iceberg.Reference("id"), int64(1)), nil)
+	require.NoError(t, err)
+
+	tasks, err := tbl.Scan().PlanFiles(ctx)
+	require.NoError(t, err)
+	require.NotEmpty(t, tasks)
+	require.NotEmpty(t, tasks[0].DeleteFiles)
+
+	failing := table.New(tbl.Identifier(), tbl.Metadata(), tbl.MetadataLocation(),
+		func(context.Context) (iceio.IO, error) {
+			return failOpenIO{path: tasks[0].DeleteFiles[0].FilePath()}, nil
+		}, nil)
+	scanBefore, seqBefore := deleteScanGoroutines()
+	err = failing.NewTransaction().Delete(ctx, iceberg.EqualTo(iceberg.Reference("id"), int64(3)), nil)
+	require.ErrorContains(t, err, "position delete read failed")
+	scanAfter, seqAfter := deleteScanGoroutines()
+	require.LessOrEqual(t, scanAfter, scanBefore)
+	require.LessOrEqual(t, seqAfter, seqBefore)
+}
+
+func newV2MoRTestTable(t *testing.T) *table.Table {
+	t.Helper()
+
+	location := filepath.ToSlash(t.TempDir())
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "data", Type: iceberg.PrimitiveTypes.String, Required: false},
+	)
+	meta, err := table.NewMetadata(schema, iceberg.UnpartitionedSpec, table.UnsortedSortOrder, location,
+		iceberg.Properties{
+			table.PropertyFormatVersion: "2",
+			table.WriteDeleteModeKey:    table.WriteModeMergeOnRead,
+		})
+	require.NoError(t, err)
+
+	metaLoc := location + "/metadata/v1.metadata.json"
+	fsF := func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil }
+	cat := &concurrentTestCatalog{metadata: meta, location: metaLoc, fsF: fsF}
+
+	return table.New(table.Identifier{"db", "mor_delete_read"}, meta, metaLoc, fsF, cat)
+}
+
+type failOpenIO struct {
+	iceio.LocalFS
+	path string
+}
+
+func (f failOpenIO) Open(ctx context.Context, name string) (iceio.File, error) {
+	if name == f.path {
+		return nil, errors.New("position delete read failed")
+	}
+
+	return f.LocalFS.Open(ctx, name)
+}
+
+// A v3 merge-on-read delete that fails after planning, while the position-delete
+// writer rejects an unknown partition transform, must not leave a scan behind.
+func TestMergeOnReadDeleteWriterErrorStopsScan(t *testing.T) {
+	ctx := t.Context()
+	location := filepath.ToSlash(strings.ReplaceAll(t.TempDir(), "#", ""))
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "foo", Type: iceberg.PrimitiveTypes.Bool},
+		iceberg.NestedField{ID: 2, Name: "bar", Type: iceberg.PrimitiveTypes.String},
+		iceberg.NestedField{ID: 4, Name: "baz", Type: iceberg.PrimitiveTypes.Int32},
+		iceberg.NestedField{ID: 10, Name: "qux", Type: iceberg.PrimitiveTypes.Date})
+	arrSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "foo", Type: arrow.FixedWidthTypes.Boolean, Nullable: true},
+		{Name: "bar", Type: arrow.BinaryTypes.String, Nullable: true},
+		{Name: "baz", Type: arrow.PrimitiveTypes.Int32, Nullable: true},
+		{Name: "qux", Type: arrow.FixedWidthTypes.Date32, Nullable: true},
+	}, nil)
+	unknown, err := iceberg.ParseTransform("custom_transform[42]")
+	require.NoError(t, err)
+	fsF := func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil }
+
+	identity := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{4}, FieldID: 1000, Transform: iceberg.IdentityTransform{}, Name: "baz",
+	})
+	meta, err := table.NewMetadata(schema, &identity, table.UnsortedSortOrder, location,
+		iceberg.Properties{
+			table.PropertyFormatVersion: "3",
+			table.WriteDeleteModeKey:    table.WriteModeMergeOnRead,
+		})
+	require.NoError(t, err)
+	metaLoc := fmt.Sprintf("%s/metadata/%05d-%s.metadata.json", location, 1, uuid.New().String())
+	tbl := table.New(table.Identifier{"default", "unknown_transform"}, meta, metaLoc, fsF, &mockedCatalog{meta})
+
+	arrTable, err := array.TableFromJSON(memory.DefaultAllocator, arrSchema, []string{
+		`[{"foo": false, "bar": "delete_me", "baz": 123, "qux": "2024-01-01"},
+		  {"foo": true, "bar": "keep_this", "baz": 123, "qux": "2024-01-02"}]`,
+	})
+	require.NoError(t, err)
+	defer arrTable.Release()
+	tbl, err = tbl.OverwriteTable(ctx, arrTable, 1, nil)
+	require.NoError(t, err)
+
+	evolved := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{4}, FieldID: 1001, Transform: unknown, Name: "baz_custom",
+	})
+	builder, err := table.MetadataBuilderFromBase(tbl.Metadata(), tbl.MetadataLocation())
+	require.NoError(t, err)
+	require.NoError(t, builder.AddPartitionSpec(&evolved, false))
+	require.NoError(t, builder.SetDefaultSpecID(-1))
+	evolvedMeta, err := builder.Build()
+	require.NoError(t, err)
+	tbl = table.New(tbl.Identifier(), evolvedMeta, tbl.MetadataLocation(), fsF, &mockedCatalog{evolvedMeta})
+
+	scanBefore, seqBefore := deleteScanGoroutines()
+	_, err = tbl.Delete(ctx, iceberg.EqualTo(iceberg.Reference("bar"), "delete_me"), nil)
+	require.ErrorIs(t, err, iceberg.ErrInvalidTransform)
+	scanAfter, seqAfter := deleteScanGoroutines()
+	require.LessOrEqual(t, scanAfter, scanBefore)
+	require.LessOrEqual(t, seqAfter, seqBefore)
 }

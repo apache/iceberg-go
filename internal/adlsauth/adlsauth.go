@@ -78,6 +78,6 @@ func AccountForURL(parsed *url.URL) (Account, bool) {
 func ClearTokenShadowingCredentials(props map[string]string, acct Account) {
 	delete(props, iceio.ADLSSharedKeyAccountName)
 	delete(props, iceio.ADLSSharedKeyAccountKey)
-	delete(props, iceio.ADLSSasTokenPrefix+acct.Host)
+	delete(props, iceio.ADLSSASTokenPrefix+acct.Host)
 	delete(props, iceio.ADLSConnectionStringPrefix+acct.Name)
 }

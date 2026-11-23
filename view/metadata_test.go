@@ -189,6 +189,19 @@ func TestMetadataMarshalJSONNormalizesMissingDefaultNamespace(t *testing.T) {
 	assert.Nil(t, version.DefaultNamespace)
 }
 
+func TestNewMetadataRejectsDuplicateFieldIDs(t *testing.T) {
+	// Reading view metadata rejects a schema with duplicate IDs, so the
+	// builder must not write one.
+	sc := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 0, Name: "a", Type: iceberg.PrimitiveTypes.Int32},
+		iceberg.NestedField{ID: 0, Name: "b", Type: iceberg.PrimitiveTypes.String})
+
+	md, err := NewMetadata(newTestVersion(1, 0), sc, "location", nil)
+	require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+	assert.ErrorContains(t, err, "multiple fields for id 0: a and b")
+	assert.Nil(t, md)
+}
+
 func TestNewMetadata(t *testing.T) {
 	// VersionID of 3 should be overridden by the ViewMD ctor
 	version := newTestVersion(3, LastAddedID,

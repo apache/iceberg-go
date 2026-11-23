@@ -1276,11 +1276,23 @@ func getArrowValueAsIcebergValue(column arrow.Array, row int, sourceType iceberg
 
 		return int32(arr.Value(row)), nil
 	case *array.Uint64:
+		value := arr.Value(row)
+		if value > math.MaxInt64 {
+			return nil, fmt.Errorf("%w: unsigned value %d exceeds Iceberg long range", iceberg.ErrInvalidArgument, value)
+		}
 
-		return int64(arr.Value(row)), nil
+		return int64(value), nil
 	case *array.Uint32:
+		value := arr.Value(row)
+		if _, ok := sourceType.(iceberg.Int64Type); ok {
+			// A promoted long can represent every uint32 value without truncation.
+			return int64(value), nil
+		}
+		if value > math.MaxInt32 {
+			return nil, fmt.Errorf("%w: unsigned value %d exceeds Iceberg int range", iceberg.ErrInvalidArgument, value)
+		}
 
-		return int32(arr.Value(row)), nil
+		return int32(value), nil
 	case *array.Uint16:
 
 		return int32(arr.Value(row)), nil

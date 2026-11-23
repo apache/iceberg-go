@@ -2638,6 +2638,87 @@ func TestInspectPartitionsAggregatesDataAndDeletes(t *testing.T) {
 	require.EqualValues(t, snapshotID, record.Column(10).(*array.Int64).Value(0))
 }
 
+func TestInspectPartitionsPromotedIdentitySource(t *testing.T) {
+	int64Value := func(a arrow.Array) any { return a.(*array.Int64).Value(0) }
+	float64Value := func(a arrow.Array) any { return a.(*array.Float64).Value(0) }
+	tests := []struct {
+		name           string
+		oldType        iceberg.Type
+		newType        iceberg.Type
+		oldValue       any
+		newValue       any
+		partitionValue func(arrow.Array) any
+		files          int32
+		records        int64
+	}{
+		{
+			name: "int to long, old manifest only", oldType: iceberg.PrimitiveTypes.Int32,
+			newType: iceberg.PrimitiveTypes.Int64, oldValue: int32(5),
+			partitionValue: int64Value, files: 2, records: 8,
+		},
+		{
+			name: "int to long, old and new manifests", oldType: iceberg.PrimitiveTypes.Int32,
+			newType: iceberg.PrimitiveTypes.Int64, oldValue: int32(5), newValue: int64(5),
+			partitionValue: int64Value, files: 3, records: 11,
+		},
+		{
+			name: "float to double, old and new manifests", oldType: iceberg.PrimitiveTypes.Float32,
+			newType: iceberg.PrimitiveTypes.Float64, oldValue: float32(1.5), newValue: float64(1.5),
+			partitionValue: float64Value, files: 3, records: 11,
+		},
+	}
+
+	for i, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			const snapshotID = int64(1)
+			spec := partitionedSpec()
+			oldSchema := iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "id", Type: tt.oldType, Required: true})
+			newSchema := iceberg.NewSchema(1, iceberg.NestedField{ID: 1, Name: "id", Type: tt.newType, Required: true})
+			fs, err := iceio.LoadFS(t.Context(), nil, "mem://default/table-location")
+			require.NoError(t, err)
+			memIO := fs.(iceio.WriteFileIO)
+			prefix := "mem://default/table-location/promoted-" + strconv.Itoa(i) + "/"
+			sequenceNumber := int64(1)
+			entry := func(name string, value any, count int64) iceberg.ManifestEntry {
+				df := newTestDataFileWithCount(t, spec, prefix+name+".parquet", map[int]any{1000: value}, count)
+
+				return iceberg.NewManifestEntry(iceberg.EntryStatusADDED, new(snapshotID), &sequenceNumber, &sequenceNumber, df)
+			}
+			// Manifests written before the promotion decode the partition value
+			// as the old type, later ones as the new type.
+			manifests := []iceberg.ManifestFile{writeInspectManifest(t, memIO, prefix+"old.avro", spec, oldSchema,
+				snapshotID, iceberg.ManifestContentData,
+				[]iceberg.ManifestEntry{entry("old-a", tt.oldValue, 3), entry("old-b", tt.oldValue, 5)})}
+			if tt.newValue != nil {
+				manifests = append(manifests, writeInspectManifest(t, memIO, prefix+"new.avro", spec, newSchema,
+					snapshotID, iceberg.ManifestContentData, []iceberg.ManifestEntry{entry("new", tt.newValue, 3)}))
+			}
+			tbl := inspectTableWithManifestListAndSchemas(t, oldSchema, newSchema, spec, 2, manifests)
+
+			rr, err := Partitions(t.Context(), tbl)
+			require.NoError(t, err)
+			defer rr.Release()
+			record := collectRecord(t, rr)
+			defer record.Release()
+			require.EqualValues(t, 1, record.NumRows())
+			partition := record.Column(0).(*array.Struct)
+			require.EqualValues(t, tt.oldValue, tt.partitionValue(partition.Field(0)))
+			require.Equal(t, tt.records, record.Column(2).(*array.Int64).Value(0))
+			require.Equal(t, tt.files, record.Column(3).(*array.Int32).Value(0))
+
+			files, err := Files(t.Context(), tbl)
+			require.NoError(t, err)
+			defer files.Release()
+			var fileRows int64
+			for files.Next() {
+				fileRows += files.RecordBatch().NumRows()
+			}
+			require.NoError(t, files.Err())
+			require.EqualValues(t, tt.files, fileRows)
+		})
+	}
+}
+
 func TestInspectPartitionsLeavesSpecIDUnsetForExpiredSnapshot(t *testing.T) {
 	const (
 		expiredSnapshotID = int64(1)

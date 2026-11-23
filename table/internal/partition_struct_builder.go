@@ -166,6 +166,7 @@ func newTypedPartitionAppender[T any](
 }
 
 func PartitionValueScalar(value any, typ iceberg.Type, arrowType arrow.DataType) (scalar.Scalar, error) {
+	value = widenPartitionValue(value, typ)
 	switch typ.(type) {
 	case iceberg.DateType:
 		switch value := value.(type) {

@@ -80,7 +80,7 @@ func TestNewOauth2AuthManagerAuthenticatesCatalogRequests(t *testing.T) {
 
 	ctx := context.Background()
 	cat, err := rest.NewCatalog(ctx, "rest", srv.URL,
-		rest.WithAuthManager(rest.NewOauth2AuthManager(&rotatingTokenSource{})))
+		rest.WithAuthManager(rest.NewOAuth2AuthManager(&rotatingTokenSource{})))
 	require.NoError(t, err)
 	_, err = cat.ListNamespaces(ctx, nil)
 	require.NoError(t, err)
@@ -92,9 +92,9 @@ func TestNewOauth2AuthManagerAuthenticatesCatalogRequests(t *testing.T) {
 	}, headers)
 }
 
-// ExampleNewOauth2AuthManager connects to Google's BigLake Iceberg REST
+// ExampleNewOAuth2AuthManager connects to Google's BigLake Iceberg REST
 // catalog with Application Default Credentials.
-func ExampleNewOauth2AuthManager() {
+func ExampleNewOAuth2AuthManager() {
 	ctx := context.Background()
 
 	// Application Default Credentials: a service-account key file, gcloud user
@@ -105,7 +105,7 @@ func ExampleNewOauth2AuthManager() {
 	}
 
 	cat, err := rest.NewCatalog(ctx, "biglake", "https://biglake.googleapis.com/iceberg/v1/restcatalog",
-		rest.WithAuthManager(rest.NewOauth2AuthManager(ts)),
+		rest.WithAuthManager(rest.NewOAuth2AuthManager(ts)),
 		rest.WithWarehouseLocation("gs://lakehouse-public-data"),
 		// The project BigLake bills the requests to.
 		rest.WithHeaders(map[string]string{"x-goog-user-project": "my-project"}),

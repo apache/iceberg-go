@@ -90,7 +90,7 @@ func TestAzureTokenAuthentication(t *testing.T) {
 			name: "unrelated SAS and connection string do not override token",
 			props: map[string]string{
 				icebergio.ADLSToken: token,
-				icebergio.ADLSSasTokenPrefix + "other.dfs.core.windows.net": "sig=other",
+				icebergio.ADLSSASTokenPrefix + "other.dfs.core.windows.net": "sig=other",
 				icebergio.ADLSConnectionStringPrefix + "other":              "invalid-connection-string",
 			},
 			wantAuthPrefix: "Bearer " + token,
@@ -108,7 +108,7 @@ func TestAzureTokenAuthentication(t *testing.T) {
 			name: "SAS precedes token",
 			props: map[string]string{
 				icebergio.ADLSToken: token,
-				icebergio.ADLSSasTokenPrefix + "testaccount.dfs.core.windows.net": "sig=sas-signature",
+				icebergio.ADLSSASTokenPrefix + "testaccount.dfs.core.windows.net": "sig=sas-signature",
 			},
 			wantSAS: "sas-signature",
 		},
@@ -262,7 +262,7 @@ func TestClearTokenShadowingCredentialsSelectsToken(t *testing.T) {
 		{
 			name: "SAS for the account",
 			props: map[string]string{
-				icebergio.ADLSSasTokenPrefix + "testaccount.dfs.core.windows.net": "sig=sas-signature",
+				icebergio.ADLSSASTokenPrefix + "testaccount.dfs.core.windows.net": "sig=sas-signature",
 			},
 		},
 		{
@@ -276,9 +276,9 @@ func TestClearTokenShadowingCredentialsSelectsToken(t *testing.T) {
 			props: map[string]string{
 				icebergio.ADLSSharedKeyAccountName:                                "testaccount",
 				icebergio.ADLSSharedKeyAccountKey:                                 "YQ==",
-				icebergio.ADLSSasTokenPrefix + "testaccount.dfs.core.windows.net": "sig=sas-signature",
+				icebergio.ADLSSASTokenPrefix + "testaccount.dfs.core.windows.net": "sig=sas-signature",
 				icebergio.ADLSConnectionStringPrefix + "testaccount":              "invalid-connection-string",
-				icebergio.ADLSSasTokenPrefix + "other.dfs.core.windows.net":       "sig=other",
+				icebergio.ADLSSASTokenPrefix + "other.dfs.core.windows.net":       "sig=other",
 				icebergio.ADLSConnectionStringPrefix + "other":                    "invalid-connection-string",
 			},
 		},

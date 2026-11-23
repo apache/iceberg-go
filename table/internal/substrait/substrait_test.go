@@ -22,7 +22,7 @@ import (
 	"testing"
 
 	"github.com/apache/iceberg-go"
-	"github.com/apache/iceberg-go/table/substrait"
+	"github.com/apache/iceberg-go/table/internal/substrait"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/substrait-io/substrait-go/v8/types"

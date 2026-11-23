@@ -342,7 +342,7 @@ func TestAdlsKeyExtractor(t *testing.T) {
 	}
 }
 
-func testADLSBlobFileIO(t *testing.T, ctx context.Context, root string, bucket *blob.Bucket) *blobfs.FileIO {
+func testADLSBlobFileIO(t *testing.T, ctx context.Context, root string, bucket *blob.Bucket) blobfs.FileIO {
 	t.Helper()
 
 	parsed, err := url.Parse(root)

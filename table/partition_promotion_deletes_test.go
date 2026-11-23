@@ -117,19 +117,58 @@ func TestEqualityDeletesAfterFloatPartitionSourcePromotion(t *testing.T) {
 			tbl = appendRows(t, tbl, `[{"id": 1, "p": 1.5}, {"id": 2, "p": 1.5}, {"id": 3, "p": 4.5}]`)
 			tbl = promotePartitionSource(t, tbl, iceberg.PrimitiveTypes.Float64)
 
-			arrowSc, err := table.SchemaToArrowSchema(tbl.Schema(), nil, true, false)
-			require.NoError(t, err)
 			// id 3 lives in partition 4.5, so the delete in partition 4.6
 			// must not remove it.
-			records, release := makeEqDeleteRecords(t, arrowSc, `[{"id": 1, "p": 1.5}, {"id": 3, "p": 4.6}]`)
-			defer release()
-
-			tx := tbl.NewTransaction()
-			require.NoError(t, tx.CommitEqualityDeletes(t.Context(), []int{1}, records, nil))
-			tbl, err = tx.Commit(t.Context())
-			require.NoError(t, err)
+			tbl = commitPartitionedEqualityDeletes(t, tbl, `[{"id": 1, "p": 1.5}, {"id": 3, "p": 4.6}]`)
 
 			assert.Equal(t, []int64{2, 3}, idsInTable(t, tbl))
 		})
 	}
+}
+
+// TestCompactionKeepsEqualityDeleteAfterFloatPartitionSourcePromotion keeps a delete that still applies to a pre-promotion file.
+func TestCompactionKeepsEqualityDeleteAfterFloatPartitionSourcePromotion(t *testing.T) {
+	for _, formatVersion := range []string{"2", "3"} {
+		t.Run("v"+formatVersion, func(t *testing.T) {
+			tbl := newPromotablePartitionTable(t, formatVersion, iceberg.PrimitiveTypes.Float32)
+			tbl = appendRows(t, tbl, `[{"id": 1, "p": 1.1}, {"id": 2, "p": 1.1}]`)
+			tbl = promotePartitionSource(t, tbl, iceberg.PrimitiveTypes.Float64)
+			tbl = appendRows(t, tbl, `[{"id": 3, "p": 4.5}]`)
+			tbl = appendRows(t, tbl, `[{"id": 4, "p": 4.5}]`)
+
+			tbl = commitPartitionedEqualityDeletes(t, tbl, `[{"id": 1, "p": 1.100000023841858}]`)
+			require.Equal(t, []int64{2, 3, 4}, idsInTable(t, tbl))
+
+			tasks, err := tbl.Scan().PlanFiles(t.Context())
+			require.NoError(t, err)
+			var group table.CompactionTaskGroup
+			for _, task := range tasks {
+				if p, ok := task.File.Partition()[1000].(float64); ok && p == 4.5 {
+					group.Tasks = append(group.Tasks, task)
+					group.TotalSizeBytes += task.File.FileSizeBytes()
+				}
+			}
+			require.Len(t, group.Tasks, 2)
+
+			_, tbl = runRewriteWithCleanup(t, tbl, []table.CompactionTaskGroup{group}, false)
+			assert.Equal(t, []int64{2, 3, 4}, idsInTable(t, tbl))
+		})
+	}
+}
+
+// commitPartitionedEqualityDeletes commits equality deletes on id, with each row's partition taken from its p value.
+func commitPartitionedEqualityDeletes(t *testing.T, tbl *table.Table, recordsJSON string) *table.Table {
+	t.Helper()
+
+	arrowSc, err := table.SchemaToArrowSchema(tbl.Schema(), nil, true, false)
+	require.NoError(t, err)
+	records, release := makeEqDeleteRecords(t, arrowSc, recordsJSON)
+	defer release()
+
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.CommitEqualityDeletes(t.Context(), []int{1}, records, nil))
+	out, err := tx.Commit(t.Context())
+	require.NoError(t, err)
+
+	return out
 }
