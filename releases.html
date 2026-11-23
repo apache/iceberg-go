@@ -330,6 +330,9 @@
 <p><strong>Commits retry conflicts by default.</strong> <code>commit.retry.num-retries</code> now defaults to <code>4</code>, as in Java and PyIceberg, so <code>Commit</code> refreshes and replays a conflicting commit up to four times before returning <code>ErrCommitFailed</code>. Set it to <code>0</code> to keep failing on the first conflict. <code>table.CommitNumRetriesDefault</code> changes from <code>0</code> to <code>4</code>.</p>
 </li>
 <li>
+<p><strong>The first <code>Delete</code> on a v3 table upgraded from v2 can fail with <code>ErrCommitFailed</code>.</strong> A merge-on-read <code>Delete</code> that gives a data file its first deletion vector now folds that file's v2 position deletes into the vector, so those deletes no longer reappear after the upgrade, and drops the file-scoped v2 position delete files in the same commit. Like any commit that removes delete files, it is not replayed: if another writer commits first, it returns <code>ErrCommitFailed</code> instead of refreshing and retrying. Reload the table and run the delete again. Partition-scoped position delete files stay in the table.</p>
+</li>
+<li>
 <p><strong>Schema updates assert the last assigned field ID.</strong> When <code>UpdateSchema</code> adds a schema, the commit now also requires the table's <code>last-column-id</code> to match the transaction's base, as Iceberg Java does. A stale writer whose base predates another writer's column additions now fails with <code>table.ErrCommitFailed</code> instead of reusing field IDs. Reload the table and reapply the schema change.</p>
 </li>
 <li>
