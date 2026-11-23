@@ -278,7 +278,7 @@ For the predicate vocabulary, see [Row Filter Syntax](./row-filter-syntax.md).
 scan := tbl.Scan(table.WithDictionaryColumns("region", "event.name"))
 ```
 
-`WithDictionaryColumns` returns the named string and binary columns as Arrow dictionary arrays. Requested columns always have type `dictionary<int32, utf8>` or `dictionary<int32, binary>`, even with `arrow.use_large_types`. The dictionary can change from one batch to the next, so don't rely on dictionary identity across batches.
+`WithDictionaryColumns` returns the named string and binary columns as Arrow dictionary arrays. Requested columns always have type `dictionary<int32, utf8>` or `dictionary<int32, binary>`, even with `arrow.use_large_types`. The dictionary can change from one batch to the next, so don't rely on dictionary identity across batches. Filtering on a requested column decodes the dictionary for each batch to evaluate the predicate, so a filtered scan may not be faster.
 
 ### Time travel
 

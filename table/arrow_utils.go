@@ -1043,6 +1043,7 @@ func defaultToArray(v any, t iceberg.Type, dt arrow.DataType, n int, alloc memor
 		plain := defaultToArray(v, t, dictType.ValueType, n, alloc)
 		defer plain.Release()
 
+		// defaultToArray has no context parameter, so the context only carries alloc.
 		return retOrPanic(compute.DictionaryEncodeArray(compute.WithAllocator(context.Background(), alloc),
 			compute.DictionaryEncodeOptions{}, plain))
 	}

@@ -1537,6 +1537,9 @@ func WithArrowBatchSize(n int) ScanOption {
 // The dictionary can differ from one batch to the next, including within a
 // file, so callers must not rely on dictionary identity across batches.
 //
+// Filtering on a requested column decodes the dictionary for each batch to
+// evaluate the predicate, so a filtered scan may not be faster.
+//
 // Reading fails if a name does not exist or names a column of another type. A
 // valid name that the scan does not project is ignored. Repeated calls replace
 // the earlier list.
