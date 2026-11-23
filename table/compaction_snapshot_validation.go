@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
@@ -258,6 +259,51 @@ func (d *rewriteConflictsSincePlanning) advance(ctx context.Context, current *Ta
 		return err
 	}
 	d.checkedSnapshotID, d.deletes = &head.SnapshotID, deletes
+
+	return nil
+}
+
+// commitRewrite writes manifests against the private planning transaction and
+// publishes its updates and conflict checks together if staging is still valid.
+func (t *Transaction) commitRewrite(ctx context.Context, base *MetadataBuilder, parent *Snapshot, updater *snapshotProducer, rewritesData bool, validator conflictValidatorFunc) (err error) {
+	planning := updater.txn
+	updates, reqs, pins, err := planning.prepareRewriteCommit(ctx, updater, rewritesData)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			cleanupCtx := context.WithoutCancel(ctx)
+			for path := range updater.written.staged {
+				if removeErr := updater.io.Remove(cleanupCtx, path); removeErr != nil {
+					err = errors.Join(err, fmt.Errorf("remove unstaged rewrite manifest %s: %w", path, removeErr))
+				}
+			}
+			if removeErr := updater.io.Remove(cleanupCtx, updater.written.stagedList); removeErr != nil {
+				err = errors.Join(err, fmt.Errorf("remove unstaged rewrite manifest list: %w", removeErr))
+			}
+		}
+	}()
+
+	t.mx.Lock()
+	defer t.mx.Unlock()
+	if err := t.checkRewriteParentLocked(parent); err != nil {
+		return err
+	}
+	if t.meta != base {
+		return fmt.Errorf("%w: transaction metadata changed while staging the rewrite; replan the replacement", ErrCommitFailed)
+	}
+
+	updates = slices.Concat(planning.meta.updates[len(base.updates):], updates)
+	if err := t.applyLocked(updates, reqs); err != nil {
+		return err
+	}
+	t.recordPinnedRefsLocked(pins)
+	t.validators = append(t.validators, planning.validators...)
+	if validator != nil {
+		t.validators = append(t.validators, validator)
+	}
+	t.noReplay = t.noReplay || planning.noReplay
 
 	return nil
 }

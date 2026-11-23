@@ -25,7 +25,9 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -987,6 +989,124 @@ func TestAtomicCompactionCanRewriteAfterUnrelatedAppend(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 1, result.RewrittenGroups)
 	require.ElementsMatch(t, []int64{1, 2, 3}, scanIDs(t, result.Table))
+}
+
+type compactionManifestWriteGate struct {
+	trackingFS
+	blocked chan string
+	resume  chan struct{}
+	once    sync.Once
+}
+
+func (f *compactionManifestWriteGate) Create(ctx context.Context, name string) (iceio.FileWriter, error) {
+	if strings.HasPrefix(filepath.Base(name), "snap-") {
+		block := false
+		f.once.Do(func() {
+			f.blocked <- name
+			block = true
+		})
+		if block {
+			select {
+			case <-f.resume:
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+	}
+
+	return f.trackingFS.Create(ctx, name)
+}
+
+func TestCompactionRejectsStaleRewriteAfterWritingManifests(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		withDeletes bool
+	}{
+		{name: "data files"},
+		{name: "data and delete files", withDeletes: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			defer cancel()
+			tbl, cat := newConcurrentRewriteTestTable(t)
+			tbl = appendRows(t, tbl, `[{"id":1},{"id":2}]`)
+			want := []int64{1, 2, 3}
+			if tc.withDeletes {
+				stage := tbl.NewTransaction()
+				require.NoError(t, stage.SetProperties(iceberg.Properties{
+					table.WriteDeleteModeKey: table.WriteModeMergeOnRead,
+				}))
+				var err error
+				tbl, err = stage.Commit(ctx)
+				require.NoError(t, err)
+				tbl = mergeOnReadDelete(t, tbl, 1)
+				want = []int64{2, 3}
+			}
+			scan := tbl.Scan()
+			defer scan.Close()
+			tasks, err := scan.PlanFiles(ctx)
+			require.NoError(t, err)
+			require.Len(t, tasks, 1)
+			if tc.withDeletes {
+				require.Len(t, tasks[0].DeleteFiles, 1)
+			}
+			worker, err := table.ExecuteCompactionGroup(ctx, tbl, table.CompactionTaskGroup{Tasks: tasks})
+			require.NoError(t, err)
+			if tc.withDeletes {
+				require.Len(t, worker.SafePosDeletes, 1)
+			}
+			gate := &compactionManifestWriteGate{blocked: make(chan string, 1), resume: make(chan struct{})}
+			resume := sync.OnceFunc(func() { close(gate.resume) })
+			defer resume()
+			wrapped := table.New(tbl.Identifier(), tbl.Metadata(), tbl.MetadataLocation(),
+				func(context.Context) (iceio.IO, error) { return gate, nil }, cat)
+			txn := wrapped.NewTransaction()
+			rewrite := txn.NewRewrite(nil).ApplyResult(worker)
+			rewriteDone := make(chan error, 1)
+			go func() { rewriteDone <- rewrite.Commit(ctx) }()
+
+			var staleList string
+			select {
+			case staleList = <-gate.blocked:
+			case err := <-rewriteDone:
+				t.Fatalf("rewrite returned before writing its manifest list: %v", err)
+			case <-ctx.Done():
+				t.Fatal(ctx.Err())
+			}
+			staleManifests := gate.snapshotCreated()
+			require.NotEmpty(t, staleManifests)
+
+			reader := rowsReader(t, tbl, `[{"id":3}]`)
+			appendDone := make(chan error, 1)
+			go func() {
+				defer reader.Release()
+				appendDone <- txn.Append(ctx, reader, nil)
+			}()
+			select {
+			case err := <-appendDone:
+				require.NoError(t, err)
+			case <-ctx.Done():
+				t.Fatal("append could not stage while the rewrite was writing its manifest list")
+			}
+
+			resume()
+			select {
+			case err := <-rewriteDone:
+				require.ErrorIs(t, err, table.ErrCommitFailed)
+				require.ErrorContains(t, err, "transaction head changed")
+			case <-ctx.Done():
+				t.Fatal(ctx.Err())
+			}
+			require.NoFileExists(t, staleList)
+			for path := range staleManifests {
+				require.NoFileExists(t, path)
+			}
+
+			committed, err := txn.Commit(ctx)
+			require.NoError(t, err)
+			require.ElementsMatch(t, want, scanIDs(t, committed))
+		})
+	}
 }
 
 func TestCompactionRejectsMixedPlanningSnapshots(t *testing.T) {
