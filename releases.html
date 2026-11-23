@@ -315,6 +315,9 @@
 <p><strong><code>UpdateSchema</code> rejects deleting an identifier field.</strong> <code>DeleteColumn</code> on an identifier column used to succeed and quietly drop the column from the table's identifier fields. Now <code>Apply</code> (and <code>Commit</code>) fails with <code>cannot delete identifier field …</code>, as in Java. Deleting a struct that contains one already failed, and now reports <code>cannot delete field … as it will delete nested identifier field …</code>. To delete the column anyway, also call <code>SetIdentifierField</code> with the identifier fields the schema should keep (for example <code>SetIdentifierField([][]string{})</code> to clear them). This also stops a new column that reuses a deleted identifier column's name from becoming the identifier.</p>
 </li>
 <li>
+<p><strong>Schema updates rewrite the table's name mapping.</strong> When a table has <code>schema.name-mapping.default</code>, every <code>UpdateSchema</code> commit now updates it, as in Java and PyIceberg; before, it changed only when <code>WithNameMapping</code> was passed. Added columns are mapped by name and renamed columns keep their old names, so data files without field IDs resolve them. If a new column reuses a name freed by <code>DeleteColumn</code> or <code>RenameColumn</code>, that name now maps to the new column: in older files without field IDs, the new column reads the values stored under that name, and a renamed column no longer reads them. Tables without the property are unaffected.</p>
+</li>
+<li>
 <p><strong>Schema JSON defaults preserve integer precision.</strong> <code>long</code> defaults now decode as <code>int64</code> instead of <code>float64</code>; non-integral, non-numeric, or out-of-range values now fail to parse. Numeric literals inside object and list defaults decode as <code>json.Number</code> rather than <code>float64</code>.</p>
 </li>
 <li>
