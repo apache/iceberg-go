@@ -280,6 +280,9 @@ func (r *RewriteFiles) ApplyResult(gr CompactionGroupResult) *RewriteFiles {
 // Commit stages the rewrite snapshot on the underlying transaction.
 // The catalog commit happens once, later, at [Transaction.Commit] time.
 //
+// To validate position-delete removal candidates, Commit reads manifests across
+// the staging snapshot and may also read partition-scoped position-delete files.
+//
 // Commit is single-shot: any second call returns an error regardless
 // of whether the first call succeeded, and neither re-stages the
 // rewrite nor re-registers the conflict validator. Returns an error

@@ -1102,7 +1102,9 @@ func (d *deletesSincePlanning) validate(ctx context.Context, current Metadata, f
 // CollectSafePositionDeletes returns position delete files from the
 // tasks as removal candidates. A delete may still apply to other data files.
 // [RewriteFiles.Commit] checks those candidates against the full rewrite set
-// and the staged snapshot. Other coordinators must make the same check.
+// and the staged snapshot. Coordinators using a different commit path can call
+// [compaction.CollectDeadPositionDeletes] against the same snapshot and the
+// complete set of rewritten data files.
 func CollectSafePositionDeletes(tasks []FileScanTask) []iceberg.DataFile {
 	seen := make(map[string]bool)
 	var safe []iceberg.DataFile

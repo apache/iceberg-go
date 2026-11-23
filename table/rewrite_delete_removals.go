@@ -124,11 +124,17 @@ func (r *RewriteFiles) automaticDeleteRemovals(ctx context.Context) ([]iceberg.D
 func (r *RewriteFiles) deadPositionDeletePaths(
 	ctx context.Context, rewrittenPaths, expectedDeletePaths map[string]struct{},
 ) (map[string]struct{}, *Snapshot, error) {
+	if err := r.txn.checkNotNil(); err != nil {
+		return nil, nil, err
+	}
+	r.txn.mx.Lock()
 	meta, err := r.txn.txnMeta()
 	if err != nil {
+		r.txn.mx.Unlock()
 		return nil, nil, err
 	}
 	snapshot := r.txn.planningSnapshot(meta)
+	r.txn.mx.Unlock()
 	if snapshot == nil {
 		return nil, nil, nil
 	}

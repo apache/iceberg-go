@@ -370,8 +370,8 @@ func (t *Transaction) planningSnapshot(meta *MetadataBuilder) *Snapshot {
 	return meta.currentSnapshotForRef(t.branch)
 }
 
-// checkRewriteParentLocked keeps the inspected parent stable through manifest
-// writing and staging. The caller holds t.mx.
+// checkRewriteParentLocked verifies that the rewrite still has the parent it
+// inspected. The caller holds t.mx.
 func (t *Transaction) checkRewriteParentLocked(expected *Snapshot) error {
 	if err := t.checkUsable(); err != nil {
 		return err
@@ -382,6 +382,26 @@ func (t *Transaction) checkRewriteParentLocked(expected *Snapshot) error {
 	}
 
 	return nil
+}
+
+// rewritePlanningMetadata takes a private copy for the manifest producer and
+// records the staging state against which its output can be applied.
+func (t *Transaction) rewritePlanningMetadata() (base, planning *MetadataBuilder, err error) {
+	if err := t.checkNotNil(); err != nil {
+		return nil, nil, err
+	}
+	t.mx.Lock()
+	defer t.mx.Unlock()
+
+	meta, err := t.txnMeta()
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := t.checkUsable(); err != nil {
+		return nil, nil, err
+	}
+
+	return meta, meta.clone(), nil
 }
 
 // transactionRequirements returns the requirements a commit on branch must carry.
@@ -1983,8 +2003,8 @@ func (t *Transaction) replaceFiles(
 	deleteFilesToAdd []rewriteDeleteFileAddition,
 	snapshotProps iceberg.Properties,
 	opts ...WriteOption,
-) error {
-	meta, err := t.txnMeta()
+) (err error) {
+	base, meta, err := t.rewritePlanningMetadata()
 	if err != nil {
 		return err
 	}
@@ -2008,11 +2028,12 @@ func (t *Transaction) replaceFiles(
 			ErrInvalidOperation)
 	}
 
-	setToAdd, err := t.validateDataFilesToAdd(dataFilesToAdd, "ReplaceFiles", !cfg.rewriteSemantics)
+	planning := &Transaction{tbl: t.tbl, meta: meta, branch: t.branch}
+	setToAdd, err := planning.validateDataFilesToAdd(dataFilesToAdd, "ReplaceFiles", !cfg.rewriteSemantics)
 	if err != nil {
 		return err
 	}
-	setDeleteFilesToAdd, err := t.validateDeleteFilesToAdd(deleteFilesToAdd, "ReplaceFiles")
+	setDeleteFilesToAdd, err := planning.validateDeleteFilesToAdd(deleteFilesToAdd, "ReplaceFiles")
 	if err != nil {
 		return err
 	}
@@ -2331,13 +2352,13 @@ func (t *Transaction) replaceFiles(
 			referencedDataFilePaths = append(referencedDataFilePaths, ref)
 		}
 		slices.Sort(referencedDataFilePaths)
-		if referencedDataFilePaths, err = t.headDataFiles(ctx, fs, referencedDataFilePaths, nil); err != nil {
+		if referencedDataFilePaths, err = planning.headDataFiles(ctx, fs, referencedDataFilePaths, nil); err != nil {
 			return err
 		}
 	}
 
 	if !cfg.skipAutoNameMapping {
-		if err := t.ensureNameMapping(); err != nil {
+		if err := planning.ensureNameMapping(); err != nil {
 			return err
 		}
 	}
@@ -2347,14 +2368,8 @@ func (t *Transaction) replaceFiles(
 		op = OpReplace
 	}
 
-	t.mx.Lock()
-	defer t.mx.Unlock()
-	if err := t.checkRewriteParentLocked(s); err != nil {
-		return err
-	}
-
 	commitUUID := uuid.New()
-	updater := t.updateSnapshot(wfs, snapshotProps, op).mergeOverwrite(&commitUUID, nil)
+	updater := planning.updateSnapshot(wfs, snapshotProps, op).mergeOverwrite(&commitUUID, nil)
 	if cfg.rewriteSemantics {
 		updater.setSkipDefaultValidator(true)
 	}
@@ -2393,6 +2408,21 @@ func (t *Transaction) replaceFiles(
 		return err
 	}
 
+	defer func() {
+		if err != nil {
+			// None of this producer's files are reachable if staging failed.
+			cleanupCtx := context.WithoutCancel(ctx)
+			for path := range updater.written.staged {
+				if removeErr := wfs.Remove(cleanupCtx, path); removeErr != nil {
+					err = errors.Join(err, fmt.Errorf("remove unstaged rewrite manifest %s: %w", path, removeErr))
+				}
+			}
+			if removeErr := wfs.Remove(cleanupCtx, updater.written.stagedList); removeErr != nil {
+				err = errors.Join(err, fmt.Errorf("remove unstaged rewrite manifest list: %w", removeErr))
+			}
+		}
+	}()
+
 	var validator conflictValidatorFunc
 	if len(rewriteValidationFiles) > 0 {
 		validator = rewriteValidatorWithReferencedDataFiles(rewriteValidationFiles, referencedDataFilePaths)
@@ -2400,12 +2430,25 @@ func (t *Transaction) replaceFiles(
 		validator = rewriteValidator(markedDataForDeletion)
 	}
 
+	t.mx.Lock()
+	defer t.mx.Unlock()
+	if err := t.checkRewriteParentLocked(s); err != nil {
+		return err
+	}
+	if t.meta != base {
+		return fmt.Errorf("%w: transaction metadata changed while staging the rewrite; replan the replacement", ErrCommitFailed)
+	}
+
+	// Publish the producer's updates and conflict state together.
+	updates = slices.Concat(planning.meta.updates[len(base.updates):], updates)
 	if err := t.applyLocked(updates, reqs); err != nil {
 		return err
 	}
+	t.validators = append(t.validators, planning.validators...)
 	if validator != nil {
 		t.validators = append(t.validators, validator)
 	}
+	t.noReplay = t.noReplay || planning.noReplay
 
 	return nil
 }

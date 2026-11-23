@@ -20,7 +20,11 @@ package table_test
 import (
 	"context"
 	"fmt"
+	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
@@ -273,6 +277,88 @@ func TestRewriteFilesRejectsParentChangeDuringAutomaticDeleteSelection(t *testin
 	committed, err := tx.Commit(ctx)
 	require.NoError(t, err)
 	require.Equal(t, appendedSnapshotID, committed.CurrentSnapshot().SnapshotID)
+	require.ElementsMatch(t, []int64{2, 4, 5}, scanIDs(t, committed))
+}
+
+type rewriteManifestGate struct {
+	trackingFS
+	blocked chan string
+	resume  chan struct{}
+	once    sync.Once
+}
+
+func (f *rewriteManifestGate) Create(ctx context.Context, name string) (iceio.FileWriter, error) {
+	if strings.HasPrefix(filepath.Base(name), "snap-") {
+		wait := false
+		f.once.Do(func() {
+			f.blocked <- name
+			wait = true
+		})
+		if wait {
+			select {
+			case <-f.resume:
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+	}
+	return f.trackingFS.Create(ctx, name)
+}
+
+func TestRewriteFilesRejectsParentChangeDuringManifestWrite(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	tbl, catalog := newConcurrentRewriteTestTable(t)
+	tbl, groups := setupSharedPositionDeleteRewrite(t, tbl)
+	gate := &rewriteManifestGate{blocked: make(chan string, 1), resume: make(chan struct{})}
+	resume := sync.OnceFunc(func() { close(gate.resume) })
+	defer resume()
+	wrapped := table.New(tbl.Identifier(), tbl.Metadata(), tbl.MetadataLocation(),
+		func(context.Context) (iceio.IO, error) { return gate, nil }, catalog)
+	tx := wrapped.NewTransaction()
+	rewrite := tx.NewRewrite(nil)
+	for _, group := range groups {
+		result, err := table.ExecuteCompactionGroup(ctx, tbl, group)
+		require.NoError(t, err)
+		rewrite.ApplyResult(result)
+	}
+
+	rewriteDone := make(chan error, 1)
+	go func() { rewriteDone <- rewrite.Commit(ctx) }()
+	var abandonedList string
+	select {
+	case abandonedList = <-gate.blocked:
+	case err := <-rewriteDone:
+		t.Fatalf("rewrite ended before writing its manifest list: %v", err)
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+
+	reader := rowsReader(t, tbl, `[{"id":5,"data":"visible"}]`)
+	appendDone := make(chan error, 1)
+	go func() {
+		defer reader.Release()
+		appendDone <- tx.Append(ctx, reader, nil)
+	}()
+	select {
+	case err := <-appendDone:
+		require.NoError(t, err)
+	case <-ctx.Done():
+		t.Fatal("append could not stage while the rewrite was writing manifests")
+	}
+
+	resume()
+	select {
+	case err := <-rewriteDone:
+		require.ErrorIs(t, err, table.ErrCommitFailed)
+		require.ErrorContains(t, err, "transaction head changed")
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	require.True(t, gate.wasRemoved(abandonedList))
+
+	committed, err := tx.Commit(ctx)
+	require.NoError(t, err)
 	require.ElementsMatch(t, []int64{2, 4, 5}, scanIDs(t, committed))
 }
 
