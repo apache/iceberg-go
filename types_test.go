@@ -1054,6 +1054,21 @@ func TestGeometryType(t *testing.T) {
 		assert.JSONEq(t, data, string(out))
 	})
 
+	t.Run("JSON parsing - explicit default CRS", func(t *testing.T) {
+		data := `{"id": 1, "name": "location", "type": "geometry(OGC:CRS84)", "required": false}`
+		var n iceberg.NestedField
+		require.NoError(t, json.Unmarshal([]byte(data), &n))
+		geom, ok := n.Type.(iceberg.GeometryType)
+		require.True(t, ok)
+		assert.Equal(t, "OGC:CRS84", geom.CRS())
+		assert.True(t, geom.Equals(iceberg.GeometryType{}))
+		assert.True(t, iceberg.GeometryType{}.Equals(geom))
+
+		out, err := json.Marshal(n)
+		require.NoError(t, err)
+		assert.JSONEq(t, data, string(out))
+	})
+
 	t.Run("JSON parsing - case insensitive", func(t *testing.T) {
 		data := `{"id": 1, "name": "location", "type": "Geometry(SRID:4326)", "required": false}`
 		var n iceberg.NestedField
@@ -1188,6 +1203,52 @@ func TestGeographyType(t *testing.T) {
 		out, err := json.Marshal(n)
 		require.NoError(t, err)
 		assert.JSONEq(t, data, string(out))
+	})
+
+	t.Run("JSON parsing - explicit default CRS and algorithm", func(t *testing.T) {
+		data := `{"id": 1, "name": "area", "type": "geography(OGC:CRS84, spherical)", "required": false}`
+		var n iceberg.NestedField
+		require.NoError(t, json.Unmarshal([]byte(data), &n))
+		geog, ok := n.Type.(iceberg.GeographyType)
+		require.True(t, ok)
+		assert.Equal(t, "OGC:CRS84", geog.CRS())
+		assert.Equal(t, "spherical", geog.Algorithm())
+		assert.True(t, geog.Equals(iceberg.GeographyType{}))
+		assert.True(t, iceberg.GeographyType{}.Equals(geog))
+
+		out, err := json.Marshal(n)
+		require.NoError(t, err)
+		assert.JSONEq(t, data, string(out))
+	})
+
+	t.Run("JSON parsing - explicit parameters written back as read", func(t *testing.T) {
+		srid4269, err := iceberg.GeographyTypeOf("srid:4269", "spherical")
+		require.NoError(t, err)
+
+		tests := []struct {
+			typeStr  string
+			expected string
+			equals   iceberg.GeographyType
+		}{
+			{"geography(OGC:CRS84)", "geography(OGC:CRS84)", iceberg.GeographyType{}},
+			{"geography(srid:4269, spherical)", "geography(srid:4269, spherical)", srid4269},
+			{"Geography(OGC:CRS84, SPHERICAL)", "geography(OGC:CRS84, spherical)", iceberg.GeographyType{}},
+		}
+		for _, tt := range tests {
+			t.Run(tt.typeStr, func(t *testing.T) {
+				data := `{"id": 1, "name": "area", "type": "` + tt.typeStr + `", "required": false}`
+				var n iceberg.NestedField
+				require.NoError(t, json.Unmarshal([]byte(data), &n))
+				geog, ok := n.Type.(iceberg.GeographyType)
+				require.True(t, ok)
+				assert.True(t, geog.Equals(tt.equals))
+				assert.True(t, tt.equals.Equals(geog))
+
+				out, err := json.Marshal(n)
+				require.NoError(t, err)
+				assert.JSONEq(t, `{"id": 1, "name": "area", "type": "`+tt.expected+`", "required": false}`, string(out))
+			})
+		}
 	})
 
 	t.Run("JSON parsing - case insensitive", func(t *testing.T) {
