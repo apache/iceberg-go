@@ -33,7 +33,6 @@ import (
 
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/iceberg-go/internal"
-	"github.com/google/uuid"
 	"github.com/twmb/murmur3"
 )
 
@@ -705,7 +704,7 @@ func (t BucketTransform) Transformer(src Type) func(any) Optional[int32] {
 				return murmur3.Sum32(v)
 			}
 
-			u := v.(uuid.UUID)
+			u := v.(UUID)
 
 			return murmur3.Sum32(u[:])
 		}
@@ -1565,7 +1564,7 @@ func transformLiteral[T LiteralType](fn func(any) Optional[T], lit Literal) Lite
 	case BinaryLiteral:
 		return NewLiteral(fn([]byte(l)).Val)
 	case UUIDLiteral:
-		return NewLiteral(fn(uuid.UUID(l)).Val)
+		return NewLiteral(fn(UUID(l)).Val)
 	case DecimalLiteral:
 		return NewLiteral(fn(Decimal(l)).Val)
 	}

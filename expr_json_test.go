@@ -23,7 +23,8 @@ import (
 	"testing"
 
 	"github.com/apache/iceberg-go"
-	"github.com/google/uuid"
+	"github.com/apache/iceberg-go/internal"
+	"github.com/apache/iceberg-go/internal/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -153,7 +154,7 @@ func TestMarshalExpressionTypedLiterals(t *testing.T) {
 		want string
 	}{
 		{"date", mustLit(t, "2022-08-14", iceberg.PrimitiveTypes.Date), `{"type":"eq","term":"d","value":"2022-08-14"}`},
-		{"uuid", iceberg.UUIDLiteral(uuid.MustParse("f79c3e09-677c-4bbd-a479-3f349cb785e7")), `{"type":"eq","term":"d","value":"f79c3e09-677c-4bbd-a479-3f349cb785e7"}`},
+		{"uuid", iceberg.UUIDLiteral(internal.Must(uuid.Parse("f79c3e09-677c-4bbd-a479-3f349cb785e7"))), `{"type":"eq","term":"d","value":"f79c3e09-677c-4bbd-a479-3f349cb785e7"}`},
 		{"binary", iceberg.BinaryLiteral([]byte{0x01, 0x02, 0x03}), `{"type":"eq","term":"d","value":"010203"}`},
 		{"decimal", mustLit(t, "3.14", iceberg.MustDecimalTypeOf(9, 2)), `{"type":"eq","term":"d","value":"3.14"}`},
 	}
@@ -403,7 +404,7 @@ func TestExpressionRoundTripWithSchema(t *testing.T) {
 		iceberg.EqualTo(iceberg.Reference("b"), true),
 		iceberg.GreaterThanEqual(iceberg.Reference("f"), float64(1.5)),
 		iceberg.LiteralPredicate(iceberg.OpEQ, iceberg.Reference("d"), mustLit(t, "2022-08-14", iceberg.PrimitiveTypes.Date)),
-		iceberg.LiteralPredicate(iceberg.OpEQ, iceberg.Reference("u"), iceberg.UUIDLiteral(uuid.MustParse("f79c3e09-677c-4bbd-a479-3f349cb785e7"))),
+		iceberg.LiteralPredicate(iceberg.OpEQ, iceberg.Reference("u"), iceberg.UUIDLiteral(internal.Must(uuid.Parse("f79c3e09-677c-4bbd-a479-3f349cb785e7")))),
 		iceberg.LiteralPredicate(iceberg.OpEQ, iceberg.Reference("bin"), iceberg.BinaryLiteral([]byte{0x01, 0x02, 0x03})),
 		iceberg.IsIn(iceberg.Reference("i"), int32(1), int32(2), int32(3)),
 		iceberg.NewAnd(
