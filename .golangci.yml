@@ -29,6 +29,7 @@ linters:
     - nlreturn
     - perfsprint
     - staticcheck
+    - unused
   settings:
     errcheck:
       exclude-functions:
