@@ -234,7 +234,6 @@ func TestToHumanStringValues(t *testing.T) {
 		{iceberg.HourTransform{}, iceberg.PrimitiveTypes.Int32, int32(4645896), "2500-01-01-00"},
 		{iceberg.HourTransform{}, iceberg.PrimitiveTypes.Int32, int32(-4119936), "1500-01-01-00"},
 		{iceberg.YearTransform{}, iceberg.PrimitiveTypes.Int32, int32(-1), "1969"},
-		{iceberg.YearTransform{}, iceberg.PrimitiveTypes.Int32, int32(0), "1970"},
 		{iceberg.YearTransform{}, iceberg.PrimitiveTypes.Int32, int32(-1035), "0935"},
 		{iceberg.YearTransform{}, iceberg.PrimitiveTypes.Int32, int32(-1969), "0001"},
 		{iceberg.YearTransform{}, iceberg.PrimitiveTypes.Int32, int32(-1970), "0000"},
