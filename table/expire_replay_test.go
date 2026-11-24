@@ -1180,3 +1180,12 @@ func TestExpireReplayRenewsStagedSnapshotTimestamp(t *testing.T) {
 		assert.Equal(t, []string{"a", "b1", "p"}, branchFiles(t, fs, meta, MainBranch))
 	})
 }
+
+func TestSnapshotHistoryLimitedToRefs(t *testing.T) {
+	meta, err := NewMetadata(simpleSchema(), nil, UnsortedSortOrder, retryCleanupLocation, nil)
+	require.NoError(t, err)
+	for _, refsOnly := range []bool{false, true} {
+		tbl := New(Identifier{"db", "refs"}, meta, "", nil, nil, WithSnapshotHistoryLimitedToRefs(refsOnly))
+		assert.Equal(t, refsOnly, tbl.SnapshotHistoryLimitedToRefs())
+	}
+}

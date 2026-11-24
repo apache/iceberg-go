@@ -798,6 +798,10 @@ fmt.Printf("removed %d files\n", len(result.DeletedFiles))
 
 Also see `maintenance.WithCleanupLocation`, `maintenance.WithCleanupDeleteFunc`, `maintenance.WithPrefixMismatchMode`, `maintenance.WithEqualSchemes`, and `maintenance.WithEqualAuthorities` in `table/maintenance/orphan_cleanup.go`.
 
+Orphan cleanup fails on REST tables loaded with `snapshot-loading-mode=refs`,
+because their snapshot history may be incomplete. Reload with
+`snapshot-loading-mode=all`.
+
 ### Compaction (rewrite data files)
 
 ```go

@@ -202,6 +202,11 @@ func (t Table) SavedConfig() iceberg.Properties              { return maps.Clone
 // read-only; mutating it affects the shared table value.
 func (t Table) Labels() *iceberg.Labels { return t.labels }
 
+// SnapshotHistoryLimitedToRefs reports whether the table was loaded with REST
+// snapshot-loading-mode=refs. When true, Metadata().Snapshots() may leave out
+// snapshots that no branch or tag points at.
+func (t Table) SnapshotHistoryLimitedToRefs() bool { return t.snapshotHistoryRefsOnly }
+
 // MetricsReporter returns the table's metrics reporter, never nil.
 func (t Table) MetricsReporter() metrics.Reporter {
 	if t.reporter == nil {

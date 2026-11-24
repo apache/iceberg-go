@@ -338,6 +338,8 @@ func rejectPlanOption(cfg *orphanCleanupConfig, name string) {
 // after the second refresh.
 // Dry runs plan from the supplied table metadata.
 // Orphan cleanup, including dry runs, is rejected when garbage collection is disabled via gc.enabled.
+// It is also rejected when the planned table was loaded with REST
+// snapshot-loading-mode=refs, since its snapshot history may be incomplete.
 func DeleteOrphanFiles(ctx context.Context, tbl *table.Table, opts ...OrphanCleanupOption) (OrphanCleanupResult, error) {
 	cfg := newOrphanCleanupConfig(opts...)
 	if cfg.validationErr != nil {
@@ -368,7 +370,8 @@ func DeleteOrphanFiles(ctx context.Context, tbl *table.Table, opts ...OrphanClea
 
 // PlanOrphanFiles identifies orphan files without deleting anything. The
 // returned plan can be shown to a user and passed to ExecuteOrphanCleanup to
-// delete exactly that set.
+// delete exactly that set. Tables loaded with REST snapshot-loading-mode=refs
+// are rejected, since their snapshot history may be incomplete.
 func PlanOrphanFiles(ctx context.Context, tbl *table.Table, opts ...OrphanCleanupOption) (OrphanCleanupPlan, error) {
 	cfg := newOrphanCleanupConfig(opts...)
 	if cfg.validationErr != nil {
@@ -458,6 +461,16 @@ func validateOrphanCleanupGC(tbl *table.Table) error {
 	return nil
 }
 
+// validateOrphanCleanupFullHistory rejects refs-only history: files of
+// snapshots that no ref points at would otherwise be planned as orphans.
+func validateOrphanCleanupFullHistory(tbl *table.Table) error {
+	if tbl.SnapshotHistoryLimitedToRefs() {
+		return errors.New("cannot delete orphan files: snapshot history may be incomplete under REST snapshot-loading-mode=refs; reload with snapshot-loading-mode=all")
+	}
+
+	return nil
+}
+
 type scannedFile struct {
 	path string
 	size int64
@@ -469,6 +482,10 @@ type referencedFileIndex struct {
 }
 
 func planOrphanFiles(ctx context.Context, tbl *table.Table, cfg *orphanCleanupConfig) (OrphanCleanupPlan, error) {
+	if err := validateOrphanCleanupFullHistory(tbl); err != nil {
+		return OrphanCleanupPlan{}, err
+	}
+
 	fs, err := tbl.FS(ctx)
 	if err != nil {
 		return OrphanCleanupPlan{}, fmt.Errorf("failed to get filesystem: %w", err)

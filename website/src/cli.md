@@ -237,6 +237,10 @@ iceberg clean-orphan-files --older-than 5d my_db.events
 iceberg clean-orphan-files --location s3://old-warehouse/my_db/events my_db.events
 ```
 
+The command fails on REST catalogs with `snapshot-loading-mode=refs`, because
+the loaded snapshot history may be incomplete; configure the REST server with
+`snapshot-loading-mode=all`.
+
 ## Rollback
 
 Reset the current snapshot pointer to a previous snapshot. The target must be an ancestor of the current snapshot.

@@ -335,6 +335,7 @@ type orphanCleanupTestCatalog struct {
 	fsF        table.FSysF
 	nextFile   int
 	beforeLoad func() error
+	refsOnly   bool
 }
 
 func (c *orphanCleanupTestCatalog) LoadTable(_ context.Context, ident table.Identifier) (*table.Table, error) {
@@ -346,7 +347,7 @@ func (c *orphanCleanupTestCatalog) LoadTable(_ context.Context, ident table.Iden
 		}
 	}
 
-	return table.New(ident, c.metadata, c.location, c.fsF, c), nil
+	return table.New(ident, c.metadata, c.location, c.fsF, c, table.WithSnapshotHistoryLimitedToRefs(c.refsOnly)), nil
 }
 
 func (c *orphanCleanupTestCatalog) CommitTable(
