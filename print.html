@@ -3439,6 +3439,9 @@ make integration-external-rest
 <p><strong>Transform formatting requires the result type and uses the Java-aligned method name.</strong> <code>Transform.ToHumanStr(value)</code> and <code>Transform.ToHumanStrType(resultType, value)</code> are removed. Use <code>Transform.ToHumanString(resultType, value)</code> to format partition values, including timestamps with time zones.</p>
 </li>
 <li>
+<p><strong>Year partition paths are zero-padded to four digits.</strong> <code>YearTransform.ToHumanString</code> now formats years below 1000 with leading zeros, as Java and PyIceberg do, so <code>0001-01-01</code> lands in <code>ts_year=0001/</code> instead of <code>ts_year=1/</code>. New files for such partitions are written to a different directory than earlier iceberg-go releases used. Reads are unaffected because partition values come from manifests, not paths. Tooling that matches on partition paths should use the padded form.</p>
+</li>
+<li>
 <p><strong>Catalogs now require cleanup.</strong> The <code>catalog.Catalog</code> interface includes <code>Close() error</code>. Custom catalog implementations must provide <code>Close</code>, and callers should close catalog instances after use. <code>catalog.Closer</code> is removed. Replace <code>cat.(catalog.Closer)</code> checks with <code>defer cat.Close()</code>; <code>catalog.Catalog</code> already implements <code>io.Closer</code>, so no type assertion is needed.</p>
 </li>
 <li>
