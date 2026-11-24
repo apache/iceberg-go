@@ -194,6 +194,7 @@ func send(ctx context.Context, cl *http.Client, kc *keyedCall, cfg *reqConfig, o
 			err = handleNon200(rsp, override, cfg.errorTypeOverride)
 			_, _ = io.Copy(io.Discard, rsp.Body)
 			_ = rsp.Body.Close()
+
 			return nil, err
 		case err == nil && !keyedRetryStatus(rsp.StatusCode):
 			return rsp, nil
@@ -226,6 +227,7 @@ func send(ctx context.Context, cl *http.Client, kc *keyedCall, cfg *reqConfig, o
 				if kc.commit && !errors.Is(err, ErrCommitStateUnknown) {
 					err = fmt.Errorf("%w: not resent within idempotency-key-lifetime: %w", ErrCommitStateUnknown, err)
 				}
+
 				return nil, err
 			}
 			if kc.policy.onRetry != nil {

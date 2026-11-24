@@ -408,6 +408,7 @@ func TestCommitResendConflictAfterExpiry(t *testing.T) {
 			if n == 1 {
 				applied.Add(1)
 				dropConnection(w)
+
 				return
 			}
 			w.WriteHeader(tc.status)
@@ -420,6 +421,7 @@ func TestCommitResendConflictAfterExpiry(t *testing.T) {
 			if sends == 2 {
 				time.Sleep(time.Second)
 			}
+
 			return transport.RoundTrip(r)
 		})
 		_, _, err := c.CommitTable(t.Context(), table.Identifier{"ns", "name"}, nil, nil)
@@ -440,18 +442,21 @@ func TestKeyedResendTimerRechecksExpiry(t *testing.T) {
 	for _, commit := range []bool{true, false} {
 		start := time.Now()
 		clockReads := 0
-		kc := &keyedCall{policy: &idempotencyPolicy{}, commit: commit, key: "key", start: start, lifetime: time.Second,
+		kc := &keyedCall{
+			policy: &idempotencyPolicy{}, commit: commit, key: "key", start: start, lifetime: time.Second,
 			now: func() time.Time {
 				clockReads++
 				if clockReads > 1 {
 					return start.Add(time.Second)
 				}
+
 				return start
 			},
 		}
 		attempts := 0
 		cl := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 			attempts++
+
 			return nil, io.EOF
 		})}
 		_, err := send(t.Context(), cl, kc, &reqConfig{}, nil, func() (*http.Request, error) {
