@@ -92,7 +92,8 @@ token=$(call -X POST "$api/catalog/v1/oauth/tokens" \
 call -X POST "$api/management/v1/catalogs" \
   -H "Authorization: Bearer $token" -H 'Content-Type: application/json' \
   -d "{\"catalog\":{\"name\":\"$warehouse\",\"type\":\"INTERNAL\",
-       \"properties\":{\"default-base-location\":\"$location\"},
+       \"properties\":{\"default-base-location\":\"$location\",
+                     \"polaris.config.drop-with-purge.enabled\":\"true\"},
        \"storageConfigInfo\":{\"storageType\":\"FILE\",\"allowedLocations\":[\"$location\"]}}}" \
   > /dev/null
 
