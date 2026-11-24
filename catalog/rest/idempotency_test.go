@@ -396,34 +396,44 @@ func TestKeyedSeparateCallsUseNewKeys(t *testing.T) {
 }
 
 func TestCommitResendConflictAfterExpiry(t *testing.T) {
-	var applied atomic.Int32
-	c, attempts := newKeyedTestCatalog(t, lifetimeConfig("PT1S"), func(n int, w http.ResponseWriter, _ *http.Request) {
-		if n == 1 {
-			applied.Add(1)
-			dropConnection(w)
-			return
-		}
-		w.WriteHeader(http.StatusConflict)
-		_, _ = io.WriteString(w, `{"error":{"message":"requirement failed","type":"CommitFailedException","code":409}}`)
-	})
-	transport := c.cl.Transport
-	sends := 0
-	c.cl.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
-		sends++
-		if sends == 2 {
-			time.Sleep(time.Second)
-		}
-		return transport.RoundTrip(r)
-	})
-	_, _, err := c.CommitTable(t.Context(), table.Identifier{"ns", "name"}, nil, nil)
-	require.ErrorIs(t, err, ErrCommitStateUnknown)
-	require.NotErrorIs(t, err, table.ErrCommitFailed) // else table commits refresh and replay it
-	require.ErrorContains(t, err, "requirement failed")
-	got := attempts()
-	require.Len(t, got, 2)
-	require.EqualValues(t, 1, applied.Load())
-	require.NotEmpty(t, got[0].key)
-	require.Equal(t, got[0], got[1])
+	for _, tc := range []struct {
+		status int
+		body   string
+	}{
+		{http.StatusConflict, `{"error":{"message":"requirement failed","type":"CommitFailedException","code":409}}`},
+		{http.StatusBadRequest, `{"error":{"message":"requirement failed","type":"BadRequestException","code":400}}`},
+	} {
+		var applied atomic.Int32
+		c, attempts := newKeyedTestCatalog(t, lifetimeConfig("PT1S"), func(n int, w http.ResponseWriter, _ *http.Request) {
+			if n == 1 {
+				applied.Add(1)
+				dropConnection(w)
+				return
+			}
+			w.WriteHeader(tc.status)
+			_, _ = io.WriteString(w, tc.body)
+		})
+		transport := c.cl.Transport
+		sends := 0
+		c.cl.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			sends++
+			if sends == 2 {
+				time.Sleep(time.Second)
+			}
+			return transport.RoundTrip(r)
+		})
+		_, _, err := c.CommitTable(t.Context(), table.Identifier{"ns", "name"}, nil, nil)
+		require.ErrorIs(t, err, ErrCommitStateUnknown, tc.status)
+		// else the table commit loop replays the commit or cleans up its files
+		require.NotErrorIs(t, err, table.ErrCommitFailed, tc.status)
+		require.NotErrorIs(t, err, table.ErrCommitRejected, tc.status)
+		require.ErrorContains(t, err, "requirement failed")
+		got := attempts()
+		require.Len(t, got, 2)
+		require.EqualValues(t, 1, applied.Load())
+		require.NotEmpty(t, got[0].key)
+		require.Equal(t, got[0], got[1])
+	}
 }
 
 func TestKeyedResendTimerRechecksExpiry(t *testing.T) {

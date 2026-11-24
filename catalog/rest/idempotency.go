@@ -30,6 +30,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/apache/iceberg-go/table"
 	"github.com/google/uuid"
 )
 
@@ -165,9 +166,10 @@ func send(ctx context.Context, cl *http.Client, kc *keyedCall, cfg *reqConfig, o
 		if !resent || !kc.commit || finalErr == nil || errors.Is(finalErr, ErrCommitStateUnknown) {
 			return
 		}
-		// A conflict after a resend may answer a commit that already landed; keep
-		// its text but not its chain, or callers would refresh and retry it.
-		if errors.Is(finalErr, ErrCommitFailed) {
+		// After a resend, a conflict or rejection may answer a commit that already
+		// landed; keep its text but not its chain, or the table commit loop would
+		// replay it (conflict) or clean up its files (rejection).
+		if errors.Is(finalErr, table.ErrCommitFailed) || errors.Is(finalErr, table.ErrCommitRejected) {
 			finalErr = fmt.Errorf("%w: resend failed: %v", ErrCommitStateUnknown, finalErr)
 		} else {
 			finalErr = fmt.Errorf("%w: resend failed: %w", ErrCommitStateUnknown, finalErr)
