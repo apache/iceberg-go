@@ -14,7 +14,7 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
-//
+
 // Package puffin provides reading and writing of Puffin files.
 //
 // Puffin is a file format designed to store statistics and indexes

@@ -39,10 +39,13 @@ linters:
       disable:
         - fieldalignment
         - shadow
+    staticcheck:
+      # golangci-lint's default list, with ST1000 (package docs) turned on.
+      checks: ["all", "-ST1003", "-ST1016", "-ST1020", "-ST1021", "-ST1022"]
   exclusions:
     generated: lax
+    # The "comments" preset is left out because it hides ST1000.
     presets:
-      - comments
       - common-false-positives
       - legacy
       - std-error-handling
@@ -50,6 +53,10 @@ linters:
       - linters:
           - errcheck
         path: _test\.go$
+      - linters:
+          - staticcheck
+        path: (^|/)internal/
+        text: ST1000
     paths:
       - third_party$
       - builtin$
