@@ -2398,6 +2398,91 @@ func TestAddColumnStoresBinaryDefaultAsHex(t *testing.T) {
 	assert.True(t, applied.Equals(&decoded))
 }
 
+// Struct, list and map columns can have a write default ({} for a struct, a JSON
+// array or object otherwise). Those defaults are Go maps and slices, which ==
+// cannot compare, so they must not break evolving any other column.
+func TestUpdateSchemaWithNestedTypeWriteDefault(t *testing.T) {
+	newTxn := func(t *testing.T, field string) *Transaction {
+		t.Helper()
+
+		var current iceberg.Schema
+		require.NoError(t, json.Unmarshal([]byte(`{"type":"struct","schema-id":0,"fields":[`+
+			`{"id":1,"name":"id","required":true,"type":"long"},`+field+`]}`), &current))
+
+		meta, err := NewMetadata(&current, iceberg.UnpartitionedSpec, UnsortedSortOrder, "",
+			iceberg.Properties{PropertyFormatVersion: "3"})
+		require.NoError(t, err)
+
+		return New([]string{"tbl"}, meta, "", nil, nil).NewTransaction()
+	}
+
+	tests := []struct {
+		name           string
+		field          string
+		writeDefault   any
+		initialDefault any
+	}{
+		{
+			name: "struct",
+			field: `{"id":2,"name":"point","required":false,"initial-default":{},"write-default":{},` +
+				`"type":{"type":"struct","fields":[{"id":3,"name":"x","required":false,"type":"int"}]}}`,
+			writeDefault:   map[string]any{},
+			initialDefault: map[string]any{},
+		},
+		{
+			name: "list",
+			field: `{"id":2,"name":"tags","required":false,"write-default":[],` +
+				`"type":{"type":"list","element-id":3,"element":"string","element-required":false}}`,
+			writeDefault: []any{},
+		},
+		{
+			name: "map",
+			field: `{"id":2,"name":"attrs","required":false,"write-default":{"keys":[],"values":[]},` +
+				`"type":{"type":"map","key-id":3,"key":"string","value-id":4,"value":"string","value-required":false}}`,
+			writeDefault: map[string]any{"keys": []any{}, "values": []any{}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			txn := newTxn(t, tt.field)
+
+			require.NoError(t, txn.UpdateSchema(true, false).
+				AddColumn([]string{"name"}, iceberg.PrimitiveTypes.String, "", false, nil).
+				RenameColumn([]string{"id"}, "row_id").
+				Commit())
+
+			applied := txn.meta.CurrentSchema()
+			_, ok := applied.FindFieldByName("name")
+			assert.True(t, ok)
+			_, ok = applied.FindFieldByName("row_id")
+			assert.True(t, ok)
+			field, ok := applied.FindFieldByID(2)
+			require.True(t, ok)
+			assert.Equal(t, tt.writeDefault, field.WriteDefault)
+		})
+
+		// Renaming the nested column itself rebuilds the field, which must keep
+		// both of its defaults.
+		t.Run(tt.name+" renamed", func(t *testing.T) {
+			txn := newTxn(t, tt.field)
+
+			before, ok := txn.meta.CurrentSchema().FindFieldByID(2)
+			require.True(t, ok)
+
+			require.NoError(t, txn.UpdateSchema(true, false).
+				RenameColumn([]string{before.Name}, "renamed").
+				Commit())
+
+			field, ok := txn.meta.CurrentSchema().FindFieldByID(2)
+			require.True(t, ok)
+			assert.Equal(t, "renamed", field.Name)
+			assert.Equal(t, tt.writeDefault, field.WriteDefault)
+			assert.Equal(t, tt.initialDefault, field.InitialDefault)
+		})
+	}
+}
+
 // A binary write default read from metadata and the same default built in
 // process must compare equal, so union-by-name does not rewrite it.
 func TestUnionByNameKeepsUnchangedBinaryWriteDefault(t *testing.T) {

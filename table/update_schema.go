@@ -1368,7 +1368,7 @@ func (a *applyChanges) Struct(structType iceberg.StructType, fieldResults []iceb
 			field.Type.Equals(resultType) &&
 			field.Required == required &&
 			field.Doc == doc &&
-			field.WriteDefault == writeDefault {
+			reflect.DeepEqual(field.WriteDefault, writeDefault) {
 			newFields = append(newFields, field)
 		} else {
 			hasChanges = true
