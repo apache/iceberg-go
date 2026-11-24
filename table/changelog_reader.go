@@ -174,6 +174,11 @@ func changelogArrowSchema(scan *Scan) (*arrow.Schema, bool, error) {
 		return nil, false, err
 	}
 
+	dictionaryFieldIDs, err := scan.dictionaryFieldIDs(projected)
+	if err != nil {
+		return nil, false, err
+	}
+
 	useLargeTypes, err := strconv.ParseBool(scan.options.Get(ScanOptionArrowUseLargeTypes, "false"))
 	if err != nil {
 		useLargeTypes = false
@@ -189,8 +194,9 @@ func changelogArrowSchema(scan *Scan) (*arrow.Schema, bool, error) {
 	}
 
 	dataSchema, err := SchemaToArrowSchemaWithOptions(projected, ArrowSchemaOptions{
-		UseLargeTypes:   useLargeTypes,
-		TableProperties: props,
+		UseLargeTypes:      useLargeTypes,
+		TableProperties:    props,
+		dictionaryFieldIDs: dictionaryFieldIDs,
 	})
 	if err != nil {
 		return nil, false, err

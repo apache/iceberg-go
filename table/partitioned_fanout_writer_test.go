@@ -37,6 +37,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/config"
+	"github.com/apache/iceberg-go/internal"
 
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/google/uuid"
@@ -212,6 +213,59 @@ func (s *FanoutWriterTestSuite) TestCloseAllFlushesAfterFanoutSuccessContextCanc
 	sum := <-resultCh
 	s.Require().NoError(sum.err)
 	s.Equal(int64(totalRows), sum.total)
+}
+
+func (s *FanoutWriterTestSuite) TestWriteReportsFailedUploadAfterWriterLeftFactory() {
+	arrSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: true},
+		{Name: "part", Type: arrow.PrimitiveTypes.Int32, Nullable: true},
+	}, nil)
+	icebergSchema, err := ArrowSchemaToIcebergWithFreshIDs(arrSchema, false)
+	s.Require().NoError(err)
+	partField, ok := icebergSchema.FindFieldByName("part")
+	s.Require().True(ok)
+
+	loc := filepath.ToSlash(s.T().TempDir())
+	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{partField.ID},
+		FieldID:   1000,
+		Transform: iceberg.IdentityTransform{},
+		Name:      "part",
+	})
+	meta, err := NewMetadata(icebergSchema, &spec, UnsortedSortOrder, loc, iceberg.Properties{})
+	s.Require().NoError(err)
+	metaBuilder, err := MetadataBuilderFromBase(meta, "")
+	s.Require().NoError(err)
+
+	bldr := array.NewRecordBuilder(s.mem, arrSchema)
+	bldr.Field(0).(*array.Int64Builder).Append(1)
+	bldr.Field(1).(*array.Int32Builder).Append(1)
+	batch := bldr.NewRecordBatch()
+	bldr.Release()
+	defer batch.Release()
+
+	fs := newFailingCloseFS()
+	writeUUID := uuid.New()
+	args := recordWritingArgs{
+		sc:        arrSchema,
+		fs:        fs,
+		writeUUID: &writeUUID,
+		counter:   internal.Counter(0),
+	}
+	// A one byte target rolls to a new file, and so closes it, after the batch.
+	factory, err := newWriterFactory(loc, args, metaBuilder, icebergSchema, 1)
+	s.Require().NoError(err)
+
+	itr := fs.batchThenWriterExit(factory, batch)
+	var writeErr error
+	for _, iterErr := range newPartitionedFanoutWriter(spec, icebergSchema, itr, factory).Write(s.ctx, 1) {
+		if iterErr != nil {
+			writeErr = iterErr
+		}
+	}
+
+	s.Equal(int64(1), fs.created.Load())
+	s.ErrorContains(writeErr, "upload failed")
 }
 
 func (s *FanoutWriterTestSuite) testTransformPartition(transform iceberg.Transform, sourceFieldName string, transformName string, testRecord arrow.RecordBatch, expectedPartitionCount int) {

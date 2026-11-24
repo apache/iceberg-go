@@ -115,6 +115,8 @@ type UpdateSchemaOption func(*UpdateSchema)
 
 // WithNameMapping configures the UpdateSchema to use the provided name mapping
 // for tracking field name changes and ensuring consistency during schema evolution.
+// Without it, the table's schema.name-mapping.default property is updated when
+// the table has one.
 func WithNameMapping(nameMapping iceberg.NameMapping) UpdateSchemaOption {
 	return func(u *UpdateSchema) {
 		u.nameMapping = nameMapping
@@ -1129,14 +1131,30 @@ func (u *UpdateSchema) BuildUpdates() ([]Update, []Requirement, error) {
 			)
 		}
 
-		if u.nameMapping != nil {
+		// Keep the table's name mapping in step with the schema, as Java's
+		// SchemaUpdate and PyIceberg's UpdateSchema do. Otherwise files without
+		// field IDs cannot be resolved for added or renamed columns.
+		nameMapping := u.nameMapping
+		if nameMapping == nil {
+			// NameMapping returns nil when the property is unset or can't be
+			// parsed. Leaving an unparsable value as it is, rather than failing
+			// the schema change, is deliberate: Java keeps it too.
+			nameMapping = meta.NameMapping()
+		}
+		if nameMapping != nil {
 			updatesMap := make(map[int]iceberg.NestedField)
 			for _, upds := range u.updates {
 				maps.Copy(updatesMap, upds)
 			}
-			updatedNameMapping, err := iceberg.UpdateNameMapping(u.nameMapping, updatesMap, u.adds)
+			updatedNameMapping, err := iceberg.UpdateNameMapping(nameMapping, updatesMap, u.adds)
 			if err != nil {
 				return nil, nil, err
+			}
+			// UpdateNameMapping returns nil when no entry keeps a name, as
+			// for [] or entries with empty names. Write [] rather than null,
+			// which would make the property invalid for scans and add-files.
+			if updatedNameMapping == nil {
+				updatedNameMapping = iceberg.NameMapping{}
 			}
 			mappingJSON, err := json.Marshal(updatedNameMapping)
 			if err != nil {

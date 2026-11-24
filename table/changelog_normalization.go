@@ -101,6 +101,10 @@ func (s *IncrementalChangelogScan) ToNormalizedArrowRecords(ctx context.Context,
 	if err != nil {
 		return nil, nil, err
 	}
+	dictionaryFieldIDs, err := s.scan.dictionaryFieldIDs(requested)
+	if err != nil {
+		return nil, nil, err
+	}
 
 	// Reading the complete snapshot prevents a hidden changed column or a raw
 	// limit/filter from turning an update into a carryover or an unmatched row.
@@ -211,7 +215,10 @@ func (s *IncrementalChangelogScan) ToNormalizedArrowRecords(ctx context.Context,
 						return true, nil
 					}
 					out, err := projectNormalizedChangelog(ctx, rec, outSchema, requested, fullProjection, SchemaOptions{
-						UseLargeTypes: useLargeTypes, FormatVersion: version, TableProperties: props,
+						UseLargeTypes:      useLargeTypes,
+						FormatVersion:      version,
+						TableProperties:    props,
+						dictionaryFieldIDs: dictionaryFieldIDs,
 					})
 					if err != nil {
 						return false, err
