@@ -162,7 +162,14 @@ func keyedRetryError(ctx context.Context, err error) bool {
 func send(ctx context.Context, cl *http.Client, kc *keyedCall, cfg *reqConfig, override map[int]error, newReq func() (*http.Request, error)) (response *http.Response, finalErr error) {
 	resent := false
 	defer func() {
-		if resent && kc.commit && finalErr != nil && !errors.Is(finalErr, ErrCommitStateUnknown) {
+		if !resent || !kc.commit || finalErr == nil || errors.Is(finalErr, ErrCommitStateUnknown) {
+			return
+		}
+		// A conflict after a resend may answer a commit that already landed; keep
+		// its text but not its chain, or callers would refresh and retry it.
+		if errors.Is(finalErr, ErrCommitFailed) {
+			finalErr = fmt.Errorf("%w: resend failed: %v", ErrCommitStateUnknown, finalErr)
+		} else {
 			finalErr = fmt.Errorf("%w: resend failed: %w", ErrCommitStateUnknown, finalErr)
 		}
 	}()
@@ -213,8 +220,8 @@ func send(ctx context.Context, cl *http.Client, kc *keyedCall, cfg *reqConfig, o
 
 			return nil, ctx.Err()
 		case <-timer.C:
-			if kc.commit && !kc.open() {
-				if !errors.Is(err, ErrCommitStateUnknown) {
+			if !kc.open() {
+				if kc.commit && !errors.Is(err, ErrCommitStateUnknown) {
 					err = fmt.Errorf("%w: not resent within idempotency-key-lifetime: %w", ErrCommitStateUnknown, err)
 				}
 				return nil, err

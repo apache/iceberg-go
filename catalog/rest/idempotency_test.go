@@ -417,7 +417,8 @@ func TestCommitResendConflictAfterExpiry(t *testing.T) {
 	})
 	_, _, err := c.CommitTable(t.Context(), table.Identifier{"ns", "name"}, nil, nil)
 	require.ErrorIs(t, err, ErrCommitStateUnknown)
-	require.ErrorIs(t, err, ErrCommitFailed)
+	require.NotErrorIs(t, err, table.ErrCommitFailed) // else table commits refresh and replay it
+	require.ErrorContains(t, err, "requirement failed")
 	got := attempts()
 	require.Len(t, got, 2)
 	require.EqualValues(t, 1, applied.Load())
@@ -425,30 +426,36 @@ func TestCommitResendConflictAfterExpiry(t *testing.T) {
 	require.Equal(t, got[0], got[1])
 }
 
-func TestCommitResendTimerRechecksExpiry(t *testing.T) {
-	start := time.Now()
-	clockReads := 0
-	kc := &keyedCall{policy: &idempotencyPolicy{}, commit: true, key: "key", start: start, lifetime: time.Second,
-		now: func() time.Time {
-			clockReads++
-			if clockReads > 1 {
-				return start.Add(time.Second)
-			}
-			return start
-		},
+func TestKeyedResendTimerRechecksExpiry(t *testing.T) {
+	for _, commit := range []bool{true, false} {
+		start := time.Now()
+		clockReads := 0
+		kc := &keyedCall{policy: &idempotencyPolicy{}, commit: commit, key: "key", start: start, lifetime: time.Second,
+			now: func() time.Time {
+				clockReads++
+				if clockReads > 1 {
+					return start.Add(time.Second)
+				}
+				return start
+			},
+		}
+		attempts := 0
+		cl := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			attempts++
+			return nil, io.EOF
+		})}
+		_, err := send(t.Context(), cl, kc, &reqConfig{}, nil, func() (*http.Request, error) {
+			return http.NewRequestWithContext(t.Context(), http.MethodPost, "http://catalog.test", nil)
+		})
+		require.ErrorIs(t, err, io.EOF)
+		if commit {
+			require.ErrorIs(t, err, ErrCommitStateUnknown)
+		} else {
+			require.NotErrorIs(t, err, ErrCommitStateUnknown)
+		}
+		require.Equal(t, 1, attempts, "commit=%v", commit)
+		require.Equal(t, 2, clockReads)
 	}
-	attempts := 0
-	cl := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
-		attempts++
-		return nil, io.EOF
-	})}
-	_, err := send(t.Context(), cl, kc, &reqConfig{}, nil, func() (*http.Request, error) {
-		return http.NewRequestWithContext(t.Context(), http.MethodPost, "http://catalog.test", nil)
-	})
-	require.ErrorIs(t, err, ErrCommitStateUnknown)
-	require.ErrorIs(t, err, io.EOF)
-	require.Equal(t, 1, attempts)
-	require.Equal(t, 2, clockReads)
 }
 
 func TestKeyedNoResendOn4xx(t *testing.T) {
