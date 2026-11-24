@@ -1949,6 +1949,103 @@ func (m *equalityDeleteMask) applySingleBytesDictionary(
 	return true
 }
 
+const (
+	dictionaryEntryUnknown uint8 = iota
+	dictionaryEntryKept
+	dictionaryEntryDeleted
+)
+
+// dictionaryEntryMemo caches one delete set's results across a file's
+// batches while they share a dictionary object. Batches must be filtered one
+// at a time. Holding the dictionary without Retain still prevents its address
+// from being reused, and on a match the current batch keeps it alive. Reuse
+// relies on Arrow arrays being immutable.
+type dictionaryEntryMemo struct {
+	dict    arrow.ArrayData
+	results []uint8
+}
+
+// apply looks up each dictionary entry that a row references at most once
+// per dictionary. It returns false, leaving m unchanged, for value types other
+// than string and binary.
+func (c *dictionaryEntryMemo) apply(
+	m *equalityDeleteMask,
+	column *array.Dictionary,
+	deleteSet *singleBytesEqualityDeleteSet,
+	mem memory.Allocator,
+) bool {
+	switch d := column.Dictionary().(type) {
+	case *array.String:
+		applyDictionaryEntryResults(m, column, d, d.ValueOffsets(), d.ValueBytes(), deleteSet, mem, c.resultsFor(column))
+	case *array.LargeString:
+		applyDictionaryEntryResults(m, column, d, d.ValueOffsets(), d.ValueBytes(), deleteSet, mem, c.resultsFor(column))
+	case *array.Binary:
+		applyDictionaryEntryResults(m, column, d, d.ValueOffsets(), d.ValueBytes(), deleteSet, mem, c.resultsFor(column))
+	case *array.LargeBinary:
+		applyDictionaryEntryResults(m, column, d, d.ValueOffsets(), d.ValueBytes(), deleteSet, mem, c.resultsFor(column))
+	default:
+		return false
+	}
+
+	return true
+}
+
+// resultsFor returns zeroed per-entry results sized to column's dictionary,
+// reusing them while they belong to the same dictionary data.
+func (c *dictionaryEntryMemo) resultsFor(column *array.Dictionary) []uint8 {
+	if data := column.Data().Dictionary(); c.dict != data {
+		c.dict = data
+		n := column.Dictionary().Len()
+		c.results = slices.Grow(c.results[:0], n)[:n]
+		clear(c.results)
+	}
+
+	return c.results
+}
+
+func applyDictionaryEntryResults[Offset ~int32 | ~int64](
+	m *equalityDeleteMask,
+	column *array.Dictionary,
+	dict arrow.Array,
+	offsets []Offset,
+	data []byte,
+	deleteSet *singleBytesEqualityDeleteSet,
+	mem memory.Allocator,
+	results []uint8,
+) {
+	numRows := column.Len()
+	baseOffset := offsets[0]
+	for row := range numRows {
+		if m.bits != nil && !bitutil.BitIsSet(m.bits, row) {
+			continue
+		}
+		if column.IsNull(row) {
+			if !deleteSet.hasNull {
+				continue
+			}
+		} else {
+			entry := column.GetValueIndex(row)
+			result := results[entry]
+			if result == dictionaryEntryUnknown {
+				result = dictionaryEntryKept
+				if dict.IsNull(entry) {
+					if deleteSet.hasNull {
+						result = dictionaryEntryDeleted
+					}
+				} else if _, deleted := deleteSet.keys[string(data[offsets[entry]-baseOffset:offsets[entry+1]-baseOffset])]; deleted {
+					result = dictionaryEntryDeleted
+				}
+				results[entry] = result
+			}
+			if result != dictionaryEntryDeleted {
+				continue
+			}
+		}
+		m.ensure(mem, numRows)
+		bitutil.ClearBit(m.bits, row)
+	}
+}
+
 // applySingleInt32 returns false for other physical Arrow types, so callers
 // can preserve the generic key encoder for schema evolution.
 func (m *equalityDeleteMask) applySingleInt32(
@@ -2047,6 +2144,8 @@ func processEqualityDeletesColumnarForFile(ctx context.Context, eqDeleteSets []*
 		}
 	}
 
+	var dictMemos []dictionaryEntryMemo
+
 	return func(r arrow.RecordBatch) (arrow.RecordBatch, error) {
 		defer r.Release()
 
@@ -2077,6 +2176,14 @@ func processEqualityDeletesColumnarForFile(ctx context.Context, eqDeleteSets []*
 				}
 				if bytesSet != nil && mask.applySingleBytes(column, bytesSet, mem) {
 					continue
+				}
+				if dictColumn, ok := column.(*array.Dictionary); ok && bytesSet != nil {
+					if dictMemos == nil {
+						dictMemos = make([]dictionaryEntryMemo, len(eqDeleteSets))
+					}
+					if dictMemos[setIdx].apply(&mask, dictColumn, bytesSet, mem) {
+						continue
+					}
 				}
 			}
 

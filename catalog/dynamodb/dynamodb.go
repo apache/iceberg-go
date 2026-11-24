@@ -29,12 +29,12 @@ import (
 	"time"
 
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/awsconfig"
 	"github.com/apache/iceberg-go/catalog"
 	"github.com/apache/iceberg-go/catalog/internal"
 	icebergio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/metrics"
 	"github.com/apache/iceberg-go/table"
-	"github.com/apache/iceberg-go/utils"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
@@ -78,7 +78,7 @@ var (
 func init() {
 	catalog.MustRegister("dynamodb", catalog.IORegistryRegistrarFunc(func(ctx context.Context, name string, props iceberg.Properties, registry *icebergio.Registry) (catalog.Catalog, error) {
 		var cfg aws.Config
-		if supplied := utils.GetAWSConfig(ctx); supplied != nil {
+		if supplied := awsconfig.FromContext(ctx); supplied != nil {
 			cfg = supplied.Copy()
 		} else {
 			var err error
@@ -271,7 +271,7 @@ func properties(entry item) iceberg.Properties {
 
 func (c *Catalog) fileSystem(props iceberg.Properties, location string) table.FSysF {
 	return func(ctx context.Context) (icebergio.IO, error) {
-		return internal.LoadFSWithRegistry(utils.WithAWSConfig(ctx, &c.awsConfig), c.ioRegistry, props, location)
+		return internal.LoadFSWithRegistry(awsconfig.NewContext(ctx, &c.awsConfig), c.ioRegistry, props, location)
 	}
 }
 
