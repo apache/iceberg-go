@@ -586,7 +586,7 @@ if err := txn.ReplaceSortOrder(order); err != nil { /* ... */ }
 
 Replacing the default sort order affects future writes; it does not rewrite existing data files. To physically reorder existing data, run a separate sort compaction.
 
-The Go writers currently support only top-level sort columns. A nested-field order can be registered, as in Java, but a later append fails until the default order is replaced.
+Go writers sort each batch they write by the default sort order. Batches are sorted independently, so written files are not sorted as a whole and record no `sort_order_id`; run a sort compaction to sort and tag them. Sort columns may be nested in structs, where a null struct sorts as a null value. Floats sort as the spec orders them (`-NaN < -Inf < -0 < 0 < Inf < NaN`).
 
 ## Snapshots and refs
 
