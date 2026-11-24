@@ -20,6 +20,7 @@ package table
 import (
 	"context"
 	"errors"
+	"iter"
 	"maps"
 	"os"
 	"path/filepath"
@@ -631,6 +632,66 @@ func (s *RollingDataWriterTestSuite) TestStreamErrorRemovesWriterFromFactory() {
 	err, ok = <-writer.errorCh
 	s.True(ok)
 	s.Error(err)
+}
+
+// failingCloseFS fails Close on the first file it creates. Close reports that
+// it was entered, then blocks until release is closed, so a test can find the
+// writer while it is still in the factory.
+type failingCloseFS struct {
+	iceio.LocalFS
+
+	created atomic.Int64
+	closing chan struct{}
+	release chan struct{}
+}
+
+func newFailingCloseFS() *failingCloseFS {
+	return &failingCloseFS{closing: make(chan struct{}), release: make(chan struct{})}
+}
+
+func (f *failingCloseFS) Create(ctx context.Context, name string) (iceio.FileWriter, error) {
+	w, err := f.LocalFS.Create(ctx, name)
+	if err != nil || f.created.Add(1) != 1 {
+		return w, err
+	}
+
+	return &failingCloseWriter{FileWriter: w, fs: f}, nil
+}
+
+type failingCloseWriter struct {
+	iceio.FileWriter
+
+	fs *failingCloseFS
+}
+
+func (w *failingCloseWriter) Close() error {
+	_ = w.FileWriter.Close()
+	close(w.fs.closing)
+	<-w.fs.release
+
+	return errors.New("upload failed")
+}
+
+// batchThenWriterExit yields batch, then returns only after the writer whose
+// Close fails has left factory. stream removes the writer from the factory
+// before it calls wg.Done, so closeAll cannot find the writer in the factory.
+func (f *failingCloseFS) batchThenWriterExit(factory *writerFactory, batch arrow.RecordBatch) iter.Seq2[arrow.RecordBatch, error] {
+	return func(yield func(arrow.RecordBatch, error) bool) {
+		if !yield(batch, nil) {
+			close(f.release)
+
+			return
+		}
+		<-f.closing
+		var writer *RollingDataWriter
+		factory.writers.Range(func(_, v any) bool {
+			writer = v.(*RollingDataWriter)
+
+			return false
+		})
+		close(f.release)
+		writer.wg.Wait()
+	}
 }
 
 func (s *RollingDataWriterTestSuite) TestBytesWrittenReflectsCompressedSize() {

@@ -236,6 +236,12 @@ func TestV3MergeOnReadDoubleDeletePartitionedMergesDeletionVectors(t *testing.T)
 func newPartitionedMergeOnReadTestTable(t *testing.T) *table.Table {
 	t.Helper()
 
+	return newPartitionedMergeOnReadTestTableVersion(t, "3")
+}
+
+func newPartitionedMergeOnReadTestTableVersion(t *testing.T, formatVersion string) *table.Table {
+	t.Helper()
+
 	location := filepath.ToSlash(t.TempDir())
 	schema := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
@@ -249,7 +255,7 @@ func newPartitionedMergeOnReadTestTable(t *testing.T) *table.Table {
 	})
 	meta, err := table.NewMetadata(schema, &spec, table.UnsortedSortOrder, location,
 		iceberg.Properties{
-			table.PropertyFormatVersion: "3",
+			table.PropertyFormatVersion: formatVersion,
 			table.WriteDeleteModeKey:    table.WriteModeMergeOnRead,
 		})
 	require.NoError(t, err)
