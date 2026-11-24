@@ -103,6 +103,35 @@ func TestAddDataFilesByPath_ConcurrentDuplicateRejected(t *testing.T) {
 	}
 }
 
+// TestAddDataFilesByPath_ConcurrentDuplicateRejectedWithManifestMerge covers
+// the merge append producer. Writer A's commit merges the table's manifests
+// into a new manifest, so the retry must read it and reject the duplicate.
+func TestAddDataFilesByPath_ConcurrentDuplicateRejectedWithManifestMerge(t *testing.T) {
+	ctx := t.Context()
+	tbl, cat, imported := newAddFilesConflictTable(t, 2, "4")
+
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.SetProperties(iceberg.Properties{
+		table.ManifestMergeEnabledKey:  "true",
+		table.ManifestMinMergeCountKey: "2",
+	}))
+	tbl, err := tx.Commit(ctx)
+	require.NoError(t, err)
+
+	txB := tbl.NewTransaction()
+	require.NoError(t, txB.AddDataFilesByPath(ctx, []string{imported}, nil, false))
+
+	txA := tbl.NewTransaction()
+	require.NoError(t, txA.AddDataFilesByPath(ctx, []string{imported}, nil, false))
+	_, err = txA.Commit(ctx)
+	require.NoError(t, err)
+
+	_, err = txB.Commit(ctx)
+	require.ErrorIs(t, err, table.ErrDuplicateDataFiles)
+	require.ErrorIs(t, err, table.ErrTransactionUnusable)
+	require.Equal(t, []int64{0, 1, 2}, idsInTable(t, loadCurrent(t, cat)))
+}
+
 // TestAddDataFiles_ConcurrentDuplicateRejected is the AddDataFiles
 // counterpart of TestAddDataFilesByPath_ConcurrentDuplicateRejected.
 func TestAddDataFiles_ConcurrentDuplicateRejected(t *testing.T) {

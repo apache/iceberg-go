@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"runtime"
 	"slices"
 	"strconv"
@@ -1767,6 +1768,7 @@ func (t *Transaction) AddDataFiles(ctx context.Context, dataFiles []iceberg.Data
 		return err
 	}
 
+	var checkedManifests map[string]struct{}
 	if !cfg.skipDuplicateCheck {
 		if s := t.planningSnapshot(meta); s != nil {
 			referenced := make([]string, 0)
@@ -1783,12 +1785,16 @@ func (t *Transaction) AddDataFiles(ctx context.Context, dataFiles []iceberg.Data
 			if len(referenced) > 0 {
 				return fmt.Errorf("cannot add files that are already referenced by table, files: %v", referenced)
 			}
+			if checkedManifests, err = manifestPaths(ctx, fs, s); err != nil {
+				return err
+			}
 		}
 	}
 
 	appendFiles := t.appendSnapshotProducer(meta, wfs, snapshotProps)
 	if !cfg.skipDuplicateCheck {
-		appendFiles.duplicateCheckPaths = setToAdd
+		appendFiles.duplicateCheckPaths = maps.Clone(setToAdd)
+		appendFiles.checkedManifests = checkedManifests
 	}
 	for _, df := range dataFiles {
 		appendFiles.appendDataFile(df)
@@ -2474,6 +2480,7 @@ func (t *Transaction) AddDataFilesByPath(ctx context.Context, filePaths []string
 		return err
 	}
 
+	var checkedManifests map[string]struct{}
 	if !ignoreDuplicates {
 		if s := t.planningSnapshot(meta); s != nil {
 			referenced := make([]string, 0)
@@ -2488,6 +2495,9 @@ func (t *Transaction) AddDataFilesByPath(ctx context.Context, filePaths []string
 			}
 			if len(referenced) > 0 {
 				return fmt.Errorf("cannot add files that are already referenced by table, files: %v", referenced)
+			}
+			if checkedManifests, err = manifestPaths(ctx, fs, s); err != nil {
+				return err
 			}
 		}
 	}
@@ -2510,7 +2520,8 @@ func (t *Transaction) AddDataFilesByPath(ctx context.Context, filePaths []string
 	}
 	updater := t.appendSnapshotProducer(meta, wfs, snapshotProps)
 	if !ignoreDuplicates {
-		updater.duplicateCheckPaths = set
+		updater.duplicateCheckPaths = maps.Clone(set)
+		updater.checkedManifests = checkedManifests
 	}
 
 	dataFiles, err := filesToDataFiles(ctx, fs, meta, filePaths, addFilesOp.concurrency, partitionValues)

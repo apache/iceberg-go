@@ -821,6 +821,7 @@ type snapshotProducer struct {
 	deletedDeleteFiles      map[string]iceberg.DataFile
 	deletedDVsByRef         map[string]iceberg.DataFile
 	duplicateCheckPaths     map[string]struct{}
+	checkedManifests        map[string]struct{}
 	snapshotProps           iceberg.Properties
 	written                 writtenManifests
 }
@@ -1491,9 +1492,25 @@ func (p *removedFilePresence) counts(df iceberg.DataFile) bool {
 	return ok
 }
 
+// manifestPaths returns the paths of the manifests in snapshot s.
+func manifestPaths(ctx context.Context, fio iceio.IO, s *Snapshot) (map[string]struct{}, error) {
+	manifests, err := s.Manifests(ctx, fio)
+	if err != nil {
+		return nil, err
+	}
+	paths := make(map[string]struct{}, len(manifests))
+	for _, m := range manifests {
+		paths[m.FilePath()] = struct{}{}
+	}
+
+	return paths, nil
+}
+
 // checkDuplicatePaths fails if a data file live on parent has a path in
 // duplicateCheckPaths. The retry rebuild calls it so that a path another writer
-// committed after this producer planned is not added a second time.
+// committed after this producer planned is not added a second time. Manifests
+// in checkedManifests were read by the staging-time check, and manifest files
+// never change, so only manifests that concurrent commits added are read.
 func (sp *snapshotProducer) checkDuplicatePaths(ctx context.Context, parent *Snapshot) error {
 	if len(sp.duplicateCheckPaths) == 0 || parent == nil {
 		return nil
@@ -1505,6 +1522,9 @@ func (sp *snapshotProducer) checkDuplicatePaths(ctx context.Context, parent *Sna
 	}
 	for _, m := range manifests {
 		if m.ManifestContent() != iceberg.ManifestContentData {
+			continue
+		}
+		if _, ok := sp.checkedManifests[m.FilePath()]; ok {
 			continue
 		}
 		for entry, err := range sp.iterManifestEntries(ctx, m, true) {
@@ -1535,9 +1555,11 @@ func (sp *snapshotProducer) checkRemovedFiles(ctx context.Context, parent *Snaps
 		dvRefs:      map[string]struct{}{},
 	}
 
-	// Producers that remove nothing (fast/merge append) skip the parent scan
+	// Producers that remove nothing (fast/merge append) skip this scan
 	// entirely — otherwise every retry re-reads the full manifest list only to
-	// find there is nothing to check.
+	// find there is nothing to check. AddDataFiles and AddDataFilesByPath
+	// still read the manifests concurrent commits added; see
+	// checkDuplicatePaths.
 	if len(sp.deletedFiles) == 0 && len(sp.deletedDeleteFiles) == 0 && len(sp.deletedDVsByRef) == 0 {
 		return present, nil
 	}
