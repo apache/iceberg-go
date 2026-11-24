@@ -2982,3 +2982,71 @@ func TestAddFilesAfterAddColumnReadsNewColumnByName(t *testing.T) {
 	require.False(t, category.IsNull(0), "category was read as null")
 	assert.Equal(t, "books", category.Value(0))
 }
+
+// A decimal default added by AddColumn must survive the metadata JSON round
+// trip, so files written before the column existed still read the default
+// after the table is reloaded.
+func TestAddColumnDecimalDefaultSurvivesMetadataRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	dir := filepath.ToSlash(t.TempDir())
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true})
+	meta, err := NewMetadata(schema, iceberg.UnpartitionedSpec, UnsortedSortOrder, dir,
+		iceberg.Properties{PropertyFormatVersion: "3"})
+	require.NoError(t, err)
+	fsF := func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil }
+	tbl := New(Identifier{"default", "decimal_default"}, meta, dir+"/metadata/00000.json", fsF,
+		&countingCatalog{metadata: meta})
+
+	// A file written before the price column exists.
+	arrSchema := arrow.NewSchema([]arrow.Field{{Name: "id", Type: arrow.PrimitiveTypes.Int32}}, nil)
+	ids := array.NewInt32Builder(memory.DefaultAllocator)
+	defer ids.Release()
+	ids.AppendValues([]int32{1}, nil)
+	idArr := ids.NewArray()
+	defer idArr.Release()
+	rec := array.NewRecordBatch(arrSchema, []arrow.Array{idArr}, 1)
+	defer rec.Release()
+	arrTbl := array.NewTableFromRecords(arrSchema, []arrow.RecordBatch{rec})
+	defer arrTbl.Release()
+	path := dir + "/data/before.parquet"
+	fo, err := iceio.LocalFS{}.Create(ctx, path)
+	require.NoError(t, err)
+	require.NoError(t, pqarrow.WriteTable(arrTbl, fo, arrTbl.NumRows(), nil, pqarrow.DefaultWriterProps()))
+
+	txn := tbl.NewTransaction()
+	require.NoError(t, txn.AddDataFilesByPath(ctx, []string{path}, nil, false))
+	tbl, err = txn.Commit(ctx)
+	require.NoError(t, err)
+
+	decimalType := iceberg.MustDecimalTypeOf(9, 2)
+	price, err := iceberg.NewLiteral("14.20").To(decimalType)
+	require.NoError(t, err)
+	txn = tbl.NewTransaction()
+	require.NoError(t, txn.UpdateSchema(true, false).
+		AddColumn([]string{"price"}, decimalType, "", false, price).
+		Commit())
+	tbl, err = txn.Commit(ctx)
+	require.NoError(t, err)
+
+	// Reload the table from its metadata JSON, as a catalog would.
+	metaJSON, err := json.Marshal(tbl.Metadata())
+	require.NoError(t, err)
+	reloaded, err := ParseMetadataBytes(metaJSON)
+	require.NoError(t, err)
+	field, ok := reloaded.CurrentSchema().FindFieldByName("price")
+	require.True(t, ok)
+	assert.Equal(t, "14.20", field.InitialDefault)
+	assert.Equal(t, "14.20", field.WriteDefault)
+
+	tbl = New(Identifier{"default", "decimal_default"}, reloaded, dir+"/metadata/00002.json", fsF,
+		&countingCatalog{metadata: reloaded})
+	result, err := tbl.Scan().ToArrowTable(ctx)
+	require.NoError(t, err)
+	defer result.Release()
+
+	require.EqualValues(t, 1, result.NumRows())
+	prices := result.Column(result.Schema().FieldIndices("price")[0]).Data().Chunk(0).(*array.Decimal128)
+	require.False(t, prices.IsNull(0))
+	assert.Equal(t, "14.20", prices.Value(0).ToString(2))
+}

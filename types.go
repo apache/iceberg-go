@@ -372,6 +372,12 @@ func defaultValueToJSON(typ Type, value any) any {
 	if encoded, ok := hexDefault(typ, value); ok {
 		return encoded
 	}
+	// Decimal has no JSON encoding of its own, and its decimal128 value has no
+	// exported fields, so it would be written as {"Val":{},"Scale":2} and lose
+	// the value. Write the spec's single-value form, a string such as "14.20".
+	if d, ok := value.(Decimal); ok {
+		return d.String()
+	}
 
 	return value
 }
