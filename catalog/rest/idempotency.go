@@ -76,6 +76,7 @@ type keyedCall struct {
 	key      string
 	start    time.Time     // first attempt, or the caller key's creation if earlier
 	lifetime time.Duration // 0 when resends are not allowed
+	now      func() time.Time
 }
 
 func newKeyedCall(cfg *reqConfig) (*keyedCall, error) {
@@ -86,7 +87,7 @@ func newKeyedCall(cfg *reqConfig) (*keyedCall, error) {
 	if err != nil {
 		return nil, err
 	}
-	kc := &keyedCall{policy: cfg.idempotency, commit: cfg.commit, key: key, start: time.Now()}
+	kc := &keyedCall{policy: cfg.idempotency, commit: cfg.commit, key: key, start: time.Now(), now: time.Now}
 	if cfg.idempotency.lifetime != nil {
 		kc.lifetime, _ = parseKeyLifetime(*cfg.idempotency.lifetime)
 	}
@@ -94,7 +95,10 @@ func newKeyedCall(cfg *reqConfig) (*keyedCall, error) {
 		// A caller key's age counts against the window. The UUIDv7 timestamp may
 		// predate the caller's first send, which only shortens the window; a
 		// future timestamp is clamped so it never lengthens it.
-		id := uuid.MustParse(key)
+		id, err := uuid.Parse(key)
+		if err != nil {
+			return nil, err
+		}
 		ms := int64(id[0])<<40 | int64(id[1])<<32 | int64(id[2])<<24 | int64(id[3])<<16 | int64(id[4])<<8 | int64(id[5])
 		if created := time.UnixMilli(ms); created.Before(kc.start) {
 			kc.start = created
@@ -104,7 +108,7 @@ func newKeyedCall(cfg *reqConfig) (*keyedCall, error) {
 	return kc, nil
 }
 
-func (kc *keyedCall) open() bool { return time.Since(kc.start) < kc.lifetime }
+func (kc *keyedCall) open() bool { return kc.now().Sub(kc.start) < kc.lifetime }
 
 // prepare adds the key and stops net/http replaying the request on its own
 // (reused-connection failures, 307/308 redirects) once the window is closed.
@@ -155,7 +159,13 @@ func keyedRetryError(ctx context.Context, err error) bool {
 // error while the key lifetime allows it, and returns every other response as
 // is. It returns either a response to handle or the final error; a retryable
 // status that was not resent is returned as the error handleNon200 maps it to.
-func send(ctx context.Context, cl *http.Client, kc *keyedCall, cfg *reqConfig, override map[int]error, newReq func() (*http.Request, error)) (*http.Response, error) {
+func send(ctx context.Context, cl *http.Client, kc *keyedCall, cfg *reqConfig, override map[int]error, newReq func() (*http.Request, error)) (response *http.Response, finalErr error) {
+	resent := false
+	defer func() {
+		if resent && kc.commit && finalErr != nil && !errors.Is(finalErr, ErrCommitStateUnknown) {
+			finalErr = fmt.Errorf("%w: resend failed: %w", ErrCommitStateUnknown, finalErr)
+		}
+	}()
 	_, hasDeadline := ctx.Deadline()
 	delay := keyedMinDelay
 	for attempt := 0; ; attempt++ {
@@ -167,9 +177,15 @@ func send(ctx context.Context, cl *http.Client, kc *keyedCall, cfg *reqConfig, o
 			return cl.Do(req)
 		}
 		kc.prepare(req)
+		resent = attempt > 0
 		rsp, err := cl.Do(req)
 		var retryAfter time.Duration
 		switch {
+		case err == nil && resent && kc.commit && rsp.StatusCode >= 400 && !keyedRetryStatus(rsp.StatusCode):
+			err = handleNon200(rsp, override, cfg.errorTypeOverride)
+			_, _ = io.Copy(io.Discard, rsp.Body)
+			_ = rsp.Body.Close()
+			return nil, err
 		case err == nil && !keyedRetryStatus(rsp.StatusCode):
 			return rsp, nil
 		case err == nil:
@@ -183,7 +199,7 @@ func send(ctx context.Context, cl *http.Client, kc *keyedCall, cfg *reqConfig, o
 
 		delay = nextScanPlanBackoff(delay, keyedMinDelay, keyedMaxDelay)
 		wait := applyRetryAfter(delay, retryAfter, keyedMinDelay, keyedMaxDelay, hasDeadline)
-		if attempt >= keyedMaxRetries || kc.lifetime <= 0 || time.Since(kc.start)+wait >= kc.lifetime {
+		if attempt >= keyedMaxRetries || kc.lifetime <= 0 || kc.now().Sub(kc.start)+wait >= kc.lifetime {
 			if kc.commit && !errors.Is(err, ErrCommitStateUnknown) {
 				err = fmt.Errorf("%w: not resent within idempotency-key-lifetime: %w", ErrCommitStateUnknown, err)
 			}
@@ -197,6 +213,12 @@ func send(ctx context.Context, cl *http.Client, kc *keyedCall, cfg *reqConfig, o
 
 			return nil, ctx.Err()
 		case <-timer.C:
+			if kc.commit && !kc.open() {
+				if !errors.Is(err, ErrCommitStateUnknown) {
+					err = fmt.Errorf("%w: not resent within idempotency-key-lifetime: %w", ErrCommitStateUnknown, err)
+				}
+				return nil, err
+			}
 			if kc.policy.onRetry != nil {
 				kc.policy.onRetry()
 			}

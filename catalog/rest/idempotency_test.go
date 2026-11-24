@@ -27,6 +27,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -392,6 +393,62 @@ func TestKeyedSeparateCallsUseNewKeys(t *testing.T) {
 	require.Len(t, got, 2)
 	require.NotEmpty(t, got[0].key)
 	require.NotEqual(t, got[0].key, got[1].key)
+}
+
+func TestCommitResendConflictAfterExpiry(t *testing.T) {
+	var applied atomic.Int32
+	c, attempts := newKeyedTestCatalog(t, lifetimeConfig("PT1S"), func(n int, w http.ResponseWriter, _ *http.Request) {
+		if n == 1 {
+			applied.Add(1)
+			dropConnection(w)
+			return
+		}
+		w.WriteHeader(http.StatusConflict)
+		_, _ = io.WriteString(w, `{"error":{"message":"requirement failed","type":"CommitFailedException","code":409}}`)
+	})
+	transport := c.cl.Transport
+	sends := 0
+	c.cl.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		sends++
+		if sends == 2 {
+			time.Sleep(time.Second)
+		}
+		return transport.RoundTrip(r)
+	})
+	_, _, err := c.CommitTable(t.Context(), table.Identifier{"ns", "name"}, nil, nil)
+	require.ErrorIs(t, err, ErrCommitStateUnknown)
+	require.ErrorIs(t, err, ErrCommitFailed)
+	got := attempts()
+	require.Len(t, got, 2)
+	require.EqualValues(t, 1, applied.Load())
+	require.NotEmpty(t, got[0].key)
+	require.Equal(t, got[0], got[1])
+}
+
+func TestCommitResendTimerRechecksExpiry(t *testing.T) {
+	start := time.Now()
+	clockReads := 0
+	kc := &keyedCall{policy: &idempotencyPolicy{}, commit: true, key: "key", start: start, lifetime: time.Second,
+		now: func() time.Time {
+			clockReads++
+			if clockReads > 1 {
+				return start.Add(time.Second)
+			}
+			return start
+		},
+	}
+	attempts := 0
+	cl := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		attempts++
+		return nil, io.EOF
+	})}
+	_, err := send(t.Context(), cl, kc, &reqConfig{}, nil, func() (*http.Request, error) {
+		return http.NewRequestWithContext(t.Context(), http.MethodPost, "http://catalog.test", nil)
+	})
+	require.ErrorIs(t, err, ErrCommitStateUnknown)
+	require.ErrorIs(t, err, io.EOF)
+	require.Equal(t, 1, attempts)
+	require.Equal(t, 2, clockReads)
 }
 
 func TestKeyedNoResendOn4xx(t *testing.T) {
