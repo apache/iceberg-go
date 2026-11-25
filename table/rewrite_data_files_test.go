@@ -1019,11 +1019,13 @@ func (f *compactionManifestWriteGate) Create(ctx context.Context, name string) (
 
 func TestCompactionRejectsStaleRewriteAfterWritingManifests(t *testing.T) {
 	for _, tc := range []struct {
-		name        string
-		withDeletes bool
+		name             string
+		withDeletes      bool
+		changeProperties bool
 	}{
 		{name: "data files"},
 		{name: "data and delete files", withDeletes: true},
+		{name: "metadata change at the same head", changeProperties: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
@@ -1076,24 +1078,33 @@ func TestCompactionRejectsStaleRewriteAfterWritingManifests(t *testing.T) {
 			staleManifests := gate.snapshotCreated()
 			require.NotEmpty(t, staleManifests)
 
-			reader := rowsReader(t, tbl, `[{"id":3}]`)
-			appendDone := make(chan error, 1)
-			go func() {
-				defer reader.Release()
-				appendDone <- txn.Append(ctx, reader, nil)
-			}()
+			updateDone := make(chan error, 1)
+			wantErr := "transaction head changed"
+			if tc.changeProperties {
+				want = []int64{1, 2}
+				wantErr = "transaction metadata changed"
+				go func() {
+					updateDone <- txn.SetProperties(iceberg.Properties{"rewrite-test": "updated"})
+				}()
+			} else {
+				reader := rowsReader(t, tbl, `[{"id":3}]`)
+				go func() {
+					defer reader.Release()
+					updateDone <- txn.Append(ctx, reader, nil)
+				}()
+			}
 			select {
-			case err := <-appendDone:
+			case err := <-updateDone:
 				require.NoError(t, err)
 			case <-ctx.Done():
-				t.Fatal("append could not stage while the rewrite was writing its manifest list")
+				t.Fatal("transaction update could not stage while the rewrite was writing its manifest list")
 			}
 
 			resume()
 			select {
 			case err := <-rewriteDone:
 				require.ErrorIs(t, err, table.ErrCommitFailed)
-				require.ErrorContains(t, err, "transaction head changed")
+				require.ErrorContains(t, err, wantErr)
 			case <-ctx.Done():
 				t.Fatal(ctx.Err())
 			}
@@ -1104,6 +1115,10 @@ func TestCompactionRejectsStaleRewriteAfterWritingManifests(t *testing.T) {
 
 			committed, err := txn.Commit(ctx)
 			require.NoError(t, err)
+			if tc.changeProperties {
+				require.Equal(t, "updated", committed.Properties()["rewrite-test"])
+				require.Equal(t, tbl.CurrentSnapshot().SnapshotID, committed.CurrentSnapshot().SnapshotID)
+			}
 			require.ElementsMatch(t, want, scanIDs(t, committed))
 		})
 	}
@@ -1492,6 +1507,74 @@ func TestCompactionRetryLoadsFullHistoryFromRefsOnlyTable(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 1, catalog.fullLoads)
 	require.ElementsMatch(t, []int64{1, 2, 3, 4, 5, 6}, scanIDs(t, result.Table))
+}
+
+func TestCopyOnWriteDeleteRetryUsesCatalogSnapshotMode(t *testing.T) {
+	ctx := t.Context()
+	tbl, cat := newConcurrentRewriteTestTable(t)
+	tbl = appendRows(t, tbl, `[{"id":1},{"id":2}]`)
+	catalog := &compactionHistoryCatalog{concurrentTestCatalog: cat}
+	limited, err := catalog.LoadTable(ctx, tbl.Identifier())
+	require.NoError(t, err)
+	tx := limited.NewTransaction()
+	require.NoError(t, tx.Delete(ctx, iceberg.EqualTo(iceberg.Reference("id"), int64(1)), nil))
+	appendRows(t, tbl, `[{"id":3}]`)
+	attempts := cat.attempts.Load()
+
+	committed, err := tx.Commit(ctx)
+	require.NoError(t, err)
+	require.Equal(t, attempts+2, cat.attempts.Load())
+	require.Zero(t, catalog.fullLoads)
+	require.ElementsMatch(t, []int64{2, 3}, scanIDs(t, committed))
+}
+
+func TestCompactionRetriesFromNewMetadataRevision(t *testing.T) {
+	for _, mode := range []string{"atomic", "partial", "distributed"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx := t.Context()
+			planned, cat, groups, _ := newAbsorbedDeleteFixture(t, absorbedPositionDelete, 2)
+			cat.beforeCommit = nil
+			cat.advanceMetadataLocation = true
+			latest := appendRows(t, planned, `[{"id":5}]`)
+			latest = appendRows(t, latest, `[{"id":6}]`)
+
+			catalog := &compactionHistoryCatalog{concurrentTestCatalog: cat}
+			limited, err := catalog.LoadTable(ctx, planned.Identifier())
+			require.NoError(t, err)
+			require.Len(t, limited.Metadata().Snapshots(), 1)
+			tx := limited.NewTransaction()
+			peer := appendRows(t, latest, `[{"id":7}]`)
+			require.NotEqual(t, limited.MetadataLocation(), peer.MetadataLocation())
+			attempts := cat.attempts.Load()
+
+			var rewriteErr error
+			switch mode {
+			case "partial":
+				result, err := tx.RewriteDataFiles(ctx, groups[:1], table.RewriteDataFilesOptions{PartialProgress: true})
+				require.NoError(t, err)
+				require.Empty(t, result.CompletedGroups)
+				require.Len(t, result.FailedGroups, 1)
+				rewriteErr = result.FailedGroups[0].Err
+			case "distributed":
+				result, err := table.ExecuteCompactionGroup(ctx, limited, groups[0])
+				require.NoError(t, err)
+				rewriteErr = tx.NewRewrite(nil).ApplyResult(result).Commit(ctx)
+			default:
+				_, rewriteErr = tx.RewriteDataFiles(ctx, groups[:1], table.RewriteDataFilesOptions{})
+			}
+			require.ErrorIs(t, rewriteErr, table.ErrCommitFailed)
+			require.NotErrorIs(t, rewriteErr, table.ErrInvalidOperation)
+			require.ErrorContains(t, rewriteErr, "metadata revision")
+			require.Equal(t, 1, catalog.fullLoads)
+			require.Equal(t, attempts, cat.attempts.Load())
+
+			refreshed, err := catalog.LoadTable(ctx, planned.Identifier())
+			require.NoError(t, err)
+			result, err := refreshed.RewriteDataFiles(ctx, groups[:1], table.RewriteDataFilesOptions{})
+			require.NoError(t, err)
+			require.ElementsMatch(t, []int64{1, 2, 3, 4, 5, 6, 7}, scanIDs(t, result.Table))
+		})
+	}
 }
 
 func TestCompactionPlanningSnapshotOnTargetBranch(t *testing.T) {

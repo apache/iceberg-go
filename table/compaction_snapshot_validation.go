@@ -157,7 +157,7 @@ func (t *Transaction) validateRewriteFromSnapshot(ctx context.Context, meta *Met
 	}
 	cc, err := newConflictContextAt(ctx, current, t.branch, head, snapshotID, fs, true)
 	if errors.Is(err, ErrCommitDiverged) && t.tbl.snapshotHistoryRefsOnly && head != nil {
-		_, full, loadErr := loadStagedSnapshotHistory(ctx, t.tbl, meta, errSnapshotHistoryIncompleteForRewrite)
+		_, full, loadErr := loadStagedSnapshotHistory(ctx, t.tbl, meta, errSnapshotHistoryIncompleteForRewrite, ErrCommitFailed)
 		if loadErr != nil {
 			return loadErr
 		}
@@ -224,7 +224,7 @@ func (d *rewriteConflictsSincePlanning) advance(ctx context.Context, current *Ta
 	head := latestSnapshotForBranch(current.metadata, d.branch)
 	cc, err := newConflictContextAt(ctx, current.metadata, d.branch, head, d.checkedSnapshotID, fs, true)
 	if errors.Is(err, ErrCommitDiverged) && current.snapshotHistoryRefsOnly && head != nil {
-		full, loadErr := current.loadFullSnapshotHistory(ctx, errSnapshotHistoryIncompleteForRewrite)
+		full, loadErr := current.loadFullSnapshotHistory(ctx, errSnapshotHistoryIncompleteForRewrite, ErrCommitFailed)
 		if loadErr != nil {
 			return loadErr
 		}
@@ -302,6 +302,7 @@ func (t *Transaction) commitRewrite(ctx context.Context, base *MetadataBuilder, 
 	t.validators = append(t.validators, planning.validators...)
 	if validator != nil {
 		t.validators = append(t.validators, validator)
+		t.rewriteNeedsFullHistory = true
 	}
 	t.noReplay = t.noReplay || planning.noReplay
 

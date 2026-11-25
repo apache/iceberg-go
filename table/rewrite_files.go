@@ -364,10 +364,18 @@ func (r *RewriteFiles) Commit(ctx context.Context) error {
 	if r.validatedPlanHeadID != nil {
 		snapshotID = r.validatedPlanHeadID
 	} else if snapshotID == nil && r.workerSnapshots.missing {
-		if _, err := r.txn.txnMeta(); err != nil {
+		if err := r.txn.checkNotNil(); err != nil {
 			return err
 		}
-		snapshotID = r.txn.rewriteStartSnapshotID(nil)
+		r.txn.mx.Lock()
+		_, err := r.txn.txnMeta()
+		if err == nil {
+			snapshotID = r.txn.rewriteStartSnapshotID(nil)
+		}
+		r.txn.mx.Unlock()
+		if err != nil {
+			return err
+		}
 	}
 	opts := []WriteOption{withRewriteSemantics(), func(cfg *dataFileCfg) { cfg.rewriteFromSnapshotID = snapshotID }}
 	if r.dataSequenceNumber != nil {

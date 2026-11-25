@@ -88,6 +88,8 @@ type Transaction struct {
 	// validator (they are safe under any isolation).
 	validators []conflictValidatorFunc
 
+	rewriteNeedsFullHistory bool
+
 	// noReplay marks the commit as non-replayable: on a CAS conflict
 	// doCommit fails instead of refreshing and replaying. Set by
 	// snapshot producers whose staged snapshot carries delete-file removals;
@@ -471,14 +473,18 @@ func (t *Transaction) updateSnapshot(wfs io.WriteFileIO, props iceberg.Propertie
 }
 
 func (t *Transaction) SetProperties(props iceberg.Properties) error {
-	if _, err := t.txnMeta(); err != nil {
+	if err := t.checkNotNil(); err != nil {
 		return err
 	}
-	if len(props) > 0 {
-		return t.apply([]Update{NewSetPropertiesUpdate(props)}, nil)
+	t.mx.Lock()
+	defer t.mx.Unlock()
+	if len(props) == 0 {
+		_, err := t.txnMeta()
+
+		return err
 	}
 
-	return nil
+	return t.applyLocked([]Update{NewSetPropertiesUpdate(props)}, nil)
 }
 
 // AssertRefSnapshotID records a requirement that the given branch is
@@ -893,7 +899,7 @@ func (t *Transaction) ExpireSnapshotsWithContext(ctx context.Context, opts ...Ex
 	}
 	base := t.tbl
 	if base.snapshotHistoryRefsOnly {
-		base, meta, err = loadStagedSnapshotHistory(ctx, base, meta, errSnapshotHistoryIncompleteForExpiration)
+		base, meta, err = loadStagedSnapshotHistory(ctx, base, meta, errSnapshotHistoryIncompleteForExpiration, ErrInvalidOperation)
 		if err != nil {
 			return err
 		}
@@ -2813,6 +2819,7 @@ func (t *Transaction) Commit(ctx context.Context) (*Table, error) {
 		tbl, err := t.tbl.doCommit(ctx, meta.updates, reqs,
 			withCommitBranch(t.branch),
 			withCommitValidators(t.validators...),
+			withCommitRewriteFullHistory(t.rewriteNeedsFullHistory),
 			withCommitNoReplay(t.noReplay),
 			withCommitPinnedRefs(t.pinnedRefs),
 			withCommitResume(t.failedCommits),

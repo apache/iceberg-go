@@ -74,9 +74,9 @@ type RewriteResult struct {
 	// partial-progress mode.
 	CompletedGroups []CompactionGroupResult
 
-	// FailedGroups contains groups whose batch failed to commit, or was
-	// rejected because a delete for one of its files was committed after
-	// planning. A partial rewrite can return both completed and failed groups.
+	// FailedGroups contains groups whose batch failed with a commit conflict
+	// or was rejected during validation against the planning snapshot.
+	// A partial rewrite can return both completed and failed groups.
 	FailedGroups []CompactionGroupFailure
 }
 
@@ -474,38 +474,48 @@ func (binPackStrategy) writeOptions() []WriteRecordOption { return nil }
 // here. Distributed coordinators stage worker results via
 // [ExecuteCompactionGroup] and commit them via [Transaction.NewRewrite]
 // + [RewriteFiles.ApplyResult] + [RewriteFiles.Commit] instead.
+//
 // Plan all groups from the same snapshot. Tasks from [Scan.PlanFiles] carry
 // this ID so the rewrite can detect deletes committed before the transaction
 // began. If supplying tasks without an ID, plan from the transaction's table.
 func (t *Transaction) RewriteDataFiles(ctx context.Context, groups []CompactionTaskGroup, opts RewriteDataFilesOptions) (_ *RewriteResult, err error) {
-	meta, err := t.txnMeta()
-	if err != nil {
-		return nil, err
-	}
 	if opts.PartialProgress {
 		return t.rewriteDataFilesPartial(ctx, groups, opts)
 	}
 	if len(groups) == 0 {
+		if err := t.checkNotNil(); err != nil {
+			return nil, err
+		}
+		t.mx.Lock()
+		defer t.mx.Unlock()
+		if _, err := t.txnMeta(); err != nil {
+			return nil, err
+		}
+
 		return &RewriteResult{}, nil
 	}
 
+	_, planning, err := t.rewritePlanningTransaction()
+	if err != nil {
+		return nil, err
+	}
 	snapshotID, err := compactionPlanningSnapshotID(groups)
 	if err != nil {
 		return nil, err
 	}
-	snapshotID = t.rewriteStartSnapshotID(snapshotID)
-	checkedHead := t.planningSnapshot(meta)
+	snapshotID = planning.rewriteStartSnapshotID(snapshotID)
+	checkedHead := planning.planningSnapshot(planning.meta)
 	if snapshotID != nil {
 		files, err := compactionSourceFiles(groups)
 		if err != nil {
 			return nil, err
 		}
-		if err := t.validateRewriteFromSnapshot(ctx, meta, checkedHead, snapshotID, files); err != nil {
+		if err := planning.validateRewriteFromSnapshot(ctx, planning.meta, checkedHead, snapshotID, files); err != nil {
 			return nil, fmt.Errorf("validate compaction from planning snapshot: %w", err)
 		}
 	}
 
-	staged, err := t.StagedTable()
+	staged, err := planning.StagedTable()
 	if err != nil {
 		return nil, err
 	}
@@ -877,7 +887,7 @@ func (t *Transaction) rewriteDataFilesPartial(ctx context.Context, groups []Comp
 		// history before that point as well, including changes absorbed by an
 		// earlier batch's retry.
 		if err := sincePlanning.validate(ctx, current, fs, batchGroups); err != nil {
-			if !errors.Is(err, ErrConflictingDeleteFiles) && !errors.Is(err, errRewriteSourceRemoved) {
+			if !errors.Is(err, ErrCommitFailed) {
 				return result, fmt.Errorf("validate partial rewrite batch %d against its planning snapshot: %w", batchNum, err)
 			}
 

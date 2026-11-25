@@ -34,8 +34,8 @@ var errSnapshotHistoryIncompleteForExpiration = errors.New(
 // Load the same metadata revision with complete history, then rebuild the
 // staged state over that base. Keep the original Table and builder intact
 // until the expiration has been staged successfully.
-func loadStagedSnapshotHistory(ctx context.Context, base *Table, staged *MetadataBuilder, incomplete error) (*Table, *MetadataBuilder, error) {
-	full, err := base.loadFullSnapshotHistory(ctx, incomplete)
+func loadStagedSnapshotHistory(ctx context.Context, base *Table, staged *MetadataBuilder, incomplete, revisionChanged error) (*Table, *MetadataBuilder, error) {
+	full, err := base.loadFullSnapshotHistory(ctx, incomplete, revisionChanged)
 	if err != nil {
 		return nil, nil, err
 	}

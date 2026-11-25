@@ -182,7 +182,7 @@ type Table struct {
 
 // loadFullSnapshotHistory loads the transaction's existing metadata revision.
 // Loading a newer revision could change the parent of already staged work.
-func (base *Table) loadFullSnapshotHistory(ctx context.Context, incomplete error) (*Table, error) {
+func (base *Table) loadFullSnapshotHistory(ctx context.Context, incomplete, revisionChanged error) (*Table, error) {
 	loader, ok := base.cat.(FullSnapshotHistoryLoader)
 	if !ok {
 		return nil, fmt.Errorf("%w: %w", ErrInvalidOperation, incomplete)
@@ -197,9 +197,12 @@ func (base *Table) loadFullSnapshotHistory(ctx context.Context, incomplete error
 	if err := validateTableUUID(base.identifier, base.metadata.TableUUID(), full.metadata.TableUUID()); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrInvalidOperation, err)
 	}
-	if base.metadataLocation == "" || base.metadataLocation != full.metadataLocation {
+	if base.metadataLocation == "" || full.metadataLocation == "" {
+		return nil, fmt.Errorf("%w: missing metadata location for full snapshot history", ErrInvalidOperation)
+	}
+	if base.metadataLocation != full.metadataLocation {
 		return nil, fmt.Errorf("%w: could not load full snapshot history for the transaction's metadata revision; reload the table and start a new transaction",
-			ErrInvalidOperation)
+			revisionChanged)
 	}
 	loaded := base.withMetadata(full.metadata, base.metadataLocation)
 	loaded.snapshotHistoryRefsOnly = false
@@ -642,6 +645,8 @@ type commitOpts struct {
 	// against the freshly refreshed catalog state (refresh-and-replay).
 	validators []conflictValidatorFunc
 
+	rewriteNeedsFullHistory bool
+
 	// noReplay makes a CAS conflict terminal: doCommit returns the
 	// ErrCommitFailed error instead of entering refresh-and-replay.
 	// Set for commits carrying delete-file removals; see the flag site in
@@ -677,6 +682,10 @@ func withCommitBranch(branch string) commitOption {
 
 func withCommitValidators(vs ...conflictValidatorFunc) commitOption {
 	return func(o *commitOpts) { o.validators = append(o.validators, vs...) }
+}
+
+func withCommitRewriteFullHistory(needed bool) commitOption {
+	return func(o *commitOpts) { o.rewriteNeedsFullHistory = needed }
 }
 
 func withCommitNoReplay(noReplay bool) commitOption {
@@ -850,7 +859,7 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 			// just because a peer advanced the head with a
 			// non-conflicting commit.
 			load := t.cat.LoadTable
-			needsHistory := co.replay.hasExpirationRecords() || (t.snapshotHistoryRefsOnly && len(co.validators) > 0)
+			needsHistory := co.replay.hasExpirationRecords() || (t.snapshotHistoryRefsOnly && co.rewriteNeedsFullHistory)
 			if loader, ok := t.cat.(FullSnapshotHistoryLoader); ok && needsHistory {
 				load = loader.LoadTableWithFullSnapshotHistory
 			}
