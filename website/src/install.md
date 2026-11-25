@@ -19,27 +19,24 @@
 
 # Install
 
-In this quickstart, we’ll glean insights from code segments and learn how to:
+## Go library
 
-## Requirements
+Use Go 1.26.3 or later to build from `main`. For a tagged release, see the
+Go requirement in that tag's `go.mod`.
 
-<div class="warning">
-Go 1.26 or later is required to build.
-</div>
-
-## Installation
-
-To install `iceberg-go` package, you need to install Go and set your Go workspace first.
-If you don't have a go.mod file, create it with `go mod init gin`.
-
-1. Download and install it:
+From your Go module, install the latest release:
 
 ```sh
-go get -u github.com/apache/iceberg-go
+go get github.com/apache/iceberg-go@latest
 ```
 
-2. Import it in your code:
+Start with the [Getting Started](./getting-started.md) walkthrough or see
+[Releases](./releases.md#using-a-release) for version selection.
 
-```go
-import "github.com/apache/iceberg-go"
+## CLI
+
+```sh
+go install github.com/apache/iceberg-go/cmd/iceberg@latest
 ```
+
+See the [CLI guide](./cli.md) for command examples and source builds.

@@ -19,10 +19,23 @@
 
 # CLI
 
-Run `go build ./cmd/iceberg` from the root of this repository to build the CLI executable, alternately you can run `go install github.com/apache/iceberg-go/cmd/iceberg` to install it to the `bin` directory of your `GOPATH`.
+Install the latest released CLI:
 
-The `iceberg` CLI usage is very similar to [pyiceberg CLI](https://py.iceberg.apache.org/cli/). \
-You can pass the catalog URI with the `--uri` argument.
+```sh
+go install github.com/apache/iceberg-go/cmd/iceberg@latest
+```
+
+This page follows `main`. To run the examples against that branch, use:
+
+```sh
+go install github.com/apache/iceberg-go/cmd/iceberg@main
+iceberg --version
+```
+
+Go installs the binary in `GOBIN` or, by default, in `$(go env GOPATH)/bin`.
+Add that directory to `PATH` to use the examples below. From a source
+checkout, `go build ./cmd/iceberg` builds a local binary. For v0.7.0, see
+[the CLI guide at that tag](https://github.com/apache/iceberg-go/blob/v0.7.0/website/src/cli.md).
 
 ## Connecting to a catalog
 
@@ -33,7 +46,7 @@ docker run -p 8181:8181 apache/iceberg-rest-fixture:latest
 ```
 and run the `iceberg` CLI pointing to the REST API server:
 ```
- ./iceberg --uri http://0.0.0.0:8181 list
+iceberg --uri http://localhost:8181 list
 ┌─────┐
 | IDs |
 | --- |
@@ -88,12 +101,12 @@ All commands accept `--output text` (default, human-readable) or `--output json`
 
 **Create namespace**
 ```
-./iceberg --uri http://0.0.0.0:8181 create namespace taxitrips
+iceberg --uri http://localhost:8181 create namespace taxitrips
 ```
 
 **List namespaces**
 ```
- ./iceberg --uri http://0.0.0.0:8181 list
+iceberg --uri http://localhost:8181 list
 ┌───────────┐
 | IDs       |
 | --------- |
@@ -106,7 +119,7 @@ All commands accept `--output text` (default, human-readable) or `--output json`
 Note: only the identity transform is supported for `--partition-spec` at this moment.
 ```shell
 # Create a simple table with REST catalog and object store
-./iceberg create table default.table-1 \
+iceberg create table default.table-1 \
         --properties write.format.default=parquet \
         --partition-spec foo \
         --sort-order foo:desc:nulls-last \
@@ -116,7 +129,7 @@ Note: only the identity transform is supported for `--partition-spec` at this mo
 Table default.table-1 created successfully
 
 # Describe the newly created table
-./iceberg describe --catalog rest --uri http://localhost:8181 default.table-1
+iceberg describe --catalog rest --uri http://localhost:8181 default.table-1
 Table format version │ 2
 Metadata location    │ s3://warehouse/default/table-1/metadata/00000-f0ccaadd-d988-482e-99da-3a37870288fe.metadata.json
 Table UUID           │ 33fa3fac-e638-4335-a085-343c6d9e7de5
@@ -142,6 +155,11 @@ key                             │ value
 write.format.default            │ parquet
 write.parquet.compression-codec │ zstd
 ```
+
+Drop a table or namespace with `iceberg drop table` or
+`iceberg drop namespace`. Use `iceberg rename` to rename a table and
+`iceberg properties get|set|remove` to work with table or namespace
+properties. Each command accepts `--help`.
 
 ## Inspecting tables
 
@@ -235,6 +253,41 @@ Remove data files in the table location that are not referenced by any snapshot'
 iceberg clean-orphan-files --dry-run my_db.events
 iceberg clean-orphan-files --older-than 5d my_db.events
 iceberg clean-orphan-files --location s3://old-warehouse/my_db/events my_db.events
+```
+
+## File maintenance
+
+### Data-file compaction
+
+Preview the groups that compaction would rewrite with `compact analyze`.
+Use `compact run` to write replacements. By default it bin-packs each group.
+Both commands accept `--target-file-size` for output files.
+
+```sh
+iceberg compact analyze --target-file-size 268435456 my_db.events
+iceberg compact run --target-file-size 268435456 my_db.events
+```
+
+The next example uses flags added after v0.7.0. Install the
+[`@main` build](#cli) to try it. `--max-group-size` caps input bytes per group
+for either command. `compact run --sort` sorts each group by the table's
+default sort order.
+
+```sh
+iceberg compact run --sort --max-group-size 536870912 my_db.events
+```
+
+See [compaction](./api.md#compaction-rewrite-data-files) for sort strategy
+tradeoffs and `iceberg compact run --help` for additional options.
+
+### Manifest rewrites
+
+`rewrite-manifests` reorganizes the table's manifests. Use `--spec-id`
+to select a partition spec and `--target-manifest-size` to override the
+table's target size in bytes.
+
+```sh
+iceberg rewrite-manifests --spec-id 0 my_db.events
 ```
 
 ## Rollback
@@ -333,6 +386,13 @@ iceberg tag create \
   --snapshot-id 7234981023498 \
   --max-ref-age 90d \
   my_db.events monthly-backup-may
+```
+
+### Delete a branch or tag
+
+```sh
+iceberg branch delete my_db.events audit-2026-q2
+iceberg tag delete my_db.events monthly-backup-may
 ```
 
 ## Automation

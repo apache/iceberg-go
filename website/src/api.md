@@ -19,7 +19,7 @@
 
 # API
 
-The Go API surface for Apache Iceberg Go. New to the project? Walk through the [Getting Started](./getting-started.md) tutorial first - the recipes here assume you already have a catalog and a table.
+This reference follows the development branch of Apache Iceberg Go. New to the project? Walk through the [Getting Started](./getting-started.md) tutorial first - the recipes here assume you already have a catalog and a table.
 
 For configuration knobs (catalog options, FileIO credentials, table properties), see [Configuration](./configuration.md). For predicate construction details, see [Row Filter Syntax](./row-filter-syntax.md) and [Expression DSL](./expression-dsl.md).
 
@@ -40,12 +40,15 @@ import (
 
 cat, err := rest.NewCatalog(context.Background(), "rest", "http://localhost:8181",
     rest.WithOAuthToken("your-token"))
+if err != nil { panic(err) }
+defer cat.Close()
 ```
 
 #### SQL (SQLite, Postgres, MySQL, Oracle, MSSQL)
 
 ```go
 import (
+    "context"
     "database/sql"
 
     "github.com/apache/iceberg-go"
@@ -54,29 +57,38 @@ import (
 )
 
 db, err := sql.Open(sqliteshim.ShimName, "file:catalog.db")
-// handle err
+if err != nil { panic(err) }
+defer db.Close()
 cat, err := sqlcat.NewCatalog(context.Background(), "default", db, sqlcat.SQLite, iceberg.Properties{
     "warehouse": "file:///tmp/warehouse",
 })
+if err != nil { panic(err) }
+defer cat.Close()
 ```
 
 #### Glue
 
 ```go
 import (
+    "context"
+
     "github.com/apache/iceberg-go/catalog/glue"
     "github.com/aws/aws-sdk-go-v2/config"
 )
 
 awsCfg, err := config.LoadDefaultConfig(context.TODO())
-// handle err
-cat := glue.NewCatalog(glue.WithAWSConfig(awsCfg))
+if err != nil { panic(err) }
+cat, err := glue.NewCatalog(glue.WithAWSConfig(awsCfg))
+if err != nil { panic(err) }
+defer cat.Close()
 ```
 
 #### Hive
 
 ```go
 import (
+    "context"
+
     "github.com/apache/iceberg-go"
     "github.com/apache/iceberg-go/catalog/hive"
 )
@@ -84,18 +96,23 @@ import (
 cat, err := hive.NewCatalog(context.Background(), iceberg.Properties{},
     hive.WithURI("thrift://localhost:9083"),
     hive.WithWarehouse("s3://my-bucket/warehouse"))
+if err != nil { panic(err) }
+defer cat.Close()
 ```
 
 #### Hadoop
 
 ```go
 import (
+    "context"
+
     "github.com/apache/iceberg-go"
     "github.com/apache/iceberg-go/catalog/hadoop"
-    "context"
 )
 
 cat, err := hadoop.NewCatalog(context.Background(), "default", "file:///tmp/warehouse", iceberg.Properties{})
+if err != nil { panic(err) }
+defer cat.Close()
 ```
 
 #### Via the registry
@@ -106,6 +123,7 @@ cat, err := hadoop.NewCatalog(context.Background(), "default", "file:///tmp/ware
 import (
     "github.com/apache/iceberg-go"
     "github.com/apache/iceberg-go/catalog"
+    _ "github.com/apache/iceberg-go/catalog/rest"
 )
 
 cat, err := catalog.Load(ctx, "default", iceberg.Properties{
@@ -138,6 +156,9 @@ err = cat.DropNamespace(ctx, ns)
 ```
 
 `table.Identifier` is `[]string`; use `catalog.ToIdentifier("sales", "orders")` (or `catalog.ToIdentifier("sales.orders")`) to build one from string parts.
+
+Use `errors.Is(err, catalog.ErrNamespaceAlreadyExists)` to recognize an
+existing namespace when retrying creation.
 
 ### Tables
 
@@ -661,7 +682,10 @@ and [manifest specification](https://iceberg.apache.org/spec/#manifests).
 
 ### Branches and tags
 
-The CLI's `branch create` and `tag create` commands ([CLI](./cli.md)) are the most ergonomic surface today. Programmatically, ref creation goes through `Catalog.CommitTable` with a `SetSnapshotRef` update:
+To create a branch or tag at an existing snapshot, use `branch create` or
+`tag create` in the [CLI](./cli.md). In Go, call `Catalog.CommitTable` with
+`table.NewSetSnapshotRefUpdate` to choose the starting snapshot and any retention
+settings. This example uses the table's current snapshot:
 
 ```go
 import "github.com/apache/iceberg-go/table"
@@ -683,7 +707,20 @@ reqs := []table.Requirement{
 _, _, err := cat.CommitTable(ctx, tbl.Identifier(), reqs, []table.Update{update})
 ```
 
-Constants `table.MainBranch`, `table.BranchRef`, `table.TagRef` live in [`table/refs.go`](https://github.com/apache/iceberg-go/blob/main/table/refs.go). A higher-level builder is on the roadmap.
+To create a branch with its first append, target it with
+`tbl.NewTransactionOnBranch`. The append starts from `main` if the branch is
+missing and creates the branch on commit. An append to an existing branch
+builds on that branch's head:
+
+```go
+txn, err := tbl.NewTransactionOnBranch("audit")
+if err != nil { /* ... */ }
+if err := txn.AppendTable(ctx, arrowTbl, 1024, nil); err != nil { /* ... */ }
+updated, err := txn.Commit(ctx)
+```
+
+See [reading from a branch or tag](#reading-from-a-branch-or-tag) to scan
+the updated ref.
 
 ### Branch promotion and replacement
 
