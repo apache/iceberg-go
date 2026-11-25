@@ -191,6 +191,18 @@ renamed, err := cat.RenameTable(ctx,
 
 `ListTables` returns an `iter.Seq2[table.Identifier, error]` that streams results.
 
+Use `catalog.As[catalog.RegisterableCatalog](cat)` to discover table
+registration support. `RegisterTable(ctx, ident, metadataLocation)`
+registers a table from an existing metadata file and returns the table.
+
+For a REST table with catalog-vended storage credentials, discover
+`catalog.RefreshableCredentialCatalog` with `catalog.As`. If the server
+supports the credentials endpoint, `RefreshTableCredentials(ctx, tbl)`
+returns the table to use for subsequent operations. When building a table
+yourself with `table.New`, pass `table.WithSavedConfig` so its file I/O
+properties are available to the refresh. REST-loaded tables and views also
+expose catalog-provided labels through `Labels()`.
+
 #### Inspecting metadata
 
 ```go
@@ -223,6 +235,10 @@ for mf, err := range tbl.AllManifests(ctx) {
 ## Reading data
 
 `(t Table) Scan(opts ...ScanOption) *Scan` returns a scan that you can resolve into Arrow data.
+
+Parquet and Avro data files are readable. Avro scan tasks must cover the
+whole file. The reader decodes the file before projecting columns, and
+supports nullable unions with `null` and one value type.
 
 ### Streaming record batches
 
@@ -444,6 +460,11 @@ if err != nil { /* ... */ }
 newTbl, err := txn.Commit(ctx)
 ```
 
+For bucket-partitioned Parquet files, provide each file's partition tuple
+with `WithAddDataFilesByPathPartitionValues`. Key the values by file path
+and partition field ID. Supply every non-void partition field, and make
+sure the values describe every row in the file.
+
 `ReplaceDataFilesByPath(ctx, filesToDelete, filesToAdd, snapshotProps)` performs an
 **overwrite** of existing files. It is suitable when the logical table data
 changes. `ReplaceDataFiles(ctx, filesToDelete, dataFilesToAdd, snapshotProps, opts...)`
@@ -525,6 +546,12 @@ other conflicts can be retried under the normal commit retry policy.
 
 `Commit` retries a conflict (`ErrCommitFailed`) up to `commit.retry.num-retries` times, 4 by default. See [Automatic retry](./concurrent-writes.md#automatic-retry) for the `commit.retry.*` table properties.
 
+`txn.SetLocation(location)` stages a new table base location in the same
+storage scheme and authority, including the bucket or container where
+applicable. Existing files keep their paths. New writes use the staged base
+and honor explicit write-path properties. Commit the transaction to publish
+the change.
+
 ## Schema and partition evolution
 
 ### Schema evolution
@@ -587,6 +614,9 @@ if err := txn.ReplaceSortOrder(order); err != nil { /* ... */ }
 Replacing the default sort order affects future writes; it does not rewrite existing data files. To physically reorder existing data, run a separate sort compaction.
 
 The Go writers currently support only top-level sort columns. A nested-field order can be registered, as in Java, but a later append fails until the default order is replaced.
+
+Use `SortOrder.Satisfies(required)` to compare sort metadata using Iceberg's
+transform ordering rules.
 
 ## Snapshots and refs
 
@@ -693,6 +723,10 @@ fast-forwards to fail. Load with `snapshot-loading-mode=all` instead.
 Replacing by snapshot ID can also fail if the requested historical snapshot
 was omitted. See [Concurrent Writes](./concurrent-writes.md).
 
+`tbl.RenameBranch(ctx, from, to)` renames a non-main branch to an unused
+name and preserves its snapshot and retention settings. Use
+`txn.RenameBranch(from, to)` to stage the rename alongside other updates.
+
 ### Expiration and rollback
 
 ```go
@@ -702,6 +736,9 @@ err := txn.ExpireSnapshots(/* options */)
 // Roll back to a previous snapshot
 err = txn.RollbackToSnapshot(targetSnapshotID)
 ```
+
+`txn.RollbackToTime(timestampMs)` selects the latest reachable ancestor
+strictly before the given Unix timestamp in milliseconds.
 
 Tune retention with the `history.expire.min-snapshots-to-keep`, `history.expire.max-snapshot-age-ms`, and `history.expire.max-ref-age-ms` table properties (see [Configuration](./configuration.md)).
 
@@ -777,6 +814,42 @@ The table must have a snapshot and at least one partition field in its spec
 history. Dropped partition source fields and changed transform result types are
 not supported. A concurrent change to the target branch, current schema, or
 partition layout rejects the commit. Statistics do not create a new snapshot.
+
+### Puffin statistics
+
+`puffin.Writer.AddBlob` accepts `BlobMetadataInput.CompressionCodec` with
+`CompressionCodecLZ4` or `CompressionCodecZstd`. `puffin.Reader.ReadBlob`
+decodes the stored codec. Write deletion-vector blobs with an empty codec.
+
+`tbl.ComputeNDVs(ctx, snapshotID, columns...)` scans the selected snapshot and
+returns estimated distinct counts and serialized Theta sketches keyed by
+Iceberg field ID. Pass `0` for the current snapshot. Omit the column names to
+analyze all supported top-level primitive columns in the snapshot schema.
+Geometry, geography, and unknown types are skipped by default. Explicit column
+names must refer to supported top-level primitive columns. The estimates
+exclude null values and empty strings and binary values.
+
+Use `table/stats.NewSketch` to build a sketch directly from serialized Iceberg
+single values, and `NewUnion` to merge compatible sketches. The serialized
+sketch is the payload for an `apache-datasketches-theta-v1` Puffin blob.
+
+After writing a Puffin statistics file, pass its snapshot ID, path, sizes,
+and blob metadata to `txn.SetStatistics`. Commit to publish the reference.
+`txn.RemoveStatistics(snapshotID)` stages removal of the reference.
+
+### Delete-file maintenance
+
+- `RewritePositionDeleteFiles` compacts compatible v2 Parquet position-delete
+  files from the current partition spec that have no deleted-row payload.
+- `ConvertEqualityDeletesToDeletionVectors` rewrites live equality deletes
+  on a v3 table as file-specific deletion vectors.
+- `PlanDanglingDeleteFiles` identifies whole delete files that apply to no
+  data file in the target snapshot. `RemoveDanglingDeleteFiles` removes their
+  references on v2 and v3. The physical files remain available to older
+  snapshots that reference them.
+
+The table-level methods operate on `main`. Use the transaction variants to
+target another branch or combine changes, then commit the transaction.
 
 ### Orphan file cleanup
 
@@ -915,6 +988,10 @@ pass a filesystem factory from the registry. The IO-properties helpers
 keep filesystem configuration (`ioProps`) separate from persisted view
 properties (`metadataProps`). See
 [FileIO configuration](./configuration.md#file-system-credentials).
+
+Discover view updates with `catalog.As[catalog.UpdatableViewCatalog](cat)`.
+`catalog.RollbackView(ctx, cat, ident, versionID)` selects a retained version
+on a catalog that supports both loading and updating views.
 
 ## Iceberg ↔ Arrow types
 

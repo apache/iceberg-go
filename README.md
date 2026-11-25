@@ -247,34 +247,48 @@ local scans.
 
 ### Catalog Support
 
-| Operation                   | REST | Hive |  Glue  | SQL  | Hadoop |
-|:----------------------------|:----:|:----:|:------:|:----:|:------:|
-| Load Table                  |  X   |  X   |   X    |  X   |   X    |
-| List Tables                 |  X   |  X   |   X    |  X   |   X    |
-| Create Table                |  X   |  X   |   X    |  X   |   X    |
-| Register Table              |  X   |  X   |   X    |      |        |
-| Update Current Snapshot     |  X   |  X   |   X    |  X   |   X    |
-| Create New Snapshot         |  X   |  X   |   X    |  X   |   X    |
-| Rename Table                |  X   |  X   |   X    |  X   |        |
-| Drop Table                  |  X   |  X   |   X    |  X   |   X    |
-| Alter Table                 |  X   |  X   |   X    |  X   |   X    |
-| Check Table Exists          |  X   |  X   |   X    |  X   |   X    |
-| Set Table Properties        |  X   |  X   |   X    |  X   |   X    |
-| List Namespaces             |  X   |  X   |   X    |  X   |   X    |
-| Create Namespace            |  X   |  X   |   X    |  X   |   X    |
-| Check Namespace Exists      |  X   |  X   |   X    |  X   |   X    |
-| Drop Namespace              |  X   |  X   |   X    |  X   |   X    |
-| Update Namespace Properties |  X   |  X   |   X    |  X   |        |
-| Create View                 |  X   |  X   |        |  X   |        |
-| Load View                   |  X   |  X   |        |  X   |        |
-| List View                   |  X   |  X   |        |  X   |        |
-| Drop View                   |  X   |  X   |        |  X   |        |
-| Rename View                 |  X   |      |        |      |        |
-| Check View Exists           |  X   |  X   |        |  X   |        |
+| Operation                   | REST | Hive |  Glue  | SQL  | Hadoop | DynamoDB |
+|:----------------------------|:----:|:----:|:------:|:----:|:------:|:--------:|
+| Load Table                  |  X   |  X   |   X    |  X   |   X    |    X     |
+| List Tables                 |  X   |  X   |   X    |  X   |   X    |    X     |
+| Create Table                |  X   |  X   |   X    |  X   |   X    |    X     |
+| Register Table              |  X   |  X   |   X    |      |        |    X     |
+| Update Current Snapshot     |  X   |  X   |   X    |  X   |   X    |    X     |
+| Create New Snapshot         |  X   |  X   |   X    |  X   |   X    |    X     |
+| Rename Table                |  X   |  X   |   X    |  X   |        |    X     |
+| Drop Table                  |  X   |  X   |   X    |  X   |   X    |    X     |
+| Alter Table                 |  X   |  X   |   X    |  X   |   X    |    X     |
+| Check Table Exists          |  X   |  X   |   X    |  X   |   X    |    X     |
+| Set Table Properties        |  X   |  X   |   X    |  X   |   X    |    X     |
+| List Namespaces             |  X   |  X   |   X    |  X   |   X    |    X     |
+| Create Namespace            |  X   |  X   |   X    |  X   |   X    |    X     |
+| Check Namespace Exists      |  X   |  X   |   X    |  X   |   X    |    X     |
+| Drop Namespace              |  X   |  X   |   X    |  X   |   X    |    X     |
+| Update Namespace Properties |  X   |  X   |   X    |  X   |        |    X     |
+| Create View                 |  X   |  X   |        |  X   |        |          |
+| Load View                   |  X   |  X   |        |  X   |        |          |
+| List View                   |  X   |  X   |        |  X   |        |          |
+| Drop View                   |  X   |  X   |        |  X   |        |          |
+| Rename View                 |  X   |      |        |  X   |        |          |
+| Update View                 |  X   |  X   |        |  X   |        |          |
+| Check View Exists           |  X   |  X   |        |  X   |        |          |
+
+REST operations depend on the server's available endpoints. SQL view operations
+require the V1 JDBC catalog schema. See the
+[configuration guide](https://go.iceberg.apache.org/configuration.html#dynamodb-catalogdynamodb)
+for DynamoDB setup.
 
 ### Read/Write Data Support
 
 * Data can currently be read as an Arrow Table or as a stream of Arrow record batches.
+
+| Data file format | Reads | Writes |
+|:-----------------|:-----:|:------:|
+| Parquet          | X     | X      |
+| Avro             | X     |        |
+
+Avro reads whole files, with projection after decoding. Nullable unions
+contain `null` and one value type.
 
 #### Supported Write Operations
 
