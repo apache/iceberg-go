@@ -24,8 +24,9 @@ import (
 	"github.com/apache/iceberg-go/internal"
 )
 
+// packEndBenchmarkItem is a 64-byte item; the blank field only sets its size.
 type packEndBenchmarkItem struct {
-	values [8]int64
+	_ [8]int64
 }
 
 var (

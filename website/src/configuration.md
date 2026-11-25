@@ -129,6 +129,21 @@ and without one it is sent once and never resent.
 > until the `catalog/rest/sigv4` backend is blank-imported; the error names the
 > import to add.
 
+#### Conditional table loads
+
+When a load returns an `ETag`, the REST catalog caches the response and sends
+`If-None-Match` on subsequent loads of the same table in the same snapshot
+loading mode. On a 304 response, it builds the table from the cached response.
+The expiry interval starts when the response is cached.
+
+| Property | Default | Meaning |
+| --- | --- | --- |
+| `rest-table-cache.max-entries` | 100 | Maximum cached table responses. Use 0 to disable the cache. |
+| `rest-table-cache.expire-after-write-ms` | 300000 | Time a cached response can be reused, in milliseconds. |
+
+The default `User-Agent` has the form `iceberg-go/<version> (go <version>)`.
+Set `User-Agent` with `WithHeaders` to override it.
+
 #### Authentication type
 
 The `rest.auth.type` property selects how the client authenticates, as in Iceberg
@@ -272,6 +287,10 @@ Source: [`catalog/glue/options.go`](https://github.com/apache/iceberg-go/blob/ma
 - `WithAWSProperties(props AWSProperties)` - catalog properties, such as `glue.id` and the `s3.*` FileIO keys. `NewCatalog` ignores the `glue.region`, endpoint, credential, and retry keys; only `catalog.Load` reads them.
 - `WithIORegistry(registry *io.Registry)` - use a catalog-scoped FileIO registry.
 
+For AWS Glue databases federated to Amazon S3 Tables, the service assigns the
+table location at creation. Omit the explicit location when creating these
+tables. The Glue catalog rejects rename requests for S3 Tables-managed tables.
+
 ### SQL (`catalog/sql`)
 
 Pass `sqlcat.WithIORegistry(registry)` to `NewCatalog` to select isolated FileIO:
@@ -285,6 +304,28 @@ cat, err := sqlcat.NewCatalog(ctx, "default", db, sqlcat.SQLite, iceberg.Propert
 ```
 
 Supported dialects: `sqlcat.Postgres`, `sqlcat.MySQL`, `sqlcat.SQLite`, `sqlcat.MSSQL`, `sqlcat.Oracle` (`catalog/sql/sql.go:50`).
+
+SQL view operations require the V1 JDBC catalog schema. To migrate a legacy V0
+catalog, set `jdbc.schema-version=V1`. This one-way migration adds the
+`iceberg_type` column to the shared catalog table. Setting the property back
+to V0 does not reverse the migration.
+
+### DynamoDB (`catalog/dynamodb`)
+
+Blank-import `github.com/apache/iceberg-go/catalog/dynamodb` to register the
+backend, then use `type=dynamodb` with `catalog.Load`. The loader uses the AWS
+SDK default credential chain.
+
+| Property | Meaning |
+| --- | --- |
+| `warehouse` | Required default table storage location. |
+| `dynamodb.table-name` | Backing DynamoDB table, default `iceberg`. |
+| `dynamodb.endpoint` | Optional endpoint, including DynamoDB Local. |
+| `client.region` | AWS region override. |
+
+Use separate backing tables for separate logical catalogs. See the
+[DynamoDB catalog guide](https://github.com/apache/iceberg-go/blob/main/catalog/dynamodb/README.md)
+for namespace rules and coordination with other Iceberg clients.
 
 ### Shared options on the base `catalog` package
 
@@ -419,6 +460,19 @@ Tuning properties:
 | `adls.protocol` (`io.ADLSProtocol`) | `http` or `https`. |
 | `adls.auth.managed-identity.enabled` (`io.ADLSManagedIdentityEnabled`) | Set to exactly `"true"` to use `ManagedIdentityCredential` directly, subject to the precedence above. |
 
+## File encryption and key management
+
+`encryption.StandardEncryptionManager` exposes an explicit API for
+Iceberg-compatible AES-GCM file encryption. Callers handle encryption and
+decryption separately from table scans and writes. The key metadata returned
+by the manager contains the raw data key. Persist it only in a protected
+location, such as encrypted parent metadata.
+
+To use AWS KMS for key wrapping, blank-import
+`github.com/apache/iceberg-go/encryption/awskms` and pass `kms-type=aws` to
+`encryption.LoadKeyManagementClient(ctx, props)`. The provider uses the AWS
+SDK credential chain and accepts `client.region` and `kms.endpoint`.
+
 ## Environment variables
 
 iceberg-go reads only a small set of environment variables directly. AWS / GCP / Azure credentials flow through the respective SDKs, not through iceberg-go-defined env vars.
@@ -522,7 +576,7 @@ func init() {
 }
 ```
 
-After registration, `catalog.Load(ctx, "default", iceberg.Properties{"type": "mycatalog", ...})` will route to the factory. Custom catalogs must implement `Close() error` to satisfy `catalog.Catalog`, and callers must close them when finished. Built-in types: `rest`, `hive`, `glue`, `sql`, `hadoop`.
+After registration, `catalog.Load(ctx, "default", iceberg.Properties{"type": "mycatalog", ...})` will route to the factory. Custom catalogs must implement `Close() error` to satisfy `catalog.Catalog`, and callers must close them when finished. Built-in types: `rest`, `hive`, `glue`, `sql`, `hadoop`, `dynamodb`.
 
 `catalog.GetRegisteredCatalogs()` returns the current list; `catalog.Unregister(catalogType)` removes one.
 
@@ -664,7 +718,7 @@ the writer hang.
 
 Statistics settings apply to data files and use Iceberg field names, including nested paths such as
 `items.element`. Disabling statistics can reduce pruning and omit some Iceberg file metrics; other
-metadata may still be recorded.
+metadata may still be recorded. Floating-point Iceberg file metrics can also include NaN value counts.
 
 Column compression keys use case-sensitive Iceberg leaf paths, such as
 `items.element` or `attributes.value.name`. They apply to data files and use

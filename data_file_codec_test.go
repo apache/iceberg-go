@@ -606,8 +606,8 @@ func TestManifestEntrySchemaForRejectsInvalidTypesAfterCacheHit(t *testing.T) {
 	for _, typ := range []Type{
 		unsupportedCodecPartitionType{},
 		VariantType{},
-		&StructType{}, &ListType{ElementID: 2, Element: Int64Type{}},
-		&MapType{KeyID: 2, KeyType: StringType{}, ValueID: 3, ValueType: Int64Type{}},
+		&StructType{}, &ListType{elementID: 2, element: Int64Type{}},
+		&MapType{keyID: 2, keyType: StringType{}, valueID: 3, valueType: Int64Type{}},
 	} {
 		schema := NewSchema(1, NestedField{ID: 1, Name: "source", Type: typ})
 		_, wantErr := partitionTypeToAvroSchema(spec.PartitionType(schema))

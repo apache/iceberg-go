@@ -241,7 +241,7 @@ func (b *MetadataBuilder) addSchema(schema *iceberg.Schema) (int, error) {
 	newSchema := schema
 	// Build a fresh schema if we reset the ID
 	if schema.ID != newSchemaID {
-		newSchema = iceberg.NewSchemaWithIdentifiers(newSchemaID, schema.IdentifierFieldIDs, schema.Fields()...)
+		newSchema = iceberg.NewSchemaWithIdentifiers(newSchemaID, schema.IdentifierFieldIDs(), schema.Fields()...)
 	}
 
 	b.schemaList = append(b.schemaList, newSchema)

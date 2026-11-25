@@ -56,6 +56,10 @@ func TestPartitionPathPlanMatchesPartitionToPath(t *testing.T) {
 			SourceIDs: []int{3}, FieldID: 1004,
 			Transform: unknown, Name: "unknown",
 		},
+		iceberg.PartitionField{
+			SourceIDs: []int{1}, FieldID: 1005,
+			Transform: iceberg.YearTransform{}, Name: "created_year",
+		},
 	)
 
 	recordSchema := arrow.NewSchema([]arrow.Field{
@@ -72,10 +76,23 @@ func TestPartitionPathPlanMatchesPartitionToPath(t *testing.T) {
 		int32(7),
 		nil,
 		int32(42),
+		int32(54),
 	}
 
 	assert.Equal(t, spec.PartitionToPath(record, schema), plan.pathPlan.format(record))
 	assert.Equal(t,
-		"created+ts%2Ftz=2024-01-15T10%3A30%3A00%2B00%3A00/str%23part=partition%2Fvalue/id_bucket=7/missing=null/unknown=42",
+		"created+ts%2Ftz=2024-01-15T10%3A30%3A00%2B00%3A00/str%23part=partition%2Fvalue/id_bucket=7/missing=null/unknown=42/created_year=2024",
 		plan.pathPlan.format(record))
+
+	// the sentinel date keeps its leading zeros on the writer path too
+	early := partitionRecord{
+		iceberg.Timestamp(-62135596800000000),
+		"partition/value",
+		int32(7),
+		nil,
+		int32(42),
+		int32(-1969), // year 1
+	}
+	assert.Equal(t, spec.PartitionToPath(early, schema), plan.pathPlan.format(early))
+	assert.Contains(t, plan.pathPlan.format(early), "/created_year=0001")
 }

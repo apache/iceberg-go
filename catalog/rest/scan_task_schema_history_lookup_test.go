@@ -20,7 +20,6 @@ package rest
 import (
 	"encoding/json"
 	"fmt"
-	"slices"
 	"testing"
 
 	"github.com/apache/iceberg-go"
@@ -43,7 +42,7 @@ func cloneDecoderSchemaForTest(schema *iceberg.Schema) *iceberg.Schema {
 	}
 
 	return iceberg.NewSchemaWithIdentifiers(
-		schema.ID, slices.Clone(schema.IdentifierFieldIDs), schema.Fields()...,
+		schema.ID, schema.IdentifierFieldIDs(), schema.Fields()...,
 	)
 }
 

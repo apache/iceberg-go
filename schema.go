@@ -39,8 +39,9 @@ import (
 // rather than exposing the slice directly in order to ensure a schema
 // as immutable.
 type Schema struct {
-	ID                 int   `json:"schema-id"`
-	IdentifierFieldIDs []int `json:"identifier-field-ids"`
+	ID int `json:"schema-id"`
+
+	identifierFieldIDs []int
 
 	fields []NestedField
 
@@ -85,10 +86,11 @@ func NewSchema(id int, fields ...NestedField) *Schema {
 // lists and maps, are stored as hex strings when given as []byte,
 // [BinaryLiteral] or [FixedLiteral], the form they take in metadata JSON.
 // Byte slices inside other defaults are left as they are. The provided fields
-// and types are not modified.
+// and types are not modified, and the schema keeps its own copy of
+// identifierIDs.
 func NewSchemaWithIdentifiers(id int, identifierIDs []int, fields ...NestedField) *Schema {
 	fields, _ = normalizeDefaults(fields)
-	s := &Schema{ID: id, fields: fields, IdentifierFieldIDs: identifierIDs}
+	s := &Schema{ID: id, fields: fields, identifierFieldIDs: slices.Clone(identifierIDs)}
 	s.init()
 
 	// Eagerly check for duplicate field IDs, mirroring Java's Schema.<init>.
@@ -107,7 +109,7 @@ func NewSchemaWithIdentifiers(id int, identifierIDs []int, fields ...NestedField
 // may only be nested in required structs. Callers that construct temporary
 // schemas can defer this validation until reading or writing metadata.
 func (s *Schema) ValidateIdentifierFields() error {
-	if len(s.IdentifierFieldIDs) == 0 {
+	if len(s.identifierFieldIDs) == 0 {
 		return nil
 	}
 
@@ -120,8 +122,8 @@ func (s *Schema) ValidateIdentifierFields() error {
 		return err
 	}
 
-	seen := make(map[int]struct{}, len(s.IdentifierFieldIDs))
-	for _, id := range s.IdentifierFieldIDs {
+	seen := make(map[int]struct{}, len(s.identifierFieldIDs))
+	for _, id := range s.identifierFieldIDs {
 		if _, exists := seen[id]; exists {
 			return fmt.Errorf("%w: duplicate identifier field id %d", ErrInvalidSchema, id)
 		}
@@ -196,7 +198,7 @@ func checkFieldIDs(seen map[int]string, fields []NestedField, allIDs bool) error
 		switch t := f.Type.(type) {
 		case *StructType:
 			if t != nil {
-				if err := checkFieldIDs(seen, t.FieldList, allIDs); err != nil {
+				if err := checkFieldIDs(seen, t.fields, allIDs); err != nil {
 					return err
 				}
 			}
@@ -382,12 +384,12 @@ func (s *Schema) Type() string { return "struct" }
 
 // AsStruct returns a Struct with the same fields as the schema which can
 // then be used as a Type.
-func (s *Schema) AsStruct() StructType { return StructType{FieldList: cloneFields(s.fields)} }
+func (s *Schema) AsStruct() StructType { return StructType{fields: cloneFields(s.fields)} }
 
 // asStructRef returns a read-only view over the schema field slice for
 // internal callers that only traverse fields and must avoid clone-on-read
 // overhead on hot paths.
-func (s *Schema) asStructRef() StructType { return StructType{FieldList: s.fields} }
+func (s *Schema) asStructRef() StructType { return StructType{fields: s.fields} }
 
 func (s *Schema) NumFields() int          { return len(s.fields) }
 func (s *Schema) Field(i int) NestedField { return cloneField(s.fields[i]) }
@@ -401,6 +403,10 @@ func (s *Schema) Fields() []NestedField   { return cloneFields(s.fields) }
 // cannot be constructed outside this module. It is not covered by the module's
 // compatibility guarantees. Use [Schema.Fields] instead.
 func (s *Schema) FieldsRef(_ internal.SchemaRef) []NestedField { return s.fields }
+
+// IdentifierFieldIDs returns a copy of the IDs of the schema's identifier
+// fields.
+func (s *Schema) IdentifierFieldIDs() []int { return slices.Clone(s.identifierFieldIDs) }
 
 func (s *Schema) FieldIDs() []int {
 	idx, _ := s.lazyNameToID()
@@ -450,12 +456,12 @@ func (s *Schema) UnmarshalJSON(b []byte) error {
 		seenIDs[id] = struct{}{}
 		ids = append(ids, id)
 	}
-	if err := (&Schema{fields: fields, IdentifierFieldIDs: ids}).ValidateIdentifierFields(); err != nil {
+	if err := (&Schema{fields: fields, identifierFieldIDs: ids}).ValidateIdentifierFields(); err != nil {
 		return err
 	}
 
 	s.ID = aux.ID
-	s.IdentifierFieldIDs = ids
+	s.identifierFieldIDs = ids
 	s.fields = fields
 	s.idToName.Store(nil)
 	s.idToField.Store(nil)
@@ -468,7 +474,7 @@ func (s *Schema) UnmarshalJSON(b []byte) error {
 }
 
 func (s *Schema) MarshalJSON() ([]byte, error) {
-	ids := s.IdentifierFieldIDs
+	ids := s.identifierFieldIDs
 	if ids == nil {
 		ids = []int{}
 	}
@@ -519,16 +525,16 @@ func cloneType(t Type) Type {
 
 	switch typed := t.(type) {
 	case *StructType:
-		return &StructType{FieldList: cloneFields(typed.FieldList)}
+		return &StructType{fields: cloneFields(typed.fields)}
 	case *ListType:
 		cloned := *typed
-		cloned.Element = cloneType(typed.Element)
+		cloned.element = cloneType(typed.element)
 
 		return &cloned
 	case *MapType:
 		cloned := *typed
-		cloned.KeyType = cloneType(typed.KeyType)
-		cloned.ValueType = cloneType(typed.ValueType)
+		cloned.keyType = cloneType(typed.keyType)
+		cloned.valueType = cloneType(typed.valueType)
 
 		return &cloned
 	default:
@@ -709,7 +715,7 @@ func (s *Schema) Equals(other *Schema) bool {
 		return false
 	}
 
-	if !slices.Equal(s.IdentifierFieldIDs, other.IdentifierFieldIDs) {
+	if !slices.Equal(s.identifierFieldIDs, other.identifierFieldIDs) {
 		return false
 	}
 
@@ -741,15 +747,15 @@ func highestFieldIDType(typ Type) int {
 	switch typ := typ.(type) {
 	case *StructType:
 		if typ != nil {
-			return highestFieldIDFields(typ.FieldList)
+			return highestFieldIDFields(typ.fields)
 		}
 	case *ListType:
 		if typ != nil {
-			return max(typ.ElementID, highestFieldIDType(typ.Element))
+			return max(typ.elementID, highestFieldIDType(typ.element))
 		}
 	case *MapType:
 		if typ != nil {
-			return max(typ.KeyID, typ.ValueID, highestFieldIDType(typ.KeyType), highestFieldIDType(typ.ValueType))
+			return max(typ.keyID, typ.valueID, highestFieldIDType(typ.keyType), highestFieldIDType(typ.valueType))
 		}
 	}
 
@@ -919,12 +925,12 @@ func Visit[T any](sc *Schema, visitor SchemaVisitor[T]) (res T, err error) {
 }
 
 func visitStruct[T any](obj StructType, visitor SchemaVisitor[T]) T {
-	results := make([]T, len(obj.FieldList))
+	results := make([]T, len(obj.fields))
 
 	bf, _ := visitor.(BeforeFieldVisitor)
 	af, _ := visitor.(AfterFieldVisitor)
 
-	for i, f := range obj.FieldList {
+	for i, f := range obj.fields {
 		if bf != nil {
 			bf.BeforeField(f)
 		}
@@ -1091,9 +1097,9 @@ func PreOrderVisit[T any](sc *Schema, visitor PreOrderSchemaVisitor[T]) (res T, 
 }
 
 func visitStructPreOrder[T any](obj StructType, visitor PreOrderSchemaVisitor[T]) T {
-	results := make([]func() T, len(obj.FieldList))
+	results := make([]func() T, len(obj.fields))
 
-	for i, f := range obj.FieldList {
+	for i, f := range obj.fields {
 		results[i] = func() T {
 			return visitFieldPreOrder(f, visitor)
 		}
@@ -1159,14 +1165,14 @@ func (i *indexByID) Field(field NestedField, _ map[int]NestedField) map[int]Nest
 }
 
 func (i *indexByID) List(list ListType, _ map[int]NestedField) map[int]NestedField {
-	i.index[list.ElementID] = list.ElementField()
+	i.index[list.elementID] = list.ElementField()
 
 	return i.index
 }
 
 func (i *indexByID) Map(mapType MapType, _, _ map[int]NestedField) map[int]NestedField {
-	i.index[mapType.KeyID] = mapType.KeyField()
-	i.index[mapType.ValueID] = mapType.ValueField()
+	i.index[mapType.keyID] = mapType.KeyField()
+	i.index[mapType.valueID] = mapType.ValueField()
 
 	return i.index
 }
@@ -1312,14 +1318,14 @@ func (i *indexByName) Field(field NestedField, _ map[string]int) map[string]int 
 }
 
 func (i *indexByName) List(list ListType, _ map[string]int) map[string]int {
-	i.addField(list.ElementField().Name, list.ElementID)
+	i.addField(list.ElementField().Name, list.elementID)
 
 	return i.index
 }
 
 func (i *indexByName) Map(mapType MapType, _, _ map[string]int) map[string]int {
-	i.addField(mapType.KeyField().Name, mapType.KeyID)
-	i.addField(mapType.ValueField().Name, mapType.ValueID)
+	i.addField(mapType.KeyField().Name, mapType.keyID)
+	i.addField(mapType.ValueField().Name, mapType.valueID)
 
 	return i.index
 }
@@ -1368,8 +1374,8 @@ func PruneColumns(schema *Schema, selected map[int]Void, selectFullTypes bool) (
 		n = &StructType{}
 	}
 
-	newIdentifierIDs := make([]int, 0, len(schema.IdentifierFieldIDs))
-	for _, id := range schema.IdentifierFieldIDs {
+	newIdentifierIDs := make([]int, 0, len(schema.identifierFieldIDs))
+	for _, id := range schema.identifierFieldIDs {
 		if _, ok := selected[id]; ok {
 			newIdentifierIDs = append(newIdentifierIDs, id)
 		}
@@ -1378,7 +1384,7 @@ func PruneColumns(schema *Schema, selected map[int]Void, selectFullTypes bool) (
 	return &Schema{
 		fields:             n.Fields(),
 		ID:                 schema.ID,
-		IdentifierFieldIDs: newIdentifierIDs,
+		identifierFieldIDs: newIdentifierIDs,
 	}, nil
 }
 
@@ -1392,7 +1398,7 @@ func (p *pruneColVisitor) Schema(_ *Schema, structResult Type) Type {
 }
 
 func (p *pruneColVisitor) Struct(st StructType, fieldResults []Type) Type {
-	selected, fields := []NestedField{}, st.FieldList
+	selected, fields := []NestedField{}, st.fields
 	sameType := true
 
 	for i, t := range fieldResults {
@@ -1419,7 +1425,7 @@ func (p *pruneColVisitor) Struct(st StructType, fieldResults []Type) Type {
 			// nothing changed, return the original
 			return &st
 		} else {
-			return &StructType{FieldList: selected}
+			return &StructType{fields: selected}
 		}
 	}
 
@@ -1458,7 +1464,7 @@ func (p *pruneColVisitor) Field(field NestedField, fieldResult Type) Type {
 }
 
 func (p *pruneColVisitor) List(list ListType, elemResult Type) Type {
-	_, ok := p.selected[list.ElementID]
+	_, ok := p.selected[list.elementID]
 	if !ok {
 		if elemResult != nil {
 			return p.projectList(&list, elemResult)
@@ -1471,29 +1477,29 @@ func (p *pruneColVisitor) List(list ListType, elemResult Type) Type {
 		return &list
 	}
 
-	_, ok = list.Element.(*StructType)
-	if list.Element != nil && ok {
+	_, ok = list.element.(*StructType)
+	if list.element != nil && ok {
 		projected := p.projectSelectedStruct(elemResult)
 
 		return p.projectList(&list, projected)
 	}
 
-	if _, ok = list.Element.(PrimitiveType); !ok {
+	if _, ok = list.element.(PrimitiveType); !ok {
 		panic(fmt.Errorf("%w: cannot explicitly project List or Map types, %d of type %s was selected",
-			ErrInvalidSchema, list.ElementID, list.Element))
+			ErrInvalidSchema, list.elementID, list.element))
 	}
 
 	return &list
 }
 
 func (p *pruneColVisitor) Map(mapType MapType, keyResult, valueResult Type) Type {
-	_, ok := p.selected[mapType.ValueID]
+	_, ok := p.selected[mapType.valueID]
 	if !ok {
 		if valueResult != nil {
 			return p.projectMap(&mapType, valueResult)
 		}
 
-		if _, ok = p.selected[mapType.KeyID]; ok {
+		if _, ok = p.selected[mapType.keyID]; ok {
 			return &mapType
 		}
 
@@ -1504,16 +1510,16 @@ func (p *pruneColVisitor) Map(mapType MapType, keyResult, valueResult Type) Type
 		return &mapType
 	}
 
-	_, ok = mapType.ValueType.(*StructType)
-	if mapType.ValueType != nil && ok {
+	_, ok = mapType.valueType.(*StructType)
+	if mapType.valueType != nil && ok {
 		projected := p.projectSelectedStruct(valueResult)
 
 		return p.projectMap(&mapType, projected)
 	}
 
-	if _, ok = mapType.ValueType.(PrimitiveType); !ok {
+	if _, ok = mapType.valueType.(PrimitiveType); !ok {
 		panic(fmt.Errorf("%w: cannot explicitly project List or Map types, Map value %d of type %s was selected",
-			ErrInvalidSchema, mapType.ValueID, mapType.ValueType))
+			ErrInvalidSchema, mapType.valueID, mapType.valueType))
 	}
 
 	return &mapType
@@ -1535,27 +1541,27 @@ func (*pruneColVisitor) projectSelectedStruct(projected Type) *StructType {
 }
 
 func (*pruneColVisitor) projectList(listType *ListType, elementResult Type) *ListType {
-	if listType.Element.Equals(elementResult) {
+	if listType.element.Equals(elementResult) {
 		return listType
 	}
 
 	return &ListType{
-		ElementID: listType.ElementID, Element: elementResult,
-		ElementRequired: listType.ElementRequired,
+		elementID: listType.elementID, element: elementResult,
+		elementRequired: listType.elementRequired,
 	}
 }
 
 func (*pruneColVisitor) projectMap(mapType *MapType, valueResult Type) *MapType {
-	if mapType.ValueType.Equals(valueResult) {
+	if mapType.valueType.Equals(valueResult) {
 		return mapType
 	}
 
 	return &MapType{
-		KeyID:         mapType.KeyID,
-		ValueID:       mapType.ValueID,
-		KeyType:       mapType.KeyType,
-		ValueType:     valueResult,
-		ValueRequired: mapType.ValueRequired,
+		keyID:         mapType.keyID,
+		valueID:       mapType.valueID,
+		keyType:       mapType.keyType,
+		valueType:     valueResult,
+		valueRequired: mapType.valueRequired,
 	}
 }
 
@@ -1592,7 +1598,7 @@ func (i *indexParents) Struct(st StructType, _ []map[int]int) map[int]int {
 	stackLen := len(i.idStack)
 	if stackLen > 0 {
 		parent = i.idStack[stackLen-1]
-		for _, f := range st.FieldList {
+		for _, f := range st.fields {
 			i.idToParent[f.ID] = parent
 		}
 	}
@@ -1605,15 +1611,15 @@ func (i *indexParents) Field(NestedField, map[int]int) map[int]int {
 }
 
 func (i *indexParents) List(list ListType, _ map[int]int) map[int]int {
-	i.idToParent[list.ElementID] = i.idStack[len(i.idStack)-1]
+	i.idToParent[list.elementID] = i.idStack[len(i.idStack)-1]
 
 	return i.idToParent
 }
 
 func (i *indexParents) Map(mapType MapType, _, _ map[int]int) map[int]int {
 	parent := i.idStack[len(i.idStack)-1]
-	i.idToParent[mapType.KeyID] = parent
-	i.idToParent[mapType.ValueID] = parent
+	i.idToParent[mapType.keyID] = parent
+	i.idToParent[mapType.valueID] = parent
 
 	return i.idToParent
 }
@@ -1634,7 +1640,7 @@ func (buildPosAccessors) Schema(_ *Schema, structResult map[int]accessor) map[in
 
 func (buildPosAccessors) Struct(st StructType, fieldResults []map[int]accessor) map[int]accessor {
 	result := map[int]accessor{}
-	for pos, f := range st.FieldList {
+	for pos, f := range st.fields {
 		if innerMap := fieldResults[pos]; len(innerMap) != 0 {
 			for inner, acc := range innerMap {
 				result[inner] = accessor{pos: pos, inner: &acc}
@@ -1703,13 +1709,13 @@ func (s *setFreshIDs) Schema(_ *Schema, structResult func() Type) Type {
 
 func (s *setFreshIDs) Struct(st StructType, fieldResults []func() Type) Type {
 	// Assign all sibling IDs before recursing, matching Java.
-	newIDs := make([]int, len(st.FieldList))
-	for idx, f := range st.FieldList {
+	newIDs := make([]int, len(st.fields))
+	for idx, f := range st.fields {
 		newIDs[idx] = s.getAndInc(f.ID)
 	}
 
-	newFields := make([]NestedField, len(st.FieldList))
-	for idx, f := range st.FieldList {
+	newFields := make([]NestedField, len(st.fields))
+	for idx, f := range st.fields {
 		newFields[idx] = NestedField{
 			ID:             newIDs[idx],
 			Name:           f.Name,
@@ -1721,7 +1727,7 @@ func (s *setFreshIDs) Struct(st StructType, fieldResults []func() Type) Type {
 		}
 	}
 
-	return &StructType{FieldList: newFields}
+	return &StructType{fields: newFields}
 }
 
 func (s *setFreshIDs) Field(_ NestedField, fieldResult func() Type) Type {
@@ -1729,25 +1735,25 @@ func (s *setFreshIDs) Field(_ NestedField, fieldResult func() Type) Type {
 }
 
 func (s *setFreshIDs) List(list ListType, elemResult func() Type) Type {
-	elemID := s.getAndInc(list.ElementID)
+	elemID := s.getAndInc(list.elementID)
 
 	return &ListType{
-		ElementID:       elemID,
-		Element:         elemResult(),
-		ElementRequired: list.ElementRequired,
+		elementID:       elemID,
+		element:         elemResult(),
+		elementRequired: list.elementRequired,
 	}
 }
 
 func (s *setFreshIDs) Map(mapType MapType, keyResult, valueResult func() Type) Type {
-	keyID := s.getAndInc(mapType.KeyID)
-	valueID := s.getAndInc(mapType.ValueID)
+	keyID := s.getAndInc(mapType.keyID)
+	valueID := s.getAndInc(mapType.valueID)
 
 	return &MapType{
-		KeyID:         keyID,
-		ValueID:       valueID,
-		KeyType:       keyResult(),
-		ValueType:     valueResult(),
-		ValueRequired: mapType.ValueRequired,
+		keyID:         keyID,
+		valueID:       valueID,
+		keyType:       keyResult(),
+		valueType:     valueResult(),
+		valueRequired: mapType.valueRequired,
 	}
 }
 
@@ -1791,11 +1797,11 @@ func AssignFreshSchemaIDsWithBase(sc, base *Schema, nextID func() int) (*Schema,
 		return nil, err
 	}
 
-	fields := outType.(*StructType).FieldList
+	fields := outType.(*StructType).fields
 	var newIdentifierIDs []int
-	if len(sc.IdentifierFieldIDs) != 0 {
-		newIdentifierIDs = make([]int, len(sc.IdentifierFieldIDs))
-		for i, id := range sc.IdentifierFieldIDs {
+	if len(sc.identifierFieldIDs) != 0 {
+		newIdentifierIDs = make([]int, len(sc.identifierFieldIDs))
+		for i, id := range sc.identifierFieldIDs {
 			newID, ok := visitor.oldIdToNew[id]
 			if !ok {
 				return nil, fmt.Errorf("%w: cannot find field for identifier field id %d", ErrInvalidSchema, id)
@@ -1871,9 +1877,9 @@ func visitStructWithPartner[T, P any](st StructType, partner P, visitor SchemaWi
 	bf, _ := visitor.(beforeField)
 	af, _ := visitor.(afterField)
 
-	fieldResults := make([]T, len(st.FieldList))
+	fieldResults := make([]T, len(st.fields))
 
-	for i, f := range st.FieldList {
+	for i, f := range st.fields {
 		fieldPartner := accessor.FieldPartner(partner, f.ID, f.Name)
 		if bf != nil {
 			bf.BeforeField(f, fieldPartner)
@@ -1902,7 +1908,7 @@ func visitListWithPartner[T, P any](listType ListType, partner P, visitor Schema
 	if ble, ok := visitor.(beforeListElem); ok {
 		ble.BeforeListElement(listType.ElementField(), elemPartner)
 	}
-	elemResult := visitTypeWithPartner(listType.Element, elemPartner, visitor, accessor)
+	elemResult := visitTypeWithPartner(listType.element, elemPartner, visitor, accessor)
 	if ale, ok := visitor.(afterListElem); ok {
 		ale.AfterListElement(listType.ElementField(), elemPartner)
 	}
@@ -1931,7 +1937,7 @@ func visitMapWithPartner[T, P any](m MapType, partner P, visitor SchemaWithPartn
 	if bmk, ok := visitor.(beforeMapKey); ok {
 		bmk.BeforeMapKey(m.KeyField(), keyPartner)
 	}
-	keyResult := visitTypeWithPartner(m.KeyType, keyPartner, visitor, accessor)
+	keyResult := visitTypeWithPartner(m.keyType, keyPartner, visitor, accessor)
 	if amk, ok := visitor.(afterMapKey); ok {
 		amk.AfterMapKey(m.KeyField(), keyPartner)
 	}
@@ -1940,7 +1946,7 @@ func visitMapWithPartner[T, P any](m MapType, partner P, visitor SchemaWithPartn
 	if bmv, ok := visitor.(beforeMapValue); ok {
 		bmv.BeforeMapValue(m.ValueField(), valPartner)
 	}
-	valResult := visitTypeWithPartner(m.ValueType, valPartner, visitor, accessor)
+	valResult := visitTypeWithPartner(m.valueType, valPartner, visitor, accessor)
 	if amv, ok := visitor.(afterMapValue); ok {
 		amv.AfterMapValue(m.ValueField(), valPartner)
 	}
@@ -2055,8 +2061,8 @@ func SanitizeColumnNames(sc *Schema) (*Schema, error) {
 		return nil, err
 	}
 
-	return NewSchemaWithIdentifiers(sc.ID, sc.IdentifierFieldIDs,
-		result.Type.(*StructType).FieldList...), nil
+	return NewSchemaWithIdentifiers(sc.ID, sc.identifierFieldIDs,
+		result.Type.(*StructType).fields...), nil
 }
 
 type sanitizeColumnNameVisitor struct{}
@@ -2091,18 +2097,18 @@ func (sanitizeColumnNameVisitor) Struct(_ StructType, fieldResults []NestedField
 		seen[field.Name] = field.ID
 	}
 
-	return NestedField{Type: &StructType{FieldList: fieldResults}}
+	return NestedField{Type: &StructType{fields: fieldResults}}
 }
 
 func (sanitizeColumnNameVisitor) List(list ListType, elemResult NestedField) NestedField {
-	list.Element = elemResult.Type
+	list.element = elemResult.Type
 
 	return NestedField{Type: &list}
 }
 
 func (sanitizeColumnNameVisitor) Map(mapType MapType, keyResult, valueResult NestedField) NestedField {
-	mapType.KeyType = keyResult.Type
-	mapType.ValueType = valueResult.Type
+	mapType.keyType = keyResult.Type
+	mapType.valueType = valueResult.Type
 
 	return NestedField{Type: &mapType}
 }

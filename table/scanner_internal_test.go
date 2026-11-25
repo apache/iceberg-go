@@ -1024,7 +1024,7 @@ func TestAppendMissingLineageFields(t *testing.T) {
 
 	withLineage := appendMissingLineageFields(schema, []iceberg.NestedField{iceberg.RowID()})
 
-	assert.Equal(t, []int{1}, schema.IdentifierFieldIDs)
+	assert.Equal(t, []int{1}, schema.IdentifierFieldIDs())
 	assert.Len(t, schema.Fields(), 1)
 	assert.Len(t, withLineage.Fields(), 2)
 	assert.Equal(t, iceberg.RowIDColumnName, withLineage.Fields()[1].Name)

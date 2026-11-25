@@ -572,6 +572,10 @@ type Scan struct {
 	// map cannot silently drop it.
 	arrowBatchSize int
 
+	// dictionaryColumns holds the names given to WithDictionaryColumns,
+	// resolved to field IDs only when the scan reads.
+	dictionaryColumns []string
+
 	// readRecords is a scan-local reader seam; nil uses (*arrowScan).GetRecords.
 	// Tests can wrap it to observe the task slice handed to the Arrow reader.
 	readRecords func(*arrowScan, context.Context, []FileScanTask) (*arrow.Schema, iter.Seq2[arrow.RecordBatch, error], error)
@@ -749,6 +753,46 @@ func (scan *Scan) Projection() (*iceberg.Schema, error) {
 	return schema, nil
 }
 
+func (scan *Scan) dictionaryFieldIDs(projected *iceberg.Schema) (set[int], error) {
+	if len(scan.dictionaryColumns) == 0 {
+		return nil, nil
+	}
+
+	schema, err := scan.effectiveSchema()
+	if err != nil {
+		return nil, err
+	}
+
+	ids := make(set[int], len(scan.dictionaryColumns))
+	for _, name := range scan.dictionaryColumns {
+		var (
+			field iceberg.NestedField
+			ok    bool
+		)
+		if scan.caseSensitive {
+			field, ok = schema.FindFieldByName(name)
+		} else {
+			field, ok = schema.FindFieldByNameCaseInsensitive(name)
+		}
+		if !ok {
+			return nil, fmt.Errorf("%w: could not find dictionary column %s", iceberg.ErrInvalidSchema, name)
+		}
+
+		switch field.Type.(type) {
+		case iceberg.StringType, iceberg.BinaryType:
+		default:
+			return nil, fmt.Errorf("%w: dictionary column %s has type %s, only string and binary columns can be read as dictionaries",
+				iceberg.ErrInvalidArgument, name, field.Type)
+		}
+
+		if _, ok := projected.FindFieldByID(field.ID); ok {
+			ids[field.ID] = struct{}{}
+		}
+	}
+
+	return ids, nil
+}
+
 func (scan *Scan) effectiveSchema() (*iceberg.Schema, error) {
 	if scan.selectorErr != nil {
 		return nil, scan.selectorErr
@@ -870,7 +914,7 @@ func appendMissingLineageFields(s *iceberg.Schema, lineageFields []iceberg.Neste
 		existing[f.ID] = struct{}{}
 	}
 
-	return iceberg.NewSchemaWithIdentifiers(s.ID, s.IdentifierFieldIDs, fields...)
+	return iceberg.NewSchemaWithIdentifiers(s.ID, s.IdentifierFieldIDs(), fields...)
 }
 
 func buildPartitionProjection(specID int, meta Metadata, schema *iceberg.Schema, rowFilter iceberg.BooleanExpression, caseSensitive bool) (iceberg.BooleanExpression, error) {
@@ -2379,6 +2423,11 @@ func (scan *Scan) arrowScanForTasks(ctx context.Context, tasks []FileScanTask) (
 		return nil, nil, nil, err
 	}
 
+	dictionaryFieldIDs, err := scan.dictionaryFieldIDs(schema)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
 	// Bind task residuals against the schema selected by this scan, which may
 	// be an older snapshot schema rather than the table's current schema.
 	readTasks, err = bindReadTasksResiduals(effectiveSchema, tasks, scan.caseSensitive)
@@ -2416,6 +2465,7 @@ func (scan *Scan) arrowScanForTasks(ctx context.Context, tasks []FileScanTask) (
 		options:            scan.options,
 		concurrency:        scan.concurrency,
 		arrowBatchSize:     scan.arrowBatchSize,
+		dictionaryFieldIDs: dictionaryFieldIDs,
 	}, readTasks, releasePlanIO, nil
 }
 

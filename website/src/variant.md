@@ -105,6 +105,12 @@ Filter on a field inside a variant with `iceberg.Extract`, which plugs into the
 usual predicate builders. See [Row Filter Syntax](./row-filter-syntax.md#variant-extraction)
 for usage, supported target types, and caveats.
 
+## Casting a primitive variant literal
+
+`VariantLiteral.To(typ)` converts primitive variant values using the cast
+rules for the underlying literal. Null, object, array, and zero-value variants
+return `ErrBadCast` when cast to a non-variant type.
+
 ## Constraints
 
 - A variant column cannot be a partition source or an identity-transform source.
