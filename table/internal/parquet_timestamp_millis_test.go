@@ -540,6 +540,13 @@ func TestDataFileStatsFromMetaPreservesNullCountsWhenMillisBoundsOmitted(t *test
 			rg0Vals:   []int64{0, overflowMillis},
 			rg1Vals:   []int64{1_000},
 		},
+		{
+			name:      "overflowing_timestamp_micros_second_rg",
+			utc:       false,
+			icebergTy: iceberg.PrimitiveTypes.Timestamp,
+			rg0Vals:   []int64{0, 1_000},
+			rg1Vals:   []int64{overflowMillis},
+		},
 	}
 
 	format := internal.GetFileFormat(iceberg.ParquetFile)

@@ -1861,6 +1861,22 @@ func TimestampMillisAsMicros(stats metadata.TypedStatistics) metadata.TypedStati
 	return &wrappedMillisTimestampStats{i64}
 }
 
+// TimestampMillisStatsForType scales TIMESTAMP(MILLIS) statistics to
+// microseconds for Iceberg timestamp and timestamptz fields and drops
+// min/max bounds for any other Iceberg field type. Non-millisecond
+// statistics are returned unchanged.
+func TimestampMillisStatsForType(stats metadata.TypedStatistics, fieldType iceberg.Type) metadata.TypedStatistics {
+	if !IsTimestampMillis(stats.Descr()) {
+		return stats
+	}
+	switch fieldType.(type) {
+	case iceberg.TimestampType, iceberg.TimestampTzType:
+		return TimestampMillisAsMicros(stats)
+	default:
+		return statsWithoutMinMax{stats}
+	}
+}
+
 type wrappedMillisTimestampStats struct {
 	*metadata.Int64Statistics
 }
@@ -2128,12 +2144,7 @@ func (statsWithoutMinMax) HasMinMax() bool { return false }
 // wrapStatsForType adapts Parquet stats so a StatsAgg reads Iceberg-typed min/max.
 func wrapStatsForType(stats metadata.TypedStatistics, typ iceberg.PrimitiveType) metadata.TypedStatistics {
 	if IsTimestampMillis(stats.Descr()) {
-		switch typ.(type) {
-		case iceberg.TimestampType, iceberg.TimestampTzType:
-			return TimestampMillisAsMicros(stats)
-		default:
-			return statsWithoutMinMax{stats}
-		}
+		return TimestampMillisStatsForType(stats, typ)
 	}
 
 	switch t := typ.(type) {

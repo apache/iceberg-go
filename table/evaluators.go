@@ -1021,14 +1021,7 @@ func intBackedDecimal(descr *parquetschema.Column) bool {
 // go through here rather than calling EncodeMin/EncodeMax directly, or
 // int-backed decimals and millisecond timestamps silently prune rows that match.
 func parquetStatsBounds(stats metadata.TypedStatistics, fieldType iceberg.Type) (lower, upper []byte, ok bool) {
-	if internal.IsTimestampMillis(stats.Descr()) {
-		switch fieldType.(type) {
-		case iceberg.TimestampType, iceberg.TimestampTzType:
-			stats = internal.TimestampMillisAsMicros(stats)
-		default:
-			return nil, nil, false
-		}
-	}
+	stats = internal.TimestampMillisStatsForType(stats, fieldType)
 	if !stats.HasMinMax() {
 		return nil, nil, false
 	}
