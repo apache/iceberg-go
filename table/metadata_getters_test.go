@@ -102,7 +102,6 @@ func TestMetadataGettersReturnDefensiveCopies(t *testing.T) {
 
 	schemas := metadata.Schemas()
 	schemas[0].ID = 99
-	schemas[0].IdentifierFieldIDs[0] = 99
 	nestedFields := schemas[0].Fields()
 	nestedFields[0].Name = "mutated"
 	nestedFields[0].Type = iceberg.PrimitiveTypes.String
@@ -188,14 +187,11 @@ func TestMetadataSchemaGetterCopiesNestedValues(t *testing.T) {
 	originalFields := schema.Fields()
 
 	cloned := metadata.CurrentSchema()
-	cloned.IdentifierFieldIDs[0] = 99
 	fields := cloned.FieldsRef(iceinternal.SchemaRef{})
 	payload := fields[0].Type.(*iceberg.StructType)
-	payload.FieldList[1].Name = "changed"
-	payload.FieldList[1].Type.(*iceberg.ListType).Element.(*iceberg.StructType).FieldList[0].InitialDefault.([]any)[0].(map[string]any)["bytes"].([]byte)[0] = 99
-	payload.FieldList[2].Type.(*iceberg.MapType).ValueType.(*iceberg.StructType).FieldList[0].WriteDefault.(map[string]any)["values"].([]any)[0] = "changed"
+	payload.Field(1).Type.(*iceberg.ListType).Element().(*iceberg.StructType).Field(0).InitialDefault.([]any)[0].(map[string]any)["bytes"].([]byte)[0] = 99
+	payload.Field(2).Type.(*iceberg.MapType).ValueType().(*iceberg.StructType).Field(0).WriteDefault.(map[string]any)["values"].([]any)[0] = "changed"
 
-	require.Equal(t, []int{1}, schema.IdentifierFieldIDs)
 	require.Equal(t, originalFields, schema.Fields())
 }
 

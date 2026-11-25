@@ -15,27 +15,6 @@
 // specific language governing permissions and limitations
 // under the License.
 
-package utils
-
-import (
-	"context"
-
-	"github.com/aws/aws-sdk-go-v2/aws"
-)
-
-type awsctxkey struct{}
-
-// WithAWSConfig returns a new context with the given AWS config
-func WithAWSConfig(ctx context.Context, cfg *aws.Config) context.Context {
-	return context.WithValue(ctx, awsctxkey{}, cfg)
-}
-
-// GetAWSConfig returns the AWS config from the given context. Returns
-// nil if no config is set.
-func GetAWSConfig(ctx context.Context) *aws.Config {
-	if v := ctx.Value(awsctxkey{}); v != nil {
-		return v.(*aws.Config)
-	}
-
-	return nil
-}
+// Package hive implements a catalog backed by a Hive Metastore, which it
+// reaches over Thrift. Import it to register the "hive" catalog type.
+package hive

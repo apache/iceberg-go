@@ -40,7 +40,7 @@ func benchmarkWideNestedSchema(width, depth int) *Schema {
 		nextID++
 		leaves = []NestedField{{
 			ID: nextID, Name: fmt.Sprintf("nested_%d", level),
-			Type: &StructType{FieldList: leaves},
+			Type: &StructType{fields: leaves},
 		}}
 	}
 

@@ -31,7 +31,7 @@ func BenchmarkDataFileSchemaCache(b *testing.B) {
 		NestedField{ID: 2, Name: "category", Type: StringType{}},
 		NestedField{ID: 3, Name: "ts", Type: TimestampType{}},
 		NestedField{ID: 4, Name: "price", Type: MustDecimalTypeOf(10, 2)},
-		NestedField{ID: 5, Name: "nested", Type: &StructType{FieldList: []NestedField{
+		NestedField{ID: 5, Name: "nested", Type: &StructType{fields: []NestedField{
 			{ID: 6, Name: "value", Type: StringType{}},
 		}}},
 	)

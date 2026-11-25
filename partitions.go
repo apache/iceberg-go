@@ -1022,7 +1022,7 @@ func (ps *PartitionSpec) PartitionType(schema *Schema) *StructType {
 		}
 	}
 
-	return &StructType{FieldList: nestedFields}
+	return &StructType{fields: nestedFields}
 }
 
 // PartitionToPath produces a proper partition path from the data and schema by

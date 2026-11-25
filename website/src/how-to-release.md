@@ -24,6 +24,7 @@ This page is for Apache Iceberg PMC members and committers who are cutting a new
 ## Requirements
 
 - You must be an Apache Iceberg committer or PMC member.
+- Install GitHub CLI, Subversion, and `sha512sum` for candidate preparation. Publishing also uses `sort --version-sort`.
 - You must prepare a PGP key for signing. See [https://infra.apache.org/release-signing.html#generate](https://infra.apache.org/release-signing.html#generate).
 - Your PGP key must be registered in the Apache Iceberg `KEYS` file at `https://downloads.apache.org/iceberg/KEYS`. To add a key:
 
@@ -85,8 +86,9 @@ After publishing, complete these steps:
 
 1. Add the release to ASF's report database at the [Apache Committee Report Helper](https://reporter.apache.org/addrelease.html?iceberg).
 2. Verify the GitHub Release at `https://github.com/apache/iceberg-go/releases` is correctly tagged, has generated release notes against the prior tag, and is marked as latest. `release.sh` runs `gh release create ... --generate-notes --verify-tag` so the release should already exist; double-check the notes and the "Latest" badge.
-3. Send the `[ANNOUNCE]` email to `dev@iceberg.apache.org` and `announce@apache.org`.
-4. File a release blog post in [`apache/iceberg`](https://github.com/apache/iceberg) under `site/docs/blog/posts/`. See the prior 0.5.0 post (`2026-03-05-iceberg-go-0.5.0-release.md`) for the frontmatter and structure.
+3. Update [Getting Started](./getting-started.md#install) to pin the new release. Check the Go minimum and dependency versions against the tag's `go.mod`, then run the walkthrough in a fresh module. Update the release-tag link and version-specific flag notes in the [CLI guide](./cli.md).
+4. Send the `[ANNOUNCE]` email to `dev@iceberg.apache.org` and `announce@apache.org`.
+5. File a release blog post in [`apache/iceberg`](https://github.com/apache/iceberg) under `site/docs/blog/posts/`. See the prior 0.5.0 post (`2026-03-05-iceberg-go-0.5.0-release.md`) for the frontmatter and structure.
 
 ## Patch releases
 
