@@ -636,6 +636,111 @@ func TestMetricsPrimitiveTypes(t *testing.T) {
 	})
 }
 
+// An empty string or binary value serializes to zero bytes. It is still a
+// bound and must be written, as Iceberg Java does.
+func TestMetricsEmptyStringAndBinaryBounds(t *testing.T) {
+	const maxRune = "\U0010FFFF"
+
+	truncate16 := internal.MetricsMode{Typ: internal.MetricModeTruncate, Len: 16}
+
+	tests := []struct {
+		name string
+		mode internal.MetricsMode
+		// rows is a JSON array of {"s": ..., "b": ...} objects; b is base64.
+		rows string
+		// Field 1 is s (string), field 2 is b (binary). A missing key means no bound.
+		lower, upper map[int][]byte
+	}{
+		{
+			name:  "all empty",
+			mode:  truncate16,
+			rows:  `[{"s": "", "b": ""}, {"s": "", "b": ""}]`,
+			lower: map[int][]byte{1: {}, 2: {}},
+			upper: map[int][]byte{1: {}, 2: {}},
+		},
+		{
+			name:  "empty minimum",
+			mode:  truncate16,
+			rows:  `[{"s": "", "b": ""}, {"s": "z", "b": "eg=="}]`,
+			lower: map[int][]byte{1: {}, 2: {}},
+			upper: map[int][]byte{1: []byte("z"), 2: []byte("z")},
+		},
+		{
+			name:  "all empty, full mode",
+			mode:  internal.MetricsMode{Typ: internal.MetricModeFull},
+			rows:  `[{"s": "", "b": ""}]`,
+			lower: map[int][]byte{1: {}, 2: {}},
+			upper: map[int][]byte{1: {}, 2: {}},
+		},
+		{
+			// A truncated maximum with no greater prefix still has no upper bound.
+			name:  "no upper bound after truncation",
+			mode:  internal.MetricsMode{Typ: internal.MetricModeTruncate, Len: 1},
+			rows:  `[{"s": "", "b": ""}, {"s": "` + maxRune + maxRune + `", "b": "//8="}]`,
+			lower: map[int][]byte{1: {}, 2: {}},
+			upper: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			df := emptyBoundsDataFile(t, tt.mode, tt.rows)
+
+			assert.Equal(t, tt.lower, df.LowerBoundValues())
+			if tt.upper == nil {
+				assert.Empty(t, df.UpperBoundValues())
+			} else {
+				assert.Equal(t, tt.upper, df.UpperBoundValues())
+			}
+		})
+	}
+}
+
+func emptyBoundsDataFile(t *testing.T, mode internal.MetricsMode, rows string) iceberg.DataFile {
+	t.Helper()
+
+	sc := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "s", Type: iceberg.PrimitiveTypes.String},
+		iceberg.NestedField{ID: 2, Name: "b", Type: iceberg.PrimitiveTypes.Binary},
+	)
+	arrowSchema, err := table.SchemaToArrowSchema(sc, nil, true, false)
+	require.NoError(t, err)
+
+	rec, _, err := array.RecordFromJSON(memory.DefaultAllocator, arrowSchema, strings.NewReader(rows))
+	require.NoError(t, err)
+	defer rec.Release()
+
+	var buf bytes.Buffer
+	wr, err := pqarrow.NewFileWriter(arrowSchema, &buf,
+		parquet.NewWriterProperties(parquet.WithStats(true)), pqarrow.DefaultWriterProps())
+	require.NoError(t, err)
+	require.NoError(t, wr.Write(rec))
+	require.NoError(t, wr.Close())
+
+	rdr, err := file.NewParquetReader(bytes.NewReader(buf.Bytes()))
+	require.NoError(t, err)
+	defer rdr.Close()
+
+	format := internal.GetFileFormat(iceberg.ParquetFile)
+	mapping, err := format.PathToIDMapping(sc)
+	require.NoError(t, err)
+
+	collector := map[int]internal.StatisticsCollector{
+		1: {FieldID: 1, Mode: mode, ColName: "s", IcebergTyp: iceberg.PrimitiveTypes.String},
+		2: {FieldID: 2, Mode: mode, ColName: "b", IcebergTyp: iceberg.PrimitiveTypes.Binary},
+	}
+	stats := format.DataFileStatsFromMeta(internal.Metadata(rdr.MetaData()), collector, mapping, nil, nil)
+
+	return stats.ToDataFile(internal.DataFileOpts{
+		Schema:   sc,
+		Spec:     *iceberg.UnpartitionedSpec,
+		Path:     "empty-bounds.parquet",
+		Format:   iceberg.ParquetFile,
+		Content:  iceberg.EntryContentData,
+		FileSize: int64(buf.Len()),
+	})
+}
+
 func TestDataFileStatsFromMetaWithMalformedUUIDStats(t *testing.T) {
 	format := internal.GetFileFormat(iceberg.ParquetFile)
 
