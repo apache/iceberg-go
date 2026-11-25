@@ -470,6 +470,58 @@ func TestHiveIntegrationCreateView(t *testing.T) {
 	assert.Equal("hive", loaded.CurrentVersion().Representations[0].Dialect)
 }
 
+func TestHiveIntegrationRenameView(t *testing.T) {
+	assert := require.New(t)
+	ctx := context.TODO()
+
+	cat := createTestCatalog(t)
+	defer cat.Close()
+
+	suffix := time.Now().UnixNano()
+	fromDB := fmt.Sprintf("test_db_%d", suffix)
+	toDB := fmt.Sprintf("test_db_to_%d", suffix)
+	for _, db := range []string{fromDB, toDB} {
+		err := cat.CreateNamespace(ctx, DatabaseIdentifier(db), iceberg.Properties{
+			"location": getTestTableLocation() + "/" + db,
+		})
+		assert.NoError(err)
+		defer cat.DropNamespace(ctx, DatabaseIdentifier(db))
+	}
+
+	schema := iceberg.NewSchema(1, iceberg.NestedField{ID: 1, Name: "col", Type: iceberg.PrimitiveTypes.Int32, Required: true})
+	ver, err := view.NewVersionFromSQL(1, 0, view.Representation{SQL: "SELECT 1 AS col", Dialect: "hive"}, table.Identifier{fromDB})
+	assert.NoError(err)
+
+	createView := func(db, name string) *view.View {
+		v, err := cat.CreateView(ctx, TableIdentifier(db, name), ver, schema,
+			catalog.WithViewLocation(getTestTableLocation()+"/"+db+"/"+name),
+		)
+		assert.NoError(err)
+
+		return v
+	}
+	created := createView(fromDB, "old_view")
+	createView(toDB, "taken_view")
+	defer cat.DropView(ctx, TableIdentifier(toDB, "taken_view"))
+
+	_, err = cat.RenameView(ctx, TableIdentifier(fromDB, "old_view"), TableIdentifier(toDB, "taken_view"))
+	assert.ErrorIs(err, catalog.ErrViewAlreadyExists)
+
+	renamed, err := cat.RenameView(ctx, TableIdentifier(fromDB, "old_view"), TableIdentifier(toDB, "new_view"))
+	assert.NoError(err)
+	defer cat.DropView(ctx, TableIdentifier(toDB, "new_view"))
+	assert.Equal(TableIdentifier(toDB, "new_view"), renamed.Identifier())
+	assert.Equal(created.MetadataLocation(), renamed.MetadataLocation())
+
+	exists, err := cat.CheckViewExists(ctx, TableIdentifier(fromDB, "old_view"))
+	assert.NoError(err)
+	assert.False(exists)
+
+	exists, err = cat.CheckViewExists(ctx, TableIdentifier(toDB, "new_view"))
+	assert.NoError(err)
+	assert.True(exists)
+}
+
 func TestHiveIntegrationCreateViewThenDrop(t *testing.T) {
 	assert := require.New(t)
 

@@ -128,7 +128,7 @@ S3, GCS, and Azure each require a blank import of their backend package, for exa
 | Load View                   |  X   |  X   |        |  X   |        |          |
 | List View                   |  X   |  X   |        |  X   |        |          |
 | Drop View                   |  X   |  X   |        |  X   |        |          |
-| Rename View                 |  X   |      |        |  X   |        |          |
+| Rename View                 |  X   |  X   |        |  X   |        |          |
 | Update View                 |  X   |  X   |        |  X   |        |          |
 | Check View Exists           |  X   |  X   |        |  X   |        |          |
 

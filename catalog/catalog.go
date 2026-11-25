@@ -231,7 +231,7 @@ type UpdatableViewCatalog interface {
 }
 
 // RenamableViewCatalog is an optional capability for renaming existing views.
-// REST and SQL catalogs implement it; discover support with As.
+// REST, SQL and Hive catalogs implement it; discover support with As.
 type RenamableViewCatalog interface {
 	// RenameView changes a view's identifier and returns the renamed view.
 	RenameView(ctx context.Context, from, to table.Identifier) (*view.View, error)
