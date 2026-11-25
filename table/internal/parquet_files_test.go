@@ -3620,3 +3620,40 @@ func geoBoundBytes(coords ...float64) []byte {
 
 	return buf
 }
+
+func TestGetWritePropertiesKeepsLargeValuePagesNearPageSize(t *testing.T) {
+	// 10 KiB values: with the old 20000-row batch, the whole column chunk became one ~40 MiB page.
+	value := strings.Repeat("x", 10*1024)
+	sc := arrow.NewSchema([]arrow.Field{{Name: "payload", Type: arrow.BinaryTypes.String}}, nil)
+	bldr := array.NewStringBuilder(memory.DefaultAllocator)
+	defer bldr.Release()
+	for range 4000 {
+		bldr.Append(value)
+	}
+	col := bldr.NewArray()
+	defer col.Release()
+	rec := array.NewRecordBatch(sc, []arrow.Array{col}, int64(col.Len()))
+	defer rec.Release()
+
+	props := internal.GetFileFormat(iceberg.ParquetFile).GetWriteProperties(iceberg.Properties{
+		internal.ParquetCompressionKey: "uncompressed",
+	}).([]parquet.WriterProperty)
+	props = append(props, parquet.WithDictionaryDefault(false))
+
+	var buf bytes.Buffer
+	w, err := pqarrow.NewFileWriter(sc, &buf, parquet.NewWriterProperties(props...), pqarrow.DefaultWriterProps())
+	require.NoError(t, err)
+	require.NoError(t, w.Write(rec))
+	require.NoError(t, w.Close())
+
+	rdr, err := file.NewParquetReader(bytes.NewReader(buf.Bytes()))
+	require.NoError(t, err)
+	pages, err := rdr.RowGroup(0).GetColumnPageReader(0)
+	require.NoError(t, err)
+	maxPage := 0
+	for pages.Next() {
+		maxPage = max(maxPage, len(pages.Page().Data()))
+	}
+	require.NoError(t, pages.Err())
+	assert.LessOrEqual(t, maxPage, 2*internal.ParquetPageSizeBytesDefault)
+}

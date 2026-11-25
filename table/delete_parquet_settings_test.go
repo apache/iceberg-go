@@ -138,7 +138,7 @@ func TestDeleteParquetSettingsOnDisk(t *testing.T) {
 					wantCodec, wantPage, wantGroups = compress.Codecs.Snappy, file.PageTypeDataPageV2, 1
 					assert.EqualValues(t, 1048576, wp.DataPageSize())
 					assert.EqualValues(t, 2097152, wp.DictionaryPageSizeLimit())
-					assert.EqualValues(t, 20000, wp.WriteBatchSize())
+					assert.EqualValues(t, 32, wp.WriteBatchSize()) // page-row-limit, capped so pages stay near the page size
 					assert.Equal(t, 1, wp.CompressionLevel())
 					assert.EqualValues(t, 1048576, rowGroupBytes)
 				} else {

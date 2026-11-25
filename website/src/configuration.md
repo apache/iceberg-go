@@ -619,7 +619,7 @@ All defined in `table/internal/parquet_files.go` and read by the Parquet writer:
 | `write.parquet.row-group-size-bytes` | 128 MB |
 | `write.parquet.row-group-limit` | 1,048,576 rows |
 | `write.parquet.page-size-bytes` | 1 MB |
-| `write.parquet.page-row-limit` | 20,000 rows |
+| `write.parquet.page-row-limit` | 20,000 rows (the write batch is capped at 32 rows) |
 | `write.parquet.dict-size-bytes` | 2 MB |
 | `write.parquet.page-version` | `2` |
 | `write.parquet.compression-codec` | `zstd` |
