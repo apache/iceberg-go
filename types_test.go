@@ -940,6 +940,36 @@ func TestNestedFieldMarshalBinaryDefaultsAsHex(t *testing.T) {
 	}
 }
 
+// A decimal default must be written as its string form, as the spec's JSON
+// single-value serialization and Java's SingleValueParser require. Decimal
+// has no JSON encoding of its own, so it used to be written as
+// {"Val":{},"Scale":2}, which loses the value.
+func TestNestedFieldMarshalDecimalDefaultsAsString(t *testing.T) {
+	typ := iceberg.MustDecimalTypeOf(9, 2)
+	lit, err := iceberg.NewLiteral("14.20").To(typ)
+	require.NoError(t, err)
+	negative, err := iceberg.NewLiteral("-0.05").To(typ)
+	require.NoError(t, err)
+
+	field := iceberg.NestedField{
+		ID: 1, Name: "price", Type: typ,
+		// AddColumn stores a default literal's Any(), which is an iceberg.Decimal.
+		InitialDefault: lit.Any(),
+		WriteDefault:   negative.Any(),
+	}
+
+	actual, err := json.Marshal(field)
+	require.NoError(t, err)
+	assert.JSONEq(t,
+		`{"id":1,"name":"price","required":false,"initial-default":"14.20","write-default":"-0.05","type":"decimal(9, 2)"}`,
+		string(actual))
+
+	var decoded iceberg.NestedField
+	require.NoError(t, json.Unmarshal(actual, &decoded))
+	assert.Equal(t, "14.20", decoded.InitialDefault)
+	assert.Equal(t, "-0.05", decoded.WriteDefault)
+}
+
 func TestTypeIFaceMarshalJSONNilType(t *testing.T) {
 	// A NestedField with a nil Type must not panic during JSON marshalling.
 	// Prior to this fix, typeIFace.MarshalJSON called t.Type.Type() on a nil
