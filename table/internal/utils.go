@@ -205,8 +205,6 @@ type StatsAgg interface {
 	Min() iceberg.Literal
 	Max() iceberg.Literal
 	Update(stats interface{ HasMinMax() bool })
-	// MinAsBytes and MaxAsBytes return nil when there is no bound. An empty
-	// string or binary bound is a non-nil, zero-length slice.
 	MinAsBytes() ([]byte, error)
 	MaxAsBytes() ([]byte, error)
 }
@@ -496,7 +494,6 @@ func (s *statsAggregator[T]) toBytes(val iceberg.Literal) ([]byte, error) {
 		return nil, err
 	}
 	if b == nil {
-		// An empty binary value is still a bound; nil would mean there is none.
 		b = []byte{}
 	}
 
@@ -554,7 +551,6 @@ func (s *statsAggregator[T]) MaxAsBytes() ([]byte, error) {
 		curMax := any(s.curMax.Value()).(string)
 		result, truncated := truncateUpperBoundText(curMax, s.truncLen)
 		if truncated && result == "" {
-			// No string of at most truncLen code points is above curMax.
 			return nil, nil
 		}
 
@@ -571,7 +567,6 @@ func (s *statsAggregator[T]) MaxAsBytes() ([]byte, error) {
 
 		result := TruncateUpperBoundBinary(curMax, s.truncLen)
 		if result == nil {
-			// The first truncLen bytes are all 0xFF, so no shorter value is above curMax.
 			return nil, nil
 		}
 
