@@ -1729,11 +1729,11 @@ func collectLeafIDs(typ iceberg.Type, fieldID int, idset set[int]) {
 	switch t := typ.(type) {
 	case *iceberg.MapType:
 		// For maps, collect leaf IDs from both key and value
-		collectLeafIDs(t.KeyType, t.KeyID, idset)
-		collectLeafIDs(t.ValueType, t.ValueID, idset)
+		collectLeafIDs(t.KeyType(), t.KeyID(), idset)
+		collectLeafIDs(t.ValueType(), t.ValueID(), idset)
 	case *iceberg.ListType:
 		// For lists, collect leaf IDs from the element
-		collectLeafIDs(t.Element, t.ElementID, idset)
+		collectLeafIDs(t.Element(), t.ElementID(), idset)
 	case *iceberg.StructType:
 		// For structs, collect leaf IDs from all fields
 		for _, field := range t.Fields() {

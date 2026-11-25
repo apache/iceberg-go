@@ -53,16 +53,16 @@ func TestPartitionTypeFingerprintMatchesAvroConversion(t *testing.T) {
 		MustDecimalTypeOf(10, 2),
 		MustDecimalTypeOf(11, 2),
 		MustDecimalTypeOf(10, 3),
-		&StructType{FieldList: []NestedField{{ID: 2, Name: "child", Type: StringType{}}}},
-		&ListType{ElementID: 2, Element: StringType{}},
-		&MapType{KeyID: 2, KeyType: StringType{}, ValueID: 3, ValueType: Int64Type{}},
+		&StructType{fields: []NestedField{{ID: 2, Name: "child", Type: StringType{}}}},
+		&ListType{elementID: 2, element: StringType{}},
+		&MapType{keyID: 2, keyType: StringType{}, valueID: 3, valueType: Int64Type{}},
 	}
 	shapes := make(map[string]string, len(types))
 	for _, typ := range types {
 		t.Run(typ.String(), func(t *testing.T) {
 			var key strings.Builder
 			fingerprintErr := writePartitionTypeFingerprint(&key, typ)
-			partition, avroErr := partitionTypeToAvroSchema(&StructType{FieldList: []NestedField{
+			partition, avroErr := partitionTypeToAvroSchema(&StructType{fields: []NestedField{
 				{ID: 1000, Name: "partition", Type: typ},
 			}})
 			if avroErr != nil {

@@ -1079,9 +1079,9 @@ func TestSetIdentifierField(t *testing.T) {
 		assert.NotNil(t, newSchema)
 
 		// Check that the schema has identifier field IDs set
-		assert.Len(t, newSchema.IdentifierFieldIDs, 1)
-		if len(newSchema.IdentifierFieldIDs) > 0 {
-			assert.Equal(t, 1, newSchema.IdentifierFieldIDs[0]) // id field has ID 1
+		assert.Len(t, newSchema.IdentifierFieldIDs(), 1)
+		if len(newSchema.IdentifierFieldIDs()) > 0 {
+			assert.Equal(t, 1, newSchema.IdentifierFieldIDs()[0]) // id field has ID 1
 		}
 	})
 
@@ -1094,9 +1094,9 @@ func TestSetIdentifierField(t *testing.T) {
 		assert.NotNil(t, newSchema)
 
 		// Check that the schema has identifier field IDs set
-		assert.Len(t, newSchema.IdentifierFieldIDs, 2)
-		assert.Contains(t, newSchema.IdentifierFieldIDs, 1) // id field
-		assert.Contains(t, newSchema.IdentifierFieldIDs, 2) // name field
+		assert.Len(t, newSchema.IdentifierFieldIDs(), 2)
+		assert.Contains(t, newSchema.IdentifierFieldIDs(), 1) // id field
+		assert.Contains(t, newSchema.IdentifierFieldIDs(), 2) // name field
 	})
 
 	t.Run("test set identifier field with case sensitive matching", func(t *testing.T) {
@@ -1117,8 +1117,8 @@ func TestSetIdentifierField(t *testing.T) {
 		assert.NotNil(t, newSchema)
 
 		// Check that the schema has identifier field IDs set
-		assert.Len(t, newSchema.IdentifierFieldIDs, 1)
-		assert.Equal(t, 1, newSchema.IdentifierFieldIDs[0]) // id field (case insensitive match)
+		assert.Len(t, newSchema.IdentifierFieldIDs(), 1)
+		assert.Equal(t, 1, newSchema.IdentifierFieldIDs()[0]) // id field (case insensitive match)
 	})
 
 	t.Run("test set identifier field with non-existent field", func(t *testing.T) {
@@ -1139,7 +1139,7 @@ func TestSetIdentifierField(t *testing.T) {
 		assert.NotNil(t, newSchema)
 
 		// Check that the schema has no identifier field IDs
-		assert.Len(t, newSchema.IdentifierFieldIDs, 0)
+		assert.Len(t, newSchema.IdentifierFieldIDs(), 0)
 	})
 
 	t.Run("test set identifier field chained with other operations", func(t *testing.T) {
@@ -1154,9 +1154,9 @@ func TestSetIdentifierField(t *testing.T) {
 		assert.NotNil(t, newSchema)
 
 		// Check that the schema has identifier field IDs set
-		assert.Len(t, newSchema.IdentifierFieldIDs, 2)
-		assert.Contains(t, newSchema.IdentifierFieldIDs, 1)  // id field
-		assert.Contains(t, newSchema.IdentifierFieldIDs, 12) // email field (newly added)
+		assert.Len(t, newSchema.IdentifierFieldIDs(), 2)
+		assert.Contains(t, newSchema.IdentifierFieldIDs(), 1)  // id field
+		assert.Contains(t, newSchema.IdentifierFieldIDs(), 12) // email field (newly added)
 	})
 
 	t.Run("test set identifier field with duplicate field paths", func(t *testing.T) {
@@ -1168,8 +1168,8 @@ func TestSetIdentifierField(t *testing.T) {
 		assert.NotNil(t, newSchema)
 
 		// Check that the schema has identifier field IDs set (duplicates should be deduplicated)
-		assert.Len(t, newSchema.IdentifierFieldIDs, 1)
-		assert.Equal(t, 1, newSchema.IdentifierFieldIDs[0]) // id field
+		assert.Len(t, newSchema.IdentifierFieldIDs(), 1)
+		assert.Equal(t, 1, newSchema.IdentifierFieldIDs()[0]) // id field
 	})
 
 	t.Run("test set identifier field replaces existing identifier fields", func(t *testing.T) {
@@ -1189,8 +1189,8 @@ func TestSetIdentifierField(t *testing.T) {
 		assert.NotNil(t, newSchema)
 
 		// Check that only name is now an identifier field
-		assert.Len(t, newSchema.IdentifierFieldIDs, 1)
-		assert.Equal(t, 2, newSchema.IdentifierFieldIDs[0]) // name field has ID 2
+		assert.Len(t, newSchema.IdentifierFieldIDs(), 1)
+		assert.Equal(t, 2, newSchema.IdentifierFieldIDs()[0]) // name field has ID 2
 	})
 
 	t.Run("test set identifier field multiple times", func(t *testing.T) {
@@ -1206,8 +1206,8 @@ func TestSetIdentifierField(t *testing.T) {
 		assert.NotNil(t, newSchema)
 
 		// Check that only the last SetIdentifierField call is applied
-		assert.Len(t, newSchema.IdentifierFieldIDs, 1)
-		assert.Equal(t, 2, newSchema.IdentifierFieldIDs[0]) // name field has ID 2
+		assert.Len(t, newSchema.IdentifierFieldIDs(), 1)
+		assert.Equal(t, 2, newSchema.IdentifierFieldIDs()[0]) // name field has ID 2
 	})
 
 	t.Run("test rename then set identifier to old name fails", func(t *testing.T) {
@@ -1233,9 +1233,9 @@ func TestSetIdentifierField(t *testing.T) {
 		require.NoError(t, err)
 		require.NotNil(t, newSchema)
 
-		require.Len(t, newSchema.IdentifierFieldIDs, 1)
+		require.Len(t, newSchema.IdentifierFieldIDs(), 1)
 		// Renamed field keeps ID 1
-		assert.Equal(t, 1, newSchema.IdentifierFieldIDs[0])
+		assert.Equal(t, 1, newSchema.IdentifierFieldIDs()[0])
 		field, ok := newSchema.FindColumnName(1)
 		require.True(t, ok)
 		assert.Equal(t, "new_id", field)
@@ -1319,7 +1319,7 @@ func TestDeleteIdentifierColumn(t *testing.T) {
 			SetIdentifierField([][]string{}).
 			Apply()
 		require.NoError(t, err)
-		assert.Empty(t, newSchema.IdentifierFieldIDs)
+		assert.Empty(t, newSchema.IdentifierFieldIDs())
 		_, found := newSchema.FindFieldByName("id")
 		assert.False(t, found)
 	})
@@ -1330,7 +1330,7 @@ func TestDeleteIdentifierColumn(t *testing.T) {
 			DeleteColumn([]string{"id"}).
 			Apply()
 		require.NoError(t, err)
-		assert.Equal(t, []int{2}, newSchema.IdentifierFieldIDs)
+		assert.Equal(t, []int{2}, newSchema.IdentifierFieldIDs())
 	})
 }
 
@@ -1349,7 +1349,7 @@ func TestSetIdentifierFieldDeterministicOrder(t *testing.T) {
 			require.NoError(t, err)
 			require.NotNil(t, newSchema)
 
-			assert.Equal(t, []int{1, 2, 3}, newSchema.IdentifierFieldIDs)
+			assert.Equal(t, []int{1, 2, 3}, newSchema.IdentifierFieldIDs())
 
 			// Every independently-produced schema must compare equal, which is
 			// exactly the invariant the ordering bug breaks.
@@ -1614,7 +1614,7 @@ func TestApplyChangesListElementOptionalityUpdates(t *testing.T) {
 		require.True(t, ok, "tags field must be present in the applied schema")
 		listType, ok := tags.Type.(*iceberg.ListType)
 		require.True(t, ok, "tags must remain a ListType after apply")
-		assert.False(t, listType.ElementRequired,
+		assert.False(t, listType.ElementRequired(),
 			"list element optionality update must be reflected in the applied schema")
 	})
 
@@ -1633,7 +1633,7 @@ func TestApplyChangesListElementOptionalityUpdates(t *testing.T) {
 		require.True(t, ok, "tags field must be present in the applied schema")
 		listType, ok := tags.Type.(*iceberg.ListType)
 		require.True(t, ok, "tags must remain a ListType after apply")
-		assert.True(t, listType.ElementRequired,
+		assert.True(t, listType.ElementRequired(),
 			"list element optionality update must be reflected in the applied schema")
 	})
 
@@ -1666,9 +1666,9 @@ func TestApplyChangesListElementOptionalityUpdates(t *testing.T) {
 		require.True(t, ok, "tags field must be present in the applied schema")
 		listType, ok := tags.Type.(*iceberg.ListType)
 		require.True(t, ok, "tags must remain a ListType after apply")
-		assert.True(t, iceberg.PrimitiveTypes.Int64.Equals(listType.Element),
+		assert.True(t, iceberg.PrimitiveTypes.Int64.Equals(listType.Element()),
 			"type promotion must still be applied alongside optionality change")
-		assert.False(t, listType.ElementRequired,
+		assert.False(t, listType.ElementRequired(),
 			"optionality change must be applied alongside type promotion")
 	})
 
@@ -1687,7 +1687,7 @@ func TestApplyChangesListElementOptionalityUpdates(t *testing.T) {
 		require.True(t, ok, "tags field must be present in the applied schema")
 		listType, ok := tags.Type.(*iceberg.ListType)
 		require.True(t, ok, "tags must remain a ListType after apply")
-		assert.True(t, listType.ElementRequired,
+		assert.True(t, listType.ElementRequired(),
 			"ElementRequired must be preserved from the original schema when no Required update is registered")
 	})
 
@@ -1706,7 +1706,7 @@ func TestApplyChangesListElementOptionalityUpdates(t *testing.T) {
 		require.True(t, ok, "tags field must be present in the applied schema")
 		listType, ok := tags.Type.(*iceberg.ListType)
 		require.True(t, ok, "tags must remain a ListType after apply")
-		assert.True(t, listType.ElementRequired,
+		assert.True(t, listType.ElementRequired(),
 			"ElementRequired must be preserved when the registered update leaves Required unset")
 	})
 }
@@ -1734,7 +1734,7 @@ func TestApplyChangesMapValueOptionalityUpdates(t *testing.T) {
 		require.True(t, ok, "properties field must be present in the applied schema")
 		mapType, ok := props.Type.(*iceberg.MapType)
 		require.True(t, ok, "properties must remain a MapType after apply")
-		assert.False(t, mapType.ValueRequired,
+		assert.False(t, mapType.ValueRequired(),
 			"map value optionality update must be reflected in the applied schema")
 	})
 
@@ -1753,7 +1753,7 @@ func TestApplyChangesMapValueOptionalityUpdates(t *testing.T) {
 		require.True(t, ok, "properties field must be present in the applied schema")
 		mapType, ok := props.Type.(*iceberg.MapType)
 		require.True(t, ok, "properties must remain a MapType after apply")
-		assert.True(t, mapType.ValueRequired,
+		assert.True(t, mapType.ValueRequired(),
 			"map value optionality update must be reflected in the applied schema")
 	})
 
@@ -1786,9 +1786,9 @@ func TestApplyChangesMapValueOptionalityUpdates(t *testing.T) {
 		require.True(t, ok, "properties field must be present in the applied schema")
 		mapType, ok := props.Type.(*iceberg.MapType)
 		require.True(t, ok, "properties must remain a MapType after apply")
-		assert.True(t, iceberg.PrimitiveTypes.Int64.Equals(mapType.ValueType),
+		assert.True(t, iceberg.PrimitiveTypes.Int64.Equals(mapType.ValueType()),
 			"type promotion must still be applied alongside optionality change")
-		assert.False(t, mapType.ValueRequired,
+		assert.False(t, mapType.ValueRequired(),
 			"optionality change must be applied alongside type promotion")
 	})
 
@@ -1807,7 +1807,7 @@ func TestApplyChangesMapValueOptionalityUpdates(t *testing.T) {
 		require.True(t, ok, "properties field must be present in the applied schema")
 		mapType, ok := props.Type.(*iceberg.MapType)
 		require.True(t, ok, "properties must remain a MapType after apply")
-		assert.True(t, mapType.ValueRequired,
+		assert.True(t, mapType.ValueRequired(),
 			"ValueRequired must be preserved from the original schema when no Required update is registered")
 	})
 
@@ -1826,7 +1826,7 @@ func TestApplyChangesMapValueOptionalityUpdates(t *testing.T) {
 		require.True(t, ok, "properties field must be present in the applied schema")
 		mapType, ok := props.Type.(*iceberg.MapType)
 		require.True(t, ok, "properties must remain a MapType after apply")
-		assert.True(t, mapType.ValueRequired,
+		assert.True(t, mapType.ValueRequired(),
 			"ValueRequired must be preserved when the registered update leaves Required unset")
 	})
 }

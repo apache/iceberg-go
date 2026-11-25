@@ -547,10 +547,10 @@ func TestInspectSnapshotsSchema(t *testing.T) {
 
 	m, ok := fields[5].Type.(*iceberg.MapType)
 	require.True(t, ok, "summary must be a map")
-	require.Equal(t, 7, m.KeyID)
-	require.Equal(t, 8, m.ValueID)
-	require.Equal(t, iceberg.PrimitiveTypes.String, m.KeyType)
-	require.Equal(t, iceberg.PrimitiveTypes.String, m.ValueType)
+	require.Equal(t, 7, m.KeyID())
+	require.Equal(t, 8, m.ValueID())
+	require.Equal(t, iceberg.PrimitiveTypes.String, m.KeyType())
+	require.Equal(t, iceberg.PrimitiveTypes.String, m.ValueType())
 }
 
 func TestInspectSnapshots(t *testing.T) {
@@ -1148,8 +1148,8 @@ func TestInspectManifestsSchema(t *testing.T) {
 		require.False(t, fields[idx].Required)
 	}
 	require.True(t, fields[11].Required)
-	require.True(t, fields[11].Type.(*iceberg.ListType).ElementRequired)
-	require.Equal(t, 9, fields[11].Type.(*iceberg.ListType).ElementID)
+	require.True(t, fields[11].Type.(*iceberg.ListType).ElementRequired())
+	require.Equal(t, 9, fields[11].Type.(*iceberg.ListType).ElementID())
 
 	arrowSchema, err := table.SchemaToArrowSchema(sc, nil, true, false)
 	require.NoError(t, err)
@@ -1159,7 +1159,7 @@ func TestInspectManifestsSchema(t *testing.T) {
 	}
 	require.False(t, arrowSchema.Field(11).Nullable)
 
-	partitionSummary := fields[11].Type.(*iceberg.ListType).Element.(*iceberg.StructType)
+	partitionSummary := fields[11].Type.(*iceberg.ListType).Element().(*iceberg.StructType)
 	require.Equal(t,
 		[]string{"contains_null", "contains_nan", "lower_bound", "upper_bound"},
 		testFieldNames(iceberg.NewSchema(0, partitionSummary.Fields()...)))

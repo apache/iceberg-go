@@ -203,7 +203,7 @@ func TestColumnPathSegments(t *testing.T) {
 	assert.Equal(t, []string{"a.b"}, topLevel.columnPathSegments(2))
 
 	nested := NewSchema(0, NestedField{ID: 2, Name: "wrap.per", Type: &StructType{
-		FieldList: []NestedField{{ID: 3, Name: "pay.load", Type: VariantType{}}},
+		fields: []NestedField{{ID: 3, Name: "pay.load", Type: VariantType{}}},
 	}})
 	assert.Equal(t, []string{"wrap.per", "pay.load"}, nested.columnPathSegments(3))
 }

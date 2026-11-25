@@ -569,7 +569,7 @@ func equalityDeleteReadSchema(
 
 	fields := mergeEqualityProjectionFields(fileSchema.Fields(), missing)
 
-	return iceberg.NewSchemaWithIdentifiers(fileSchema.ID, fileSchema.IdentifierFieldIDs, fields...), nil
+	return iceberg.NewSchemaWithIdentifiers(fileSchema.ID, fileSchema.IdentifierFieldIDs(), fields...), nil
 }
 
 func mergeEqualityProjectionFields(

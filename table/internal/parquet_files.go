@@ -3533,7 +3533,7 @@ func (v *id2ParquetPathVisitor) Field(field iceberg.NestedField, res func() []id
 }
 
 func (v *id2ParquetPathVisitor) List(listType iceberg.ListType, elemResult func() []id2ParquetPath) []id2ParquetPath {
-	v.fieldID = listType.ElementID
+	v.fieldID = listType.ElementID()
 	v.path = append(v.path, "list")
 	result := elemResult()
 	v.path = v.path[:len(v.path)-1]
@@ -3542,12 +3542,12 @@ func (v *id2ParquetPathVisitor) List(listType iceberg.ListType, elemResult func(
 }
 
 func (v *id2ParquetPathVisitor) Map(m iceberg.MapType, keyResult func() []id2ParquetPath, valResult func() []id2ParquetPath) []id2ParquetPath {
-	v.fieldID = m.KeyID
+	v.fieldID = m.KeyID()
 	v.path = append(v.path, "key_value")
 	keyRes := keyResult()
 	v.path = v.path[:len(v.path)-1]
 
-	v.fieldID = m.ValueID
+	v.fieldID = m.ValueID()
 	v.path = append(v.path, "key_value")
 	valRes := valResult()
 	v.path = v.path[:len(v.path)-1]

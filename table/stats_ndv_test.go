@@ -579,11 +579,9 @@ func TestComputeNDVsSkipsNullValues(t *testing.T) {
 func TestComputeNDVsRejectsNonPrimitiveColumns(t *testing.T) {
 	sc := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
-		iceberg.NestedField{ID: 2, Name: "s", Required: true, Type: &iceberg.StructType{
-			FieldList: []iceberg.NestedField{
-				{ID: 3, Name: "a", Type: iceberg.PrimitiveTypes.Int64, Required: true},
-			},
-		}},
+		iceberg.NestedField{ID: 2, Name: "s", Required: true, Type: iceberg.NewStructType(
+			iceberg.NestedField{ID: 3, Name: "a", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		)},
 	)
 	tbl, ctx := createNDVTable(t, "ndv_nested", sc, []string{
 		`{"id": 1, "s": {"a": 10}}`,

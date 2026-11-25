@@ -142,7 +142,7 @@ func TestNewSchemaNormalizesNestedByteDefaultsWithoutModifyingCaller(t *testing.
 	assert.Equal(t, "03", top.WriteDefault)
 
 	assert.Equal(t, []byte{1, 2}, inner.Field(0).InitialDefault)
-	assert.Same(t, list, mapType.ValueType)
-	assert.Same(t, inner, list.Element)
+	assert.Same(t, list, mapType.ValueType())
+	assert.Same(t, inner, list.Element())
 	assert.Equal(t, []byte{3}, fields[1].WriteDefault)
 }
