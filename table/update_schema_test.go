@@ -391,7 +391,7 @@ func TestAddColumnNameAlreadyExists(t *testing.T) {
 				return u.RenameColumn([]string{"age"}, "years").
 					AddColumn([]string{"years"}, str, "", false, nil)
 			},
-			wantErr: "field already exists: years",
+			wantErr: "cannot add column, name already exists: years",
 		},
 		{
 			name:          "name another column is renamed to, by union",
@@ -402,7 +402,16 @@ func TestAddColumnNameAlreadyExists(t *testing.T) {
 						iceberg.NestedField{ID: 1, Name: "years", Type: str},
 					))
 			},
-			wantErr: "field already exists: years",
+			wantErr: "cannot add column, name already exists: years",
+		},
+		{
+			name:          "name a nested column is renamed to",
+			caseSensitive: true,
+			build: func(u *UpdateSchema) *UpdateSchema {
+				return u.RenameColumn([]string{"address", "city"}, "town").
+					AddColumn([]string{"address", "town"}, str, "", false, nil)
+			},
+			wantErr: "cannot add column, name already exists: address.town",
 		},
 		{
 			name:          "column added with different case in case-insensitive mode",
@@ -411,7 +420,7 @@ func TestAddColumnNameAlreadyExists(t *testing.T) {
 				return u.AddColumn([]string{"x"}, str, "", false, nil).
 					AddColumn([]string{"X"}, str, "", false, nil)
 			},
-			wantErr: "field already exists in adds: X",
+			wantErr: "cannot add column, name already exists: X",
 		},
 	}
 
@@ -420,9 +429,11 @@ func TestAddColumnNameAlreadyExists(t *testing.T) {
 			txn := New([]string{"id"}, testMetadata, "", nil, nil).NewTransaction()
 
 			_, err := tt.build(NewUpdateSchema(txn, tt.caseSensitive, false)).Apply()
+			require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
 			require.ErrorContains(t, err, tt.wantErr)
 
 			err = tt.build(NewUpdateSchema(txn, tt.caseSensitive, false)).Commit()
+			require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
 			require.ErrorContains(t, err, tt.wantErr)
 		})
 	}
@@ -470,6 +481,139 @@ func TestAddColumnNameAlreadyExists(t *testing.T) {
 			tt.checkID(t, s)
 		})
 	}
+}
+
+func TestRenameColumnNameAlreadyExists(t *testing.T) {
+	str := iceberg.PrimitiveTypes.String
+
+	rejected := []struct {
+		name          string
+		caseSensitive bool
+		build         func(*UpdateSchema) *UpdateSchema
+		wantErr       string
+	}{
+		{
+			name:          "existing column",
+			caseSensitive: true,
+			build: func(u *UpdateSchema) *UpdateSchema {
+				return u.RenameColumn([]string{"name"}, "age")
+			},
+			wantErr: "cannot rename column, name already exists: age",
+		},
+		{
+			name:          "existing column with different case in case-insensitive mode",
+			caseSensitive: false,
+			build: func(u *UpdateSchema) *UpdateSchema {
+				return u.RenameColumn([]string{"name"}, "AGE")
+			},
+			wantErr: "cannot rename column, name already exists: AGE",
+		},
+		{
+			name:          "added column with different case in case-insensitive mode",
+			caseSensitive: false,
+			build: func(u *UpdateSchema) *UpdateSchema {
+				return u.AddColumn([]string{"x"}, str, "", false, nil).
+					RenameColumn([]string{"age"}, "X")
+			},
+			wantErr: "cannot rename column, name already exists: X",
+		},
+		{
+			name:          "renamed column with different case in case-insensitive mode",
+			caseSensitive: false,
+			build: func(u *UpdateSchema) *UpdateSchema {
+				return u.RenameColumn([]string{"name"}, "y").
+					RenameColumn([]string{"age"}, "Y")
+			},
+			wantErr: "cannot rename column, name already exists: Y",
+		},
+		{
+			name:          "nested added column with different case in case-insensitive mode",
+			caseSensitive: false,
+			build: func(u *UpdateSchema) *UpdateSchema {
+				return u.AddColumn([]string{"address", "town"}, str, "", false, nil).
+					RenameColumn([]string{"address", "city"}, "Town")
+			},
+			wantErr: "cannot rename column, name already exists: address.Town",
+		},
+	}
+
+	for _, tt := range rejected {
+		t.Run(tt.name, func(t *testing.T) {
+			txn := New([]string{"id"}, testMetadata, "", nil, nil).NewTransaction()
+
+			_, err := tt.build(NewUpdateSchema(txn, tt.caseSensitive, false)).Apply()
+			require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+			require.ErrorContains(t, err, tt.wantErr)
+
+			err = tt.build(NewUpdateSchema(txn, tt.caseSensitive, false)).Commit()
+			require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+			require.ErrorContains(t, err, tt.wantErr)
+		})
+	}
+
+	allowed := []struct {
+		name          string
+		caseSensitive bool
+		build         func(*UpdateSchema) *UpdateSchema
+		wantIDs       map[string]int
+	}{
+		{
+			name:          "same column with different case in case-insensitive mode",
+			caseSensitive: false,
+			build: func(u *UpdateSchema) *UpdateSchema {
+				return u.RenameColumn([]string{"name"}, "Name")
+			},
+			wantIDs: map[string]int{"Name": 2},
+		},
+		{
+			name:          "same column with different case in case-sensitive mode",
+			caseSensitive: true,
+			build: func(u *UpdateSchema) *UpdateSchema {
+				return u.RenameColumn([]string{"name"}, "Name")
+			},
+			wantIDs: map[string]int{"Name": 2},
+		},
+		{
+			name:          "name of a column renamed away",
+			caseSensitive: true,
+			build: func(u *UpdateSchema) *UpdateSchema {
+				return u.RenameColumn([]string{"name"}, "full_name").
+					RenameColumn([]string{"age"}, "name")
+			},
+			wantIDs: map[string]int{"full_name": 2, "name": 3},
+		},
+	}
+
+	for _, tt := range allowed {
+		t.Run(tt.name, func(t *testing.T) {
+			txn := New([]string{"id"}, testMetadata, "", nil, nil).NewTransaction()
+
+			applied, err := tt.build(NewUpdateSchema(txn, tt.caseSensitive, false)).Apply()
+			require.NoError(t, err)
+
+			require.NoError(t, tt.build(NewUpdateSchema(txn, tt.caseSensitive, false)).Commit())
+
+			for _, s := range []*iceberg.Schema{applied, txn.meta.CurrentSchema()} {
+				for name, id := range tt.wantIDs {
+					f, ok := s.FindFieldByName(name)
+					require.True(t, ok, name)
+					assert.Equal(t, id, f.ID)
+				}
+			}
+		})
+	}
+
+	// The first rename of a swap asks for a name that is still in use.
+	t.Run("swapped names", func(t *testing.T) {
+		txn := New([]string{"id"}, testMetadata, "", nil, nil).NewTransaction()
+
+		_, err := NewUpdateSchema(txn, true, false).
+			RenameColumn([]string{"name"}, "age").
+			RenameColumn([]string{"age"}, "name").
+			Apply()
+		require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+		require.ErrorContains(t, err, "cannot rename column, name already exists: age")
+	})
 }
 
 func TestApplyChanges(t *testing.T) {
@@ -863,8 +1007,8 @@ func TestRenameColumn(t *testing.T) {
 		txn := table.NewTransaction()
 
 		_, err := NewUpdateSchema(txn, true, true).RenameColumn([]string{"name"}, "age").Apply()
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "field already exists")
+		assert.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+		assert.Contains(t, err.Error(), "cannot rename column, name already exists: age")
 	})
 }
 
@@ -2689,7 +2833,7 @@ func TestUnionByNameCannotExtendStructAddedByPriorOp(t *testing.T) {
 		), "", false, nil).
 		UnionByNameWith(extend).
 		Apply()
-	require.ErrorContains(t, err, "field already exists in adds: addr")
+	require.ErrorContains(t, err, "cannot add column, name already exists: addr")
 }
 
 func TestUnionByNameMirroredSchemas(t *testing.T) {
