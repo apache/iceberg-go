@@ -290,6 +290,9 @@ func (r *RewriteFiles) ApplyResult(gr CompactionGroupResult) *RewriteFiles {
 // [RewriteFiles.DeleteFile] had an unsupported content type, if the
 // builder has no file changes, or if the underlying
 // [Transaction.ReplaceFiles] call fails.
+//
+// Position-delete candidates can require reading manifests across the current
+// snapshot and opening delete files to check which data files they affect.
 func (r *RewriteFiles) Commit(ctx context.Context) error {
 	if r.committed {
 		return fmt.Errorf("%w: RewriteFiles.Commit already called on this builder", ErrInvalidOperation)

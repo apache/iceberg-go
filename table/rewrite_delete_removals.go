@@ -131,14 +131,16 @@ func (r *RewriteFiles) deadPositionDeletePaths(
 	meta, err := r.txn.txnMeta()
 	if err != nil {
 		r.txn.mx.Unlock()
+
 		return nil, nil, err
 	}
 	snapshot := r.txn.planningSnapshot(meta)
+	fsF := r.txn.tbl.fsF
 	r.txn.mx.Unlock()
 	if snapshot == nil {
 		return nil, nil, nil
 	}
-	fs, err := r.txn.tbl.fsF(ctx)
+	fs, err := fsF(ctx)
 	if err != nil {
 		return nil, nil, fmt.Errorf("open table IO for position-delete cleanup: %w", err)
 	}

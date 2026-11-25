@@ -214,10 +214,9 @@ type RewriteDataFilesOptions struct {
 	//
 	// Use [compaction.CollectDeadEqualityDeletesWithSpecs] and
 	// [compaction.CollectDeadPositionDeletes] to compute this list
-	// from the current snapshot. Position deletes attached to
-	// rewritten tasks are already removed by the per-group staging;
-	// listing them again here is harmless (each file is removed and
-	// counted once).
+	// from the current snapshot. If an extra also appears as a worker
+	// candidate, the automatic check decides whether it can be removed.
+	// Each removed file is counted once.
 	ExtraDeleteFilesToRemove []iceberg.DataFile
 
 	// GroupOptions are forwarded to every [ExecuteCompactionGroup]
@@ -466,18 +465,28 @@ func (binPackStrategy) writeOptions() []WriteRecordOption { return nil }
 // here. Distributed coordinators stage worker results via
 // [ExecuteCompactionGroup] and commit them via [Transaction.NewRewrite]
 // + [RewriteFiles.ApplyResult] + [RewriteFiles.Commit] instead.
-func (t *Transaction) RewriteDataFiles(ctx context.Context, groups []CompactionTaskGroup, opts RewriteDataFilesOptions) (*RewriteResult, error) {
-	if _, err := t.txnMeta(); err != nil {
-		return nil, err
-	}
+func (t *Transaction) RewriteDataFiles(ctx context.Context, groups []CompactionTaskGroup, opts RewriteDataFilesOptions) (_ *RewriteResult, err error) {
 	if opts.PartialProgress {
 		return t.rewriteDataFilesPartial(ctx, groups, opts)
 	}
 	if len(groups) == 0 {
+		if err := t.checkNotNil(); err != nil {
+			return nil, err
+		}
+		t.mx.Lock()
+		defer t.mx.Unlock()
+		if _, err := t.txnMeta(); err != nil {
+			return nil, err
+		}
+
 		return &RewriteResult{}, nil
 	}
 
-	staged, err := t.StagedTable()
+	_, planning, err := t.rewritePlanningTransaction()
+	if err != nil {
+		return nil, err
+	}
+	staged, err := planning.StagedTable()
 	if err != nil {
 		return nil, err
 	}
@@ -485,6 +494,19 @@ func (t *Transaction) RewriteDataFiles(ctx context.Context, groups []CompactionT
 	result := &RewriteResult{}
 	rewrite := t.NewRewrite(opts.SnapshotProps)
 	stagedDeleteFiles := make(map[string]struct{})
+	var outputs []CompactionGroupResult
+	defer func() {
+		if err == nil || len(outputs) == 0 {
+			return
+		}
+		fs, cleanupErr := staged.fsF(context.WithoutCancel(ctx))
+		if cleanupErr == nil {
+			cleanupErr = cleanupCompactionOutputs(fs, outputs)
+		}
+		if cleanupErr != nil {
+			err = errors.Join(err, fmt.Errorf("clean up atomic rewrite outputs: %w", cleanupErr))
+		}
+	}()
 
 	for _, group := range groups {
 		if err := ctx.Err(); err != nil {
@@ -496,6 +518,9 @@ func (t *Transaction) RewriteDataFiles(ctx context.Context, groups []CompactionT
 		}
 
 		gr, err := ExecuteCompactionGroup(ctx, staged.Table, group, opts.GroupOptions...)
+		if len(gr.NewDataFiles) > 0 {
+			outputs = append(outputs, gr)
+		}
 		if err != nil {
 			return result, err
 		}

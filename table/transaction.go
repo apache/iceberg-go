@@ -384,9 +384,9 @@ func (t *Transaction) checkRewriteParentLocked(expected *Snapshot) error {
 	return nil
 }
 
-// rewritePlanningMetadata takes a private copy for the manifest producer and
-// records the staging state against which its output can be applied.
-func (t *Transaction) rewritePlanningMetadata() (base, planning *MetadataBuilder, err error) {
+// rewritePlanningTransaction takes a private copy for the manifest producer
+// and records the staging state against which its output can be applied.
+func (t *Transaction) rewritePlanningTransaction() (*MetadataBuilder, *Transaction, error) {
 	if err := t.checkNotNil(); err != nil {
 		return nil, nil, err
 	}
@@ -401,7 +401,38 @@ func (t *Transaction) rewritePlanningMetadata() (base, planning *MetadataBuilder
 		return nil, nil, err
 	}
 
-	return meta, meta.clone(), nil
+	return meta, &Transaction{tbl: t.tbl, meta: meta.clone(), branch: t.branch}, nil
+}
+
+// Property edits append to the staged updates without changing the schema,
+// sequence numbers, or snapshot refs used to write manifests. Keep the
+// original name mapping and destinations, since the rewrite depends on them.
+func rewriteMetadataCompatible(base, current *MetadataBuilder) bool {
+	if base == current {
+		return true
+	}
+	if len(current.updates) < len(base.updates) {
+		return false
+	}
+	for _, update := range current.updates[len(base.updates):] {
+		switch update.(type) {
+		case *setPropertiesUpdate, *removePropertiesUpdate:
+		default:
+			return false
+		}
+	}
+	for _, key := range [...]string{
+		DefaultNameMappingKey, WriteDataPathKey, WriteMetadataPathKey,
+		ObjectStoreEnabledKey, WriteObjectStorePartitionedPathsKey,
+	} {
+		before, had := base.props[key]
+		after, has := current.props[key]
+		if before != after || had != has {
+			return false
+		}
+	}
+
+	return true
 }
 
 // transactionRequirements returns the requirements a commit on branch must carry.
@@ -470,14 +501,17 @@ func (t *Transaction) updateSnapshot(wfs io.WriteFileIO, props iceberg.Propertie
 }
 
 func (t *Transaction) SetProperties(props iceberg.Properties) error {
-	if _, err := t.txnMeta(); err != nil {
-		return err
-	}
 	if len(props) > 0 {
 		return t.apply([]Update{NewSetPropertiesUpdate(props)}, nil)
 	}
+	if err := t.checkNotNil(); err != nil {
+		return err
+	}
+	t.mx.Lock()
+	defer t.mx.Unlock()
+	_, err := t.txnMeta()
 
-	return nil
+	return err
 }
 
 // AssertRefSnapshotID records a requirement that the given branch is
@@ -2004,10 +2038,11 @@ func (t *Transaction) replaceFiles(
 	snapshotProps iceberg.Properties,
 	opts ...WriteOption,
 ) (err error) {
-	base, meta, err := t.rewritePlanningMetadata()
+	base, planning, err := t.rewritePlanningTransaction()
 	if err != nil {
 		return err
 	}
+	meta := planning.meta
 	var cfg dataFileCfg
 	for _, o := range opts {
 		o(&cfg)
@@ -2019,7 +2054,7 @@ func (t *Transaction) replaceFiles(
 			ErrInvalidOperation, *cfg.dataSequenceNumber, nextSequenceNumber)
 	}
 
-	// Delegate data file replacement to existing logic.
+	// Delegate data-only replacements to the existing logic.
 	if len(deleteFilesToRemove) == 0 && len(autoDeleteFilesToRemove) == 0 && len(deleteFilesToAdd) == 0 {
 		return t.ReplaceDataFiles(ctx, dataFilesToDelete, dataFilesToAdd, snapshotProps, opts...)
 	}
@@ -2028,7 +2063,6 @@ func (t *Transaction) replaceFiles(
 			ErrInvalidOperation)
 	}
 
-	planning := &Transaction{tbl: t.tbl, meta: meta, branch: t.branch}
 	setToAdd, err := planning.validateDataFilesToAdd(dataFilesToAdd, "ReplaceFiles", !cfg.rewriteSemantics)
 	if err != nil {
 		return err
@@ -2119,12 +2153,12 @@ func (t *Transaction) replaceFiles(
 		autoSetDeleteFilesToRemove[path] = struct{}{}
 	}
 
-	s := t.planningSnapshot(meta)
+	s := planning.planningSnapshot(meta)
 	if s == nil {
 		return fmt.Errorf("%w: cannot replace files in a table without an existing snapshot", ErrInvalidOperation)
 	}
 
-	fs, err := t.tbl.fsF(ctx)
+	fs, err := planning.tbl.fsF(ctx)
 	if err != nil {
 		return err
 	}
@@ -2435,7 +2469,7 @@ func (t *Transaction) replaceFiles(
 	if err := t.checkRewriteParentLocked(s); err != nil {
 		return err
 	}
-	if t.meta != base {
+	if t.tbl != planning.tbl || !rewriteMetadataCompatible(base, t.meta) {
 		return fmt.Errorf("%w: transaction metadata changed while staging the rewrite; replan the replacement", ErrCommitFailed)
 	}
 

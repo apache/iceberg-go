@@ -302,6 +302,7 @@ func (f *rewriteManifestGate) Create(ctx context.Context, name string) (iceio.Fi
 			}
 		}
 	}
+
 	return f.trackingFS.Create(ctx, name)
 }
 
@@ -360,6 +361,148 @@ func TestRewriteFilesRejectsParentChangeDuringManifestWrite(t *testing.T) {
 	committed, err := tx.Commit(ctx)
 	require.NoError(t, err)
 	require.ElementsMatch(t, []int64{2, 4, 5}, scanIDs(t, committed))
+}
+
+func TestRewriteStagesAgainstCompatibleMetadata(t *testing.T) {
+	for _, mode := range []string{"builder", "ReplaceFiles", "conversion", "atomic"} {
+		for _, edit := range []string{"property", "location"} {
+			t.Run(mode+"/"+edit, func(t *testing.T) {
+				ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+				defer cancel()
+
+				version := 2
+				if mode == "conversion" {
+					version = 3
+				}
+				tbl, cat := newConcurrentRewriteTestTableVersion(t, version)
+				var groups []table.CompactionTaskGroup
+				wantIDs := []int64{2, 4}
+				if mode == "conversion" {
+					tbl = appendRows(t, tbl, `[{"id":1},{"id":2}]`)
+					tbl = appendEqualityDelete(t, tbl, []int{1}, `[{"id":1}]`)
+					wantIDs = []int64{2}
+				} else {
+					tbl, groups = setupSharedPositionDeleteRewrite(t, tbl)
+				}
+				parent := tbl.CurrentSnapshot().SnapshotID
+				gate := &rewriteManifestGate{blocked: make(chan string, 1), resume: make(chan struct{})}
+				resume := sync.OnceFunc(func() { close(gate.resume) })
+				defer resume()
+				wrapped := table.New(tbl.Identifier(), tbl.Metadata(), tbl.MetadataLocation(),
+					func(context.Context) (iceio.IO, error) { return gate, nil }, cat)
+				tx := wrapped.NewTransaction()
+
+				var stage func() error
+				switch mode {
+				case "conversion":
+					stage = func() error {
+						_, err := tx.ConvertEqualityDeletesToDeletionVectors(ctx)
+
+						return err
+					}
+				case "atomic":
+					stage = func() error {
+						_, err := tx.RewriteDataFiles(ctx, groups, table.RewriteDataFilesOptions{})
+
+						return err
+					}
+				default:
+					rewrite := tx.NewRewrite(nil)
+					var oldData, newData []iceberg.DataFile
+					for _, group := range groups {
+						worker, err := table.ExecuteCompactionGroup(ctx, tbl, group)
+						require.NoError(t, err)
+						rewrite.ApplyResult(worker)
+						oldData = append(oldData, worker.OldDataFiles...)
+						newData = append(newData, worker.NewDataFiles...)
+					}
+					deleteFiles := groups[0].Tasks[0].DeleteFiles
+					require.Len(t, deleteFiles, 1)
+					stage = func() error {
+						if mode == "builder" {
+							return rewrite.Commit(ctx)
+						}
+
+						return tx.ReplaceFiles(ctx, oldData, newData, deleteFiles, nil)
+					}
+				}
+				rewriteDone := make(chan error, 1)
+				go func() { rewriteDone <- stage() }()
+				var manifestList string
+				select {
+				case manifestList = <-gate.blocked:
+				case err := <-rewriteDone:
+					t.Fatalf("rewrite ended before writing its manifest list: %v", err)
+				case <-ctx.Done():
+					t.Fatal(ctx.Err())
+				}
+				written := gate.snapshotCreated()
+				require.NotEmpty(t, written)
+				if mode == "conversion" {
+					paths, err := filepath.Glob(filepath.Join(tbl.Location(), "data", "*-equality-delete-conversion.puffin"))
+					require.NoError(t, err)
+					require.Len(t, paths, 1)
+					written[paths[0]] = struct{}{}
+				}
+				outputSuffix := map[string]string{"atomic": ".parquet", "conversion": ".puffin"}[mode]
+				if outputSuffix != "" {
+					found := false
+					for path := range written {
+						if strings.HasSuffix(path, outputSuffix) {
+							require.FileExists(t, path)
+							found = true
+						}
+					}
+					require.True(t, found, "rewrite should have written %s output", outputSuffix)
+				}
+
+				newLocation := tbl.Location() + "/relocated"
+				editDone := make(chan error, 1)
+				go func() {
+					if edit == "property" {
+						editDone <- tx.SetProperties(iceberg.Properties{"owner": "compaction"})
+
+						return
+					}
+					editDone <- tx.SetLocation(newLocation)
+				}()
+				select {
+				case err := <-editDone:
+					require.NoError(t, err)
+				case <-ctx.Done():
+					t.Fatal("metadata change could not stage while writing the manifest list")
+				}
+				resume()
+				select {
+				case err := <-rewriteDone:
+					if edit == "property" {
+						require.NoError(t, err)
+						require.FileExists(t, manifestList)
+					} else {
+						require.ErrorIs(t, err, table.ErrCommitFailed)
+						require.ErrorContains(t, err, "transaction metadata changed")
+						require.NoFileExists(t, manifestList)
+						for path := range written {
+							require.NoFileExists(t, path)
+						}
+					}
+				case <-ctx.Done():
+					t.Fatal(ctx.Err())
+				}
+
+				committed, err := tx.Commit(ctx)
+				require.NoError(t, err)
+				if edit == "property" {
+					require.Equal(t, "compaction", committed.Properties()["owner"])
+					require.NotEqual(t, parent, committed.CurrentSnapshot().SnapshotID)
+				} else {
+					require.Equal(t, newLocation, committed.Location())
+					require.Equal(t, parent, committed.CurrentSnapshot().SnapshotID)
+				}
+				require.ElementsMatch(t, wantIDs, scanIDs(t, committed))
+			})
+		}
+	}
 }
 
 func TestRewriteFilesValidatesWorkerDeletionVectors(t *testing.T) {
