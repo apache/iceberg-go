@@ -172,9 +172,10 @@ func (fa *fastAppendFiles) parentDependentManifests(ctx context.Context, parent 
 // resulting manifest list. Two concurrent fast-appends adding the
 // same file path is a writer-side error (paths are expected to be
 // unique, normally via UUID-stamped filenames); detecting it here
-// is out of Java parity scope. AddDataFiles and AddDataFilesByPath,
-// which take caller-supplied paths, recheck them against the fresh
-// parent when a commit retry rebuilds the snapshot.
+// is out of Java parity scope. As an iceberg-go-only addition,
+// AddDataFiles and AddDataFilesByPath, which take caller-supplied
+// paths, recheck them against the fresh parent when a commit retry
+// rebuilds the snapshot; Java's FastAppend and MergeAppend do not.
 func (fa *fastAppendFiles) validate(_ *conflictContext) error {
 	return nil
 }

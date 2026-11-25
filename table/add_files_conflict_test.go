@@ -118,6 +118,12 @@ func TestAddDataFilesByPath_ConcurrentDuplicateRejectedWithManifestMerge(t *test
 	tbl, err := tx.Commit(ctx)
 	require.NoError(t, err)
 
+	fs, err := tbl.FS(ctx)
+	require.NoError(t, err)
+	planned, err := tbl.CurrentSnapshot().Manifests(ctx, fs)
+	require.NoError(t, err)
+	require.Len(t, planned, 1)
+
 	txB := tbl.NewTransaction()
 	require.NoError(t, txB.AddDataFilesByPath(ctx, []string{imported}, nil, false))
 
@@ -125,6 +131,13 @@ func TestAddDataFilesByPath_ConcurrentDuplicateRejectedWithManifestMerge(t *test
 	require.NoError(t, txA.AddDataFilesByPath(ctx, []string{imported}, nil, false))
 	_, err = txA.Commit(ctx)
 	require.NoError(t, err)
+
+	// Writer A's commit must merge the manifests; otherwise this test only
+	// covers the fast append case.
+	current, err := loadCurrent(t, cat).CurrentSnapshot().Manifests(ctx, fs)
+	require.NoError(t, err)
+	require.Len(t, current, 1)
+	require.NotEqual(t, planned[0].FilePath(), current[0].FilePath())
 
 	_, err = txB.Commit(ctx)
 	require.ErrorIs(t, err, table.ErrDuplicateDataFiles)
@@ -301,6 +314,34 @@ func TestAddDataFilesByPath_ConcurrentExpiryCommits(t *testing.T) {
 	_, err = txB.Commit(ctx)
 	require.NoError(t, err)
 	require.Equal(t, []int64{0, 1, 2, 3, 4}, idsInTable(t, loadCurrent(t, cat)))
+}
+
+// TestAddDataFilesByPath_ConcurrentDuplicateRejectedAfterExpiry checks that a
+// duplicate is still rejected when the writer's planned snapshot has been
+// expired before the retry.
+func TestAddDataFilesByPath_ConcurrentDuplicateRejectedAfterExpiry(t *testing.T) {
+	ctx := t.Context()
+	tbl, cat, imported := newAddFilesConflictTable(t, 2, "4")
+	plannedID := tbl.CurrentSnapshot().SnapshotID
+
+	txB := tbl.NewTransaction()
+	require.NoError(t, txB.AddDataFilesByPath(ctx, []string{imported}, nil, false))
+
+	txA := tbl.NewTransaction()
+	require.NoError(t, txA.AddDataFilesByPath(ctx, []string{imported}, nil, false))
+	_, err := txA.Commit(ctx)
+	require.NoError(t, err)
+
+	expire := loadCurrent(t, cat).NewTransaction()
+	require.NoError(t, expire.ExpireSnapshots(table.WithOlderThan(0), table.WithRetainLast(1)))
+	_, err = expire.Commit(ctx)
+	require.NoError(t, err)
+	require.Nil(t, loadCurrent(t, cat).SnapshotByID(plannedID))
+
+	_, err = txB.Commit(ctx)
+	require.ErrorIs(t, err, table.ErrDuplicateDataFiles)
+	require.ErrorIs(t, err, table.ErrTransactionUnusable)
+	require.Equal(t, []int64{0, 1, 2}, idsInTable(t, loadCurrent(t, cat)))
 }
 
 // TestAddDataFilesByPath_ConcurrentAddThenDeleteCommits checks that a path a
