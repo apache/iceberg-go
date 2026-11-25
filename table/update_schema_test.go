@@ -342,6 +342,316 @@ func TestAddColumn(t *testing.T) {
 	})
 }
 
+func TestUpdateColumnAddedInSameUpdate(t *testing.T) {
+	newUpdate := func(caseSensitive, allowIncompatibleChanges bool) *UpdateSchema {
+		tbl := New([]string{"id"}, testMetadata, "", nil, nil)
+
+		return NewUpdateSchema(tbl.NewTransaction(), caseSensitive, allowIncompatibleChanges)
+	}
+	doc := func(d string) ColumnUpdate {
+		return ColumnUpdate{Doc: iceberg.Optional[string]{Valid: true, Val: d}}
+	}
+	toLong := ColumnUpdate{FieldType: iceberg.Optional[iceberg.Type]{Valid: true, Val: iceberg.PrimitiveTypes.Int64}}
+	required := ColumnUpdate{Required: iceberg.Optional[bool]{Valid: true, Val: true}}
+
+	t.Run("doc", func(t *testing.T) {
+		sc, err := newUpdate(true, false).
+			AddColumn([]string{"gender"}, iceberg.PrimitiveTypes.String, "", false, nil).
+			UpdateColumn([]string{"gender"}, doc("hello")).
+			Apply()
+		require.NoError(t, err)
+
+		field, ok := sc.FindFieldByName("gender")
+		require.True(t, ok)
+		assert.Equal(t, iceberg.NestedField{ID: 12, Name: "gender", Type: iceberg.PrimitiveTypes.String, Doc: "hello"}, field)
+	})
+
+	t.Run("type", func(t *testing.T) {
+		sc, err := newUpdate(true, false).
+			AddColumn([]string{"value"}, iceberg.PrimitiveTypes.Int32, "", false, nil).
+			UpdateColumn([]string{"value"}, toLong).
+			Apply()
+		require.NoError(t, err)
+
+		field, ok := sc.FindFieldByName("value")
+		require.True(t, ok)
+		assert.Equal(t, iceberg.NestedField{ID: 12, Name: "value", Type: iceberg.PrimitiveTypes.Int64}, field)
+	})
+
+	t.Run("two updates in a row", func(t *testing.T) {
+		sc, err := newUpdate(true, false).
+			AddColumn([]string{"value"}, iceberg.PrimitiveTypes.Int32, "", false, nil).
+			UpdateColumn([]string{"value"}, doc("a value")).
+			UpdateColumn([]string{"value"}, toLong).
+			Apply()
+		require.NoError(t, err)
+
+		field, ok := sc.FindFieldByName("value")
+		require.True(t, ok)
+		assert.Equal(t, iceberg.NestedField{ID: 12, Name: "value", Type: iceberg.PrimitiveTypes.Int64, Doc: "a value"}, field)
+	})
+
+	t.Run("nested column", func(t *testing.T) {
+		sc, err := newUpdate(true, false).
+			AddColumn([]string{"address", "street"}, iceberg.PrimitiveTypes.String, "", false, nil).
+			UpdateColumn([]string{"address", "street"}, doc("a street")).
+			Apply()
+		require.NoError(t, err)
+
+		field, ok := sc.FindFieldByName("address.street")
+		require.True(t, ok)
+		assert.Equal(t, iceberg.NestedField{ID: 12, Name: "street", Type: iceberg.PrimitiveTypes.String, Doc: "a street"}, field)
+	})
+
+	t.Run("case-insensitive name", func(t *testing.T) {
+		sc, err := newUpdate(false, false).
+			AddColumn([]string{"gender"}, iceberg.PrimitiveTypes.String, "", false, nil).
+			UpdateColumn([]string{"GENDER"}, doc("hello")).
+			Apply()
+		require.NoError(t, err)
+
+		field, ok := sc.FindFieldByName("gender")
+		require.True(t, ok)
+		assert.Equal(t, "hello", field.Doc)
+	})
+
+	t.Run("case-sensitive name must match", func(t *testing.T) {
+		_, err := newUpdate(true, false).
+			AddColumn([]string{"gender"}, iceberg.PrimitiveTypes.String, "", false, nil).
+			UpdateColumn([]string{"GENDER"}, doc("hello")).
+			Apply()
+		require.ErrorContains(t, err, "field not found: GENDER")
+	})
+
+	t.Run("rename is rejected", func(t *testing.T) {
+		_, err := newUpdate(true, true).
+			AddColumn([]string{"gender"}, iceberg.PrimitiveTypes.String, "", false, nil).
+			RenameColumn([]string{"gender"}, "sex").
+			Apply()
+		require.ErrorContains(t, err, "cannot rename a column added in the same update: gender")
+	})
+
+	t.Run("rename through UpdateColumn is rejected", func(t *testing.T) {
+		_, err := newUpdate(true, true).
+			AddColumn([]string{"gender"}, iceberg.PrimitiveTypes.String, "", false, nil).
+			UpdateColumn([]string{"gender"}, ColumnUpdate{
+				Name: iceberg.Optional[string]{Valid: true, Val: "sex"},
+				Doc:  iceberg.Optional[string]{Valid: true, Val: "hello"},
+			}).
+			Apply()
+		require.ErrorContains(t, err, "cannot rename a column added in the same update: gender")
+	})
+
+	t.Run("rename of an existing column still works", func(t *testing.T) {
+		sc, err := newUpdate(true, false).
+			AddColumn([]string{"gender"}, iceberg.PrimitiveTypes.String, "", false, nil).
+			RenameColumn([]string{"age"}, "years").
+			Apply()
+		require.NoError(t, err)
+
+		_, ok := sc.FindFieldByName("years")
+		assert.True(t, ok)
+		_, ok = sc.FindFieldByName("age")
+		assert.False(t, ok)
+	})
+
+	t.Run("required with an initial default", func(t *testing.T) {
+		sc, err := newUpdate(true, false).
+			AddColumn([]string{"value"}, iceberg.PrimitiveTypes.Int32, "", false, iceberg.Int32Literal(1)).
+			UpdateColumn([]string{"value"}, required).
+			Apply()
+		require.NoError(t, err)
+
+		field, ok := sc.FindFieldByName("value")
+		require.True(t, ok)
+		assert.True(t, field.Required)
+	})
+
+	t.Run("required without an initial default is rejected", func(t *testing.T) {
+		_, err := newUpdate(true, false).
+			AddColumn([]string{"value"}, iceberg.PrimitiveTypes.Int32, "", false, nil).
+			UpdateColumn([]string{"value"}, required).
+			Apply()
+		require.ErrorContains(t, err, "cannot change column nullability from optional to required: value")
+	})
+
+	t.Run("required on an existing column is rejected", func(t *testing.T) {
+		_, err := newUpdate(true, false).
+			AddColumn([]string{"value"}, iceberg.PrimitiveTypes.Int32, "", false, iceberg.Int32Literal(1)).
+			UpdateColumn([]string{"age"}, required).
+			Apply()
+		require.ErrorContains(t, err, "cannot change column nullability from optional to required: age")
+	})
+
+	t.Run("write default", func(t *testing.T) {
+		md, err := NewMetadata(iceberg.NewSchema(0,
+			iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true}),
+			iceberg.UnpartitionedSpec, UnsortedSortOrder, "s3://bucket/table",
+			iceberg.Properties{PropertyFormatVersion: "3"})
+		require.NoError(t, err)
+		txn := New([]string{"table"}, md, "", nil, nil).NewTransaction()
+
+		sc, err := NewUpdateSchema(txn, true, false).
+			AddColumn([]string{"value"}, iceberg.PrimitiveTypes.Int32, "", false, iceberg.Int32Literal(1)).
+			UpdateColumn([]string{"value"}, ColumnUpdate{
+				WriteDefault: iceberg.Optional[iceberg.Literal]{Valid: true, Val: iceberg.Int32Literal(7)},
+			}).
+			Apply()
+		require.NoError(t, err)
+
+		// As in Java, only the write default changes; the initial default stays.
+		field, ok := sc.FindFieldByName("value")
+		require.True(t, ok)
+		assert.Equal(t, int32(1), field.InitialDefault)
+		assert.Equal(t, int32(7), field.WriteDefault)
+	})
+
+	t.Run("name mapping", func(t *testing.T) {
+		mappingAfter := func(t *testing.T, u *UpdateSchema) iceberg.NameMapping {
+			t.Helper()
+			updates, _, err := u.BuildUpdates()
+			require.NoError(t, err)
+			for _, upd := range updates {
+				if props, ok := upd.(*setPropertiesUpdate); ok {
+					var mapping iceberg.NameMapping
+					require.NoError(t, json.Unmarshal([]byte(props.Updates[DefaultNameMappingKey]), &mapping))
+
+					return mapping
+				}
+			}
+			t.Fatal("no name mapping update")
+
+			return nil
+		}
+		gender := func(mapping iceberg.NameMapping) *iceberg.MappedField {
+			for i := range mapping {
+				if mapping[i].FieldID != nil && *mapping[i].FieldID == 12 {
+					return &mapping[i]
+				}
+			}
+
+			return nil
+		}
+		withMapping := func() *UpdateSchema {
+			tbl := New([]string{"id"}, testMetadata, "", nil, nil)
+
+			return NewUpdateSchema(tbl.NewTransaction(), true, false,
+				WithNameMapping(testMetadata.CurrentSchema().NameMapping()))
+		}
+
+		mapping := mappingAfter(t, withMapping().
+			AddColumn([]string{"gender"}, iceberg.PrimitiveTypes.String, "", false, nil).
+			UpdateColumn([]string{"gender"}, doc("hello")))
+		field := gender(mapping)
+		require.NotNil(t, field)
+		assert.Equal(t, []string{"gender"}, field.Names)
+
+		// A rejected rename fails the whole update, so no mapping is built.
+		_, _, err := withMapping().
+			AddColumn([]string{"gender"}, iceberg.PrimitiveTypes.String, "", false, nil).
+			RenameColumn([]string{"gender"}, "sex").
+			BuildUpdates()
+		require.ErrorContains(t, err, "cannot rename a column added in the same update: gender")
+	})
+
+	t.Run("required on an existing column with an initial default is rejected", func(t *testing.T) {
+		// Only a column added in this update may use its initial default to
+		// become required; an existing column may hold nulls in old files.
+		existing := iceberg.NestedField{ID: 1, Name: "value", Type: iceberg.PrimitiveTypes.Int32, InitialDefault: int32(1), WriteDefault: int32(1)}
+		md, err := NewMetadata(iceberg.NewSchema(0, existing),
+			iceberg.UnpartitionedSpec, UnsortedSortOrder, "s3://bucket/table",
+			iceberg.Properties{PropertyFormatVersion: "3"})
+		require.NoError(t, err)
+		txn := New([]string{"table"}, md, "", nil, nil).NewTransaction()
+
+		_, err = NewUpdateSchema(txn, true, false).
+			UpdateColumn([]string{"value"}, required).
+			Apply()
+		require.ErrorContains(t, err, "cannot change column nullability from optional to required: value")
+	})
+
+	t.Run("required with only a write default is rejected", func(t *testing.T) {
+		// Java's testAddColumnWithUpdateColumnDefaultToRequiredColumn: a write
+		// default doesn't set the initial default, so the column can't be
+		// made required.
+		_, err := newUpdate(true, false).
+			AddColumn([]string{"data"}, iceberg.PrimitiveTypes.String, "", false, nil).
+			UpdateColumn([]string{"data"}, ColumnUpdate{
+				WriteDefault: iceberg.Optional[iceberg.Literal]{Valid: true, Val: iceberg.StringLiteral("unknown")},
+			}).
+			UpdateColumn([]string{"data"}, required).
+			Apply()
+		require.ErrorContains(t, err, "cannot change column nullability from optional to required: data")
+	})
+
+	t.Run("required to optional", func(t *testing.T) {
+		sc, err := newUpdate(true, true).
+			AddColumn([]string{"value"}, iceberg.PrimitiveTypes.Int32, "", true, nil).
+			UpdateColumn([]string{"value"}, ColumnUpdate{Required: iceberg.Optional[bool]{Valid: true, Val: false}}).
+			Apply()
+		require.NoError(t, err)
+
+		field, ok := sc.FindFieldByName("value")
+		require.True(t, ok)
+		assert.False(t, field.Required)
+	})
+
+	t.Run("deleted then re-added column", func(t *testing.T) {
+		// As in Java, the name resolves to the deleted column first.
+		_, err := newUpdate(true, true).
+			DeleteColumn([]string{"age"}).
+			AddColumn([]string{"age"}, iceberg.PrimitiveTypes.String, "", false, nil).
+			UpdateColumn([]string{"age"}, doc("years")).
+			Apply()
+		require.ErrorContains(t, err, "field that has been deleted cannot be updated: age")
+	})
+
+	t.Run("case-insensitive rename is rejected", func(t *testing.T) {
+		_, err := newUpdate(false, true).
+			AddColumn([]string{"gender"}, iceberg.PrimitiveTypes.String, "", false, nil).
+			RenameColumn([]string{"GENDER"}, "sex").
+			Apply()
+		require.ErrorContains(t, err, "cannot rename a column added in the same update: GENDER")
+	})
+
+	t.Run("move after an added column with a case-insensitive name", func(t *testing.T) {
+		sc, err := newUpdate(false, false).
+			AddColumn([]string{"gender"}, iceberg.PrimitiveTypes.String, "", false, nil).
+			MoveAfter([]string{"age"}, []string{"GENDER"}).
+			Apply()
+		require.NoError(t, err)
+
+		names := make([]string, 0, len(sc.Fields()))
+		for _, f := range sc.Fields() {
+			names = append(names, f.Name)
+		}
+		assert.Equal(t, []string{"id", "name", "address", "tags", "properties", "gender", "age"}, names)
+	})
+
+	t.Run("column added by UnionByNameWith", func(t *testing.T) {
+		newColumn := iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "gender", Type: iceberg.PrimitiveTypes.String})
+		sc, err := newUpdate(false, false).
+			UnionByNameWith(newColumn).
+			UpdateColumn([]string{"GENDER"}, doc("hello")).
+			MoveFirst([]string{"GENDER"}).
+			Apply()
+		require.NoError(t, err)
+
+		first := sc.Fields()[0]
+		assert.Equal(t, "gender", first.Name)
+		assert.Equal(t, "hello", first.Doc)
+	})
+
+	t.Run("move with a case-insensitive name", func(t *testing.T) {
+		sc, err := newUpdate(false, false).
+			AddColumn([]string{"gender"}, iceberg.PrimitiveTypes.String, "", false, nil).
+			MoveFirst([]string{"GENDER"}).
+			Apply()
+		require.NoError(t, err)
+		assert.Equal(t, "gender", sc.Fields()[0].Name)
+	})
+}
+
 func TestAddColumnNameAlreadyExists(t *testing.T) {
 	str := iceberg.PrimitiveTypes.String
 

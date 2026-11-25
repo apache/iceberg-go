@@ -497,9 +497,15 @@ func (u *UpdateSchema) updateColumn(path []string, update ColumnUpdate) error {
 
 	fullName := strings.Join(path, ".")
 
-	field, ok := u.findField(fullName)
+	field, added, ok := u.findFieldForUpdate(fullName)
 	if !ok {
 		return fmt.Errorf("field not found: %s", fullName)
+	}
+
+	// As in Java, a column added in this update can't be renamed in the same
+	// update. This covers both RenameColumn and UpdateColumn with Name set.
+	if added != nil && update.Name.Valid {
+		return fmt.Errorf("cannot rename a column added in the same update: %s", fullName)
 	}
 
 	if u.isDeleted(field.ID) {
@@ -546,8 +552,12 @@ func (u *UpdateSchema) updateColumn(path []string, update ColumnUpdate) error {
 	}
 
 	if update.Required.Valid {
+		// As in Java, a column added in this update with an initial default
+		// can be made required without allowIncompatibleChanges: no existing
+		// row can be null, since existing rows read the default.
+		isDefaultedAdd := added != nil && field.InitialDefault != nil
 		if field.Required != update.Required.Val {
-			if !u.allowIncompatibleChanges && update.Required.Val {
+			if !u.allowIncompatibleChanges && update.Required.Val && !isDefaultedAdd {
 				return fmt.Errorf("cannot change column nullability from optional to required: %s", fullName)
 			}
 		}
@@ -570,13 +580,17 @@ func (u *UpdateSchema) updateColumn(path []string, update ColumnUpdate) error {
 		}
 	}
 
-	if _, ok := u.updates[parentID]; !ok {
-		u.updates[parentID] = make(map[int]iceberg.NestedField)
-	}
-
-	updatedField, ok := u.updates[parentID][field.ID]
-	if !ok {
-		updatedField = field
+	// A field added in this update is changed in place in u.adds: the
+	// visitor appends added fields as they are and never applies u.updates
+	// to them. The field from u.adds already holds any earlier change.
+	updatedField := field
+	if added == nil {
+		if _, ok := u.updates[parentID]; !ok {
+			u.updates[parentID] = make(map[int]iceberg.NestedField)
+		}
+		if upd, ok := u.updates[parentID][field.ID]; ok {
+			updatedField = upd
+		}
 	}
 	if update.Name.Valid {
 		updatedField.Name = update.Name.Val
@@ -599,7 +613,12 @@ func (u *UpdateSchema) updateColumn(path []string, update ColumnUpdate) error {
 	if update.Doc.Valid {
 		updatedField.Doc = update.Doc.Val
 	}
-	u.updates[parentID][field.ID] = updatedField
+
+	if added != nil {
+		*added = updatedField
+	} else {
+		u.updates[parentID][field.ID] = updatedField
+	}
 
 	return nil
 }
@@ -654,9 +673,51 @@ func (u *UpdateSchema) findFieldForMove(name string) (int, bool) {
 	if ok {
 		return field.ID, true
 	}
-	id, ok := u.addedNameToID[name]
 
-	return id, ok
+	return u.addedFieldID(name)
+}
+
+// addedFieldID returns the ID of a column added earlier in this update,
+// matching the name with UpdateSchema's case sensitivity. AddColumn rejects
+// names that differ only in case, so at most one matches.
+func (u *UpdateSchema) addedFieldID(name string) (int, bool) {
+	if id, ok := u.addedNameToID[name]; ok {
+		return id, true
+	}
+	for addedName, id := range u.addedNameToID {
+		if u.sameName(addedName, name) {
+			return id, true
+		}
+	}
+
+	return 0, false
+}
+
+// findFieldForUpdate finds a field in the original schema, or falls back to a
+// column added earlier in this update. For an added field it also returns
+// a pointer to its entry in u.adds, so the caller can update it in place.
+// For a field in the original schema the pointer is nil.
+func (u *UpdateSchema) findFieldForUpdate(name string) (iceberg.NestedField, *iceberg.NestedField, bool) {
+	if field, ok := u.findField(name); ok {
+		return field, nil, true
+	}
+
+	id, ok := u.addedFieldID(name)
+	if !ok {
+		return iceberg.NestedField{}, nil, false
+	}
+
+	// u.adds is keyed by parent ID, so search every parent's list. Nothing
+	// appends to u.adds before the caller uses the pointer, so it stays valid.
+	for parentID := range u.adds {
+		for i := range u.adds[parentID] {
+			if u.adds[parentID][i].ID == id {
+				return u.adds[parentID][i], &u.adds[parentID][i], true
+			}
+		}
+	}
+
+	return iceberg.NestedField{}, nil, false
 }
 
 func (u *UpdateSchema) moveColumn(op MoveOp, path []string, relativeTo []string) error {
