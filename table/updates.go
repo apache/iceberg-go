@@ -354,8 +354,7 @@ func (u *upgradeFormatVersionUpdate) Apply(builder *MetadataBuilder) error {
 
 type addSchemaUpdate struct {
 	baseUpdate
-	Schema  *iceberg.Schema `json:"schema"`
-	initial bool
+	Schema *iceberg.Schema `json:"schema"`
 }
 
 // NewAddSchemaUpdate creates a new update that adds the given schema and updates the lastColumnID based on the schema.
@@ -445,12 +444,9 @@ type addSortOrderUpdate struct {
 	// above, none are exempt at Apply: CheckCompatibility still requires every
 	// source ID to resolve in the current schema, so this only defers the error.
 	SortOrder *UnboundSortOrder `json:"sort-order"`
-	initial   bool
 }
 
 // NewAddSortOrderUpdate creates a new update that adds the given sort order to the table metadata.
-// If the initial flag is set to true, the sort order is considered the initial sort order of the table,
-// and all previously added sort orders in the metadata builder are removed.
 func NewAddSortOrderUpdate(sortOrder *SortOrder) *addSortOrderUpdate {
 	upd := &addSortOrderUpdate{
 		baseUpdate: baseUpdate{ActionName: UpdateAddSortOrder},
