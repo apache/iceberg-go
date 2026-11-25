@@ -499,9 +499,9 @@ func (rd *RowDelta) validateAddedDeletionVectors() error {
 }
 
 // validateDeletesMatchDataFiles rejects an added position delete file
-// that names its data file in referenced_data_file, a deletion vector or a
-// v2 file-scoped position delete, when its partition spec or partition
-// differs from that data file's. The spec requires them to match. Scans
+// scoped to a single data file, a deletion vector or a v2 position delete
+// that names it in referenced_data_file or in equal file_path bounds, when
+// its partition spec or partition differs from that data file's. The spec requires them to match. Scans
 // match deletion vectors by path alone, so a mismatched DV would otherwise
 // commit and be applied, and a mismatched v2 position delete would commit
 // a table whose scans fail. A reference to a data file that is neither
@@ -513,7 +513,7 @@ func (rd *RowDelta) validateDeletesMatchDataFiles(ctx context.Context, fs iceio.
 		if f.ContentType() != iceberg.EntryContentPosDeletes {
 			continue
 		}
-		if ref := explicitReferencedDataFile(f); ref != "" {
+		if ref := referencedDataFilePath(f); ref != "" {
 			byRef[ref] = append(byRef[ref], f)
 		}
 	}
@@ -527,12 +527,20 @@ func (rd *RowDelta) validateDeletesMatchDataFiles(ctx context.Context, fs iceio.
 			return nil
 		}
 		delete(byRef, data.FilePath())
+		dataKey, err := canonicalPartitionKey(data.SpecID(), dataFilePartition(data))
+		if err != nil {
+			return fmt.Errorf("building partition key for data file %s: %w", data.FilePath(), err)
+		}
 		for _, del := range dels {
 			if del.SpecID() != data.SpecID() {
 				return fmt.Errorf("delete file %s uses partition spec %d, but its referenced data file %s uses partition spec %d; write the delete file with the data file's spec",
 					del.FilePath(), del.SpecID(), data.FilePath(), data.SpecID())
 			}
-			if !partitionsMatch(dataFilePartition(data), dataFilePartition(del)) {
+			delKey, err := canonicalPartitionKey(del.SpecID(), dataFilePartition(del))
+			if err != nil {
+				return fmt.Errorf("building partition key for delete file %s: %w", del.FilePath(), err)
+			}
+			if delKey != dataKey {
 				return fmt.Errorf("delete file %s partition does not match its referenced data file %s",
 					del.FilePath(), data.FilePath())
 			}

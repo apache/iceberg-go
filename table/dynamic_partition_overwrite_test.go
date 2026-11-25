@@ -595,12 +595,12 @@ func TestDynamicPartitionOverwriteKeepsDeleteForSurvivingOldSpecData(t *testing.
 	require.NotZero(t, fieldID)
 	nullPartition := map[int]any{fieldID: nil}
 
-	// A v2 position delete for an old-spec data file carries that file's
-	// spec and partition; overwriting the new spec's partitions must keep it.
-	posDelete := newTestPosDeleteFileForSpec(t, oldSpec, "file://old-spec-delete.parquet",
-		map[int]any{1000: int32(1)}, oldData.FilePath())
+	// A v2 position delete can target an old-spec data file even if its
+	// manifest stores it under a new partition tuple with a null value.
+	posDelete := newTestPosDeleteFileForSpec(t, currentSpec, "file://old-spec-delete.parquet",
+		nullPartition, oldData.FilePath())
 	addDelete := New(Identifier{"db", "tbl"}, evolved, "metadata.json", fsF, nil).NewTransaction()
-	require.NoError(t, addDelete.NewRowDelta(nil).AddDeletes(posDelete).Commit(ctx))
+	commitLegacyPosDelete(t, addDelete, fs, posDelete)
 	withDelete, err := addDelete.meta.Build()
 	require.NoError(t, err)
 
@@ -768,12 +768,12 @@ func TestDynamicPartitionOverwritePrunedKeepsDeleteForSurvivingOldSpecData(t *te
 	require.NotZero(t, fieldID)
 	nullPartition := map[int]any{fieldID: nil}
 
-	// A v2 position delete for an old-spec data file carries that file's
-	// spec and partition; overwriting the new spec's partitions must keep it.
-	posDelete := newTestPosDeleteFileForSpec(t, oldSpec, "file://old-spec-delete.parquet",
-		map[int]any{1000: int32(1)}, oldData.FilePath())
+	// A v2 position delete can target an old-spec data file even if its
+	// manifest stores it under a new partition tuple with a null value.
+	posDelete := newTestPosDeleteFileForSpec(t, currentSpec, "file://old-spec-delete.parquet",
+		nullPartition, oldData.FilePath())
 	addDelete := New(Identifier{"db", "tbl"}, evolved, "metadata.json", fsF, nil).NewTransaction()
-	require.NoError(t, addDelete.NewRowDelta(nil).AddDeletes(posDelete).Commit(ctx))
+	commitLegacyPosDelete(t, addDelete, fs, posDelete)
 	withDelete, err := addDelete.meta.Build()
 	require.NoError(t, err)
 
@@ -799,4 +799,19 @@ func TestDynamicPartitionOverwritePrunedKeepsDeleteForSurvivingOldSpecData(t *te
 	}
 	require.Equal(t, []string{posDelete.FilePath()}, deletePaths,
 		"deletes for surviving old-spec data must not be dropped")
+}
+
+// commitLegacyPosDelete commits a position delete through the snapshot
+// producer, skipping RowDelta's validation. v2 merge-on-read deletes written
+// after spec evolution store an old-spec data file's delete under the current
+// spec with a null partition value; RowDelta now rejects that layout, but
+// tables written before that check still contain it.
+func commitLegacyPosDelete(t *testing.T, txn *Transaction, fs iceio.WriteFileIO, del iceberg.DataFile) {
+	t.Helper()
+
+	sp := newFastAppendFilesProducer(OpDelete, txn, fs, nil, nil)
+	sp.appendDeleteFile(del)
+	updates, reqs, err := sp.commit(t.Context())
+	require.NoError(t, err)
+	require.NoError(t, txn.apply(updates, reqs))
 }

@@ -2628,3 +2628,69 @@ func TestRowDeltaV2PosDeletePartitionMustMatchReferencedDataFile(t *testing.T) {
 		Commit(t.Context())
 	require.ErrorContains(t, err, "partition does not match")
 }
+
+// Why: manifests decode date partition values as iceberg.Date, while a
+// writer that applies the transform itself holds the day as an int32.
+// Condition: a v3 DV for a date-partitioned data file carries the same day
+// as an int32.
+// Assertion: Commit accepts it; a different day is still rejected.
+func TestRowDeltaDVDatePartitionComparedByValue(t *testing.T) {
+	commitDateDataFile := func(t *testing.T) (*table.Table, string) {
+		t.Helper()
+
+		tbl := newRowDeltaTableWithType(t, 3, iceberg.PrimitiveTypes.Date)
+		dataPath := tbl.Location() + "/data/insert.parquet"
+		tx := tbl.NewTransaction()
+		require.NoError(t, tx.NewRowDelta(nil).
+			AddRows(buildPartitionedDataFile(t, tbl.Spec(), dataPath, map[int]any{1000: iceberg.Date(19000)})).
+			Commit(t.Context()))
+		tbl, err := tx.Commit(t.Context())
+		require.NoError(t, err)
+
+		return tbl, dataPath
+	}
+
+	t.Run("same day", func(t *testing.T) {
+		tbl, dataPath := commitDateDataFile(t)
+
+		dv := buildPartitionedDV(t, tbl.Spec(), tbl.Location()+"/data/dv.puffin", dataPath,
+			map[int]any{1000: int32(19000)})
+		tx := tbl.NewTransaction()
+		require.NoError(t, tx.NewRowDelta(nil).AddDeletes(dv).Commit(t.Context()))
+		_, err := tx.Commit(t.Context())
+		require.NoError(t, err)
+	})
+
+	t.Run("different day", func(t *testing.T) {
+		tbl, dataPath := commitDateDataFile(t)
+
+		dv := buildPartitionedDV(t, tbl.Spec(), tbl.Location()+"/data/dv.puffin", dataPath,
+			map[int]any{1000: int32(19001)})
+		err := tbl.NewTransaction().NewRowDelta(nil).AddDeletes(dv).Commit(t.Context())
+		require.ErrorContains(t, err, "partition does not match")
+	})
+}
+
+// Why: a v2 position delete whose file_path lower and upper bounds are equal
+// targets one data file even without referenced_data_file, and scans scope
+// it to that file the same way.
+// Condition: such a delete for a data=a file declares data=b.
+// Assertion: Commit rejects it.
+func TestRowDeltaV2PosDeleteScopedByBoundsMustMatchDataFile(t *testing.T) {
+	tbl, dataPath := commitPartitionedDataFile(t, newPartitionedRowDeltaTable(t, 2))
+
+	filePath, ok := iceberg.PositionalDeleteSchema.FindFieldByName("file_path")
+	require.True(t, ok)
+	bound, err := iceberg.StringLiteral(dataPath).MarshalBinary()
+	require.NoError(t, err)
+
+	b, err := iceberg.NewDataFileBuilder(tbl.Spec(), iceberg.EntryContentPosDeletes,
+		tbl.Location()+"/data/pos-del.parquet", iceberg.ParquetFile, map[int]any{1000: "b"}, nil, nil, 5, 512)
+	require.NoError(t, err)
+	del := b.LowerBoundValues(map[int][]byte{filePath.ID: bound}).
+		UpperBoundValues(map[int][]byte{filePath.ID: bound}).
+		Build()
+
+	err = tbl.NewTransaction().NewRowDelta(nil).AddDeletes(del).Commit(t.Context())
+	require.ErrorContains(t, err, "partition does not match")
+}
