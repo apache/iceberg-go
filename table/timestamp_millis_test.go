@@ -411,11 +411,9 @@ func TestScanTimestampMillisNestedStruct(t *testing.T) {
 			ID:       2,
 			Name:     "s",
 			Required: false,
-			Type: &iceberg.StructType{
-				FieldList: []iceberg.NestedField{
-					{ID: 3, Name: "ts", Type: iceberg.PrimitiveTypes.Timestamp, Required: false},
-				},
-			},
+			Type: iceberg.NewStructType(
+				iceberg.NestedField{ID: 3, Name: "ts", Type: iceberg.PrimitiveTypes.Timestamp, Required: false},
+			),
 		},
 	)
 	tbl := newTimestampMillisTestTable(t, iceSchema, iceberg.UnpartitionedSpec)
