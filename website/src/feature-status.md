@@ -19,7 +19,10 @@
 
 # Feature Status
 
-This page tracks what Apache Iceberg Go currently supports. The matrix is kept in sync with the project [`README.md`](https://github.com/apache/iceberg-go/blob/main/README.md); if you spot a discrepancy, file an issue.
+This page tracks Apache Iceberg Go on `main` and mirrors the support tables in
+the project [README](https://github.com/apache/iceberg-go/blob/main/README.md).
+For released behavior, see the feature matrix in the corresponding Git tag,
+such as [v0.7.0](https://github.com/apache/iceberg-go/blob/v0.7.0/website/src/feature-status.md).
 
 ## Spec format version coverage
 
@@ -27,7 +30,8 @@ Apache Iceberg Go reads and writes table format versions 1, 2, and 3. The maximu
 
 ### V1
 
-All V1 features are supported. V1 is the format-version baseline.
+V1 tables support Parquet reads and writes and Avro reads. See
+[data file formats](#read--write-data) for details.
 
 ### V2
 
@@ -39,7 +43,8 @@ All V1 features are supported. V1 is the format-version baseline.
 | Equality deletes | Supported (read + write). Write via `Transaction.WriteEqualityDeletes`; row-level commits via `Transaction.NewRowDelta`; delete-only CDC via `Transaction.CommitEqualityDeletes` |
 | Partition spec evolution | Supported |
 | Sort order enforcement on write | Supported (PR [#1157](https://github.com/apache/iceberg-go/pull/1157), closes [#833](https://github.com/apache/iceberg-go/issues/833)) |
-| `ReplaceDataFilesByPath` using `OpReplace` | Pending ([#841](https://github.com/apache/iceberg-go/issues/841)) |
+| Path-based replace snapshots | [`StageRewrittenDataFilesByPath`](./api.md#stage-externally-rewritten-parquet-files) stages prewritten Parquet replacements for unpartitioned v1 and v2 tables. Source files must have no applicable deletes. The caller preserves the rows and physical row count and commits the transaction. |
+| Position-delete file compaction | [`RewritePositionDeleteFiles`](./api.md#delete-file-maintenance) rewrites compatible v2 Parquet position deletes. |
 
 ### V3
 
@@ -48,20 +53,31 @@ All V1 features are supported. V1 is the format-version baseline.
 | Nanosecond timestamps (`timestamp_ns`, `timestamptz_ns`) | Supported |
 | Default values (`initial-default`, `write-default`) | Supported |
 | Row lineage (`_row_id`, `_last_updated_sequence_number`) | Supported |
-| Encryption keys in metadata | Supported (metadata-level storage + `EncryptionManager` interface; file-level envelope encryption not yet implemented [PR #1620 in review](https://github.com/apache/iceberg-go/pull/1620)) |
+| Encryption keys in metadata | Supported. See [file encryption](#file-encryption-puffin-and-statistics) for file-level support. |
 | Variant type, non-shredded | Supported (PR [#932](https://github.com/apache/iceberg-go/pull/932); umbrella [#929](https://github.com/apache/iceberg-go/issues/929)) |
 | Variant type, shredded reader / writer | Supported (reader [#1238](https://github.com/apache/iceberg-go/pull/1238), writer [#1351](https://github.com/apache/iceberg-go/pull/1351)) |
 | Variant predicate pushdown / field extract | Supported (PR [#1607](https://github.com/apache/iceberg-go/pull/1607)) |
 | Deletion vectors, read | Supported |
 | Deletion vectors, write (unpartitioned) | Supported |
 | Deletion vectors, write (partitioned) | Supported (PR [#1151](https://github.com/apache/iceberg-go/pull/1151)) |
+| Convert equality deletes to deletion vectors | [Supported](./api.md#delete-file-maintenance) on v3 tables. |
 | Geometry / Geography types (schema) | Supported |
 | Geometry: statistics and pruning | Supported |
 | Geography: read, write, and schema | Supported (bounds/pruning intentionally omitted for geodesic safety) |
 | Geometry / Geography: nested-geo null counts | Supported (like other nested fields, no bounds are written) |
 | Multi-argument transforms | Infrastructure present; no concrete implementations exercised yet |
 | Statistics files (read / round-trip / register / remove) | Supported |
-| NDV (Theta-sketch) statistics computation | Roadmap ([#1929](https://github.com/apache/iceberg-go/issues/1929)) |
+
+## File encryption, Puffin, and statistics
+
+| Feature | Status |
+|:--------|:-------|
+| File envelope encryption | Available through the explicit [`StandardEncryptionManager` API](./configuration.md#file-encryption-and-key-management). Callers handle encryption and decryption separately from table scans and writes. |
+| AWS KMS key wrapping | Available through the optional [AWS KMS provider](./configuration.md#file-encryption-and-key-management). |
+| Puffin blob compression | LZ4 and Zstandard reads and writes. Deletion vectors use uncompressed blobs. |
+| Partition statistics | [Computation](./api.md#partition-statistics-v1-v3) for v1–v3 tables with a snapshot and at least one partition field in spec history. |
+| Snapshot-wide distinct value counts | [`Table.ComputeNDVs`](./api.md#puffin-statistics) estimates distinct counts and builds Theta sketches for supported top-level primitive columns. |
+| Theta sketches | [Helpers](./api.md#puffin-statistics) to build, merge, and read distinct-value sketches. |
 
 ## FileSystem support
 
@@ -90,36 +106,47 @@ S3, GCS, and Azure each require a blank import of their backend package, for exa
 
 ## Catalog support
 
-| Operation                   | REST | Hive |  Glue  | SQL  | Hadoop |
-|:----------------------------|:----:|:----:|:------:|:----:|:------:|
-| Load Table                  |  X   |  X   |   X    |  X   |   X    |
-| List Tables                 |  X   |  X   |   X    |  X   |   X    |
-| Create Table                |  X   |  X   |   X    |  X   |   X    |
-| Register Table              |  X   |  X   |   X    |      |        |
-| Update Current Snapshot     |  X   |  X   |   X    |  X   |   X    |
-| Create New Snapshot         |  X   |  X   |   X    |  X   |   X    |
-| Rename Table                |  X   |  X   |   X    |  X   |        |
-| Drop Table                  |  X   |  X   |   X    |  X   |   X    |
-| Alter Table                 |  X   |  X   |   X    |  X   |   X    |
-| Check Table Exists          |  X   |  X   |   X    |  X   |   X    |
-| Set Table Properties        |  X   |  X   |   X    |  X   |   X    |
-| List Namespaces             |  X   |  X   |   X    |  X   |   X    |
-| Create Namespace            |  X   |  X   |   X    |  X   |   X    |
-| Check Namespace Exists      |  X   |  X   |   X    |  X   |   X    |
-| Drop Namespace              |  X   |  X   |   X    |  X   |   X    |
-| Update Namespace Properties |  X   |  X   |   X    |  X   |        |
-| Create View                 |  X   |  X   |        |  X   |        |
-| Load View                   |      |  X   |        |  X   |        |
-| List View                   |  X   |  X   |        |  X   |        |
-| Drop View                   |  X   |  X   |        |  X   |        |
-| Rename View                 |  X   |      |        |      |        |
-| Check View Exists           |  X   |  X   |        |  X   |        |
+| Operation                   | REST | Hive |  Glue  | SQL  | Hadoop | DynamoDB |
+|:----------------------------|:----:|:----:|:------:|:----:|:------:|:--------:|
+| Load Table                  |  X   |  X   |   X    |  X   |   X    |    X     |
+| List Tables                 |  X   |  X   |   X    |  X   |   X    |    X     |
+| Create Table                |  X   |  X   |   X    |  X   |   X    |    X     |
+| Register Table              |  X   |  X   |   X    |      |        |    X     |
+| Update Current Snapshot     |  X   |  X   |   X    |  X   |   X    |    X     |
+| Create New Snapshot         |  X   |  X   |   X    |  X   |   X    |    X     |
+| Rename Table                |  X   |  X   |   X    |  X   |        |    X     |
+| Drop Table                  |  X   |  X   |   X    |  X   |   X    |    X     |
+| Alter Table                 |  X   |  X   |   X    |  X   |   X    |    X     |
+| Check Table Exists          |  X   |  X   |   X    |  X   |   X    |    X     |
+| Set Table Properties        |  X   |  X   |   X    |  X   |   X    |    X     |
+| List Namespaces             |  X   |  X   |   X    |  X   |   X    |    X     |
+| Create Namespace            |  X   |  X   |   X    |  X   |   X    |    X     |
+| Check Namespace Exists      |  X   |  X   |   X    |  X   |   X    |    X     |
+| Drop Namespace              |  X   |  X   |   X    |  X   |   X    |    X     |
+| Update Namespace Properties |  X   |  X   |   X    |  X   |        |    X     |
+| Create View                 |  X   |  X   |        |  X   |        |          |
+| Load View                   |  X   |  X   |        |  X   |        |          |
+| List View                   |  X   |  X   |        |  X   |        |          |
+| Drop View                   |  X   |  X   |        |  X   |        |          |
+| Rename View                 |  X   |      |        |  X   |        |          |
+| Update View                 |  X   |  X   |        |  X   |        |          |
+| Check View Exists           |  X   |  X   |        |  X   |        |          |
 
-A Hadoop catalog is also available - see [`catalog/hadoop`](https://github.com/apache/iceberg-go/tree/main/catalog/hadoop).
+REST operations depend on the server's available endpoints. SQL view operations
+require the V1 JDBC catalog schema. See the
+[configuration guide](./configuration.md#dynamodb-catalogdynamodb) for DynamoDB setup.
 
 ## Read / write data
 
 Data can be read as an Arrow `Table` or as a stream of Arrow record batches via `iter.Seq2`. See [API Reference](./api.md).
+
+| Data file format | Reads | Writes |
+|:-----------------|:-----:|:------:|
+| Parquet          | X     | X      |
+| Avro             | X     |        |
+
+Avro reads whole files, with projection after decoding. Nullable unions
+contain `null` and one value type.
 
 ### Supported write operations
 

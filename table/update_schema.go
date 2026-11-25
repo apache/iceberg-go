@@ -215,7 +215,7 @@ func (u *UpdateSchema) initIdentifierFieldNames() error {
 	}
 
 	identifierFieldNames := make(map[string]struct{})
-	for _, id := range u.schema.IdentifierFieldIDs {
+	for _, id := range u.schema.IdentifierFieldIDs() {
 		name, ok := u.schema.FindColumnName(id)
 		if !ok {
 			return fmt.Errorf("identifier field %d not found", id)
@@ -299,28 +299,40 @@ func (u *UpdateSchema) findParentID(fieldID int) int {
 	return parentID
 }
 
-// checkNameAvailable returns an error if the struct with the given parent ID
-// already has a column called name, or will have one after this update. A
-// column that is deleted, or renamed to another name, in this update gives up
-// its name, so a new column may take it.
-func (u *UpdateSchema) checkNameAvailable(parentID int, name, fullName string) error {
+// nameTaken reports whether the struct with the given parent ID already has a
+// column called name, or will have one after this update. selfID is the column
+// being renamed, which may keep its own name with different case, or
+// TableRootID when adding a column. A column that is deleted, or renamed to
+// another name, in this update gives up its name, so another column may take
+// it. Java's addColumn rejects the renamed-away case; we allow it because the
+// resulting schema is valid.
+func (u *UpdateSchema) nameTaken(parentID int, name, fullName string, selfID int) bool {
 	for _, add := range u.adds[parentID] {
 		if u.sameName(add.Name, name) {
-			return fmt.Errorf("field already exists in adds: %s", fullName)
+			return true
 		}
 	}
 
-	if field, ok := u.findField(fullName); ok && !u.isDeleted(field.ID) {
+	if field, ok := u.findField(fullName); ok && field.ID != selfID && !u.isDeleted(field.ID) {
 		if upd, updated := u.updates[parentID][field.ID]; !updated || u.sameName(upd.Name, name) {
-			return fmt.Errorf("cannot add column, name already exists: %s", fullName)
+			return true
 		}
 	}
 
 	// Another column in the same struct may be renamed to this name.
 	for _, upd := range u.updates[parentID] {
-		if u.sameName(upd.Name, name) {
-			return fmt.Errorf("field already exists: %s", fullName)
+		if upd.ID != selfID && u.sameName(upd.Name, name) {
+			return true
 		}
+	}
+
+	return false
+}
+
+// checkNameAvailable returns an error if a new column cannot be called name.
+func (u *UpdateSchema) checkNameAvailable(parentID int, name, fullName string) error {
+	if u.nameTaken(parentID, name, fullName, TableRootID) {
+		return fmt.Errorf("%w: cannot add column, name already exists: %s", iceberg.ErrInvalidSchema, fullName)
 	}
 
 	return nil
@@ -505,22 +517,8 @@ func (u *UpdateSchema) updateColumn(path []string, update ColumnUpdate) error {
 		}
 
 		newFullName := strings.Join(append(slices.Clone(path[:len(path)-1]), update.Name.Val), ".")
-		if existingField, ok := u.findField(newFullName); ok {
-			if !u.isDeleted(existingField.ID) {
-				return fmt.Errorf("field already exists: %s", newFullName)
-			}
-		}
-
-		for _, add := range u.adds[parentID] {
-			if add.Name == update.Name.Val {
-				return fmt.Errorf("cannot rename field to added field: %s", newFullName)
-			}
-		}
-
-		for _, upd := range u.updates[parentID] {
-			if upd.Name == update.Name.Val && upd.ID != field.ID {
-				return fmt.Errorf("cannot rename field to renamed field: %s", newFullName)
-			}
+		if u.nameTaken(parentID, update.Name.Val, newFullName, field.ID) {
+			return fmt.Errorf("%w: cannot rename column, name already exists: %s", iceberg.ErrInvalidSchema, newFullName)
 		}
 
 		if _, ok := u.identifierFieldNames[fullName]; ok {
@@ -796,7 +794,7 @@ func (u *UpdateSchema) unionField(path []string, newField iceberg.NestedField) e
 		if !ok {
 			return fmt.Errorf("cannot change field to map: %s", strings.Join(path, "."))
 		}
-		if !isIgnorableTypeUpdate(existingMap.KeyType, t.KeyType) {
+		if !isIgnorableTypeUpdate(existingMap.KeyType(), t.KeyType()) {
 			return fmt.Errorf("cannot update map key: %s", strings.Join(childPath(path, "key"), "."))
 		}
 		if err := u.unionField(childPath(path, "value"), t.ValueField()); err != nil {
@@ -1368,7 +1366,7 @@ func (a *applyChanges) Struct(structType iceberg.StructType, fieldResults []iceb
 			field.Type.Equals(resultType) &&
 			field.Required == required &&
 			field.Doc == doc &&
-			field.WriteDefault == writeDefault {
+			reflect.DeepEqual(field.WriteDefault, writeDefault) {
 			newFields = append(newFields, field)
 		} else {
 			hasChanges = true
@@ -1438,11 +1436,11 @@ func (a *applyChanges) List(listType iceberg.ListType, elementResult iceberg.Typ
 		panic(fmt.Sprintf("cannot delete element type from list: %s", elementResult))
 	}
 
-	return iceberg.NewListType(listType.ElementID, elementType, a.updatedRequired(listType.ElementID, listType.ElementRequired))
+	return iceberg.NewListType(listType.ElementID(), elementType, a.updatedRequired(listType.ElementID(), listType.ElementRequired()))
 }
 
 func (a *applyChanges) Map(mapType iceberg.MapType, keyResult, valueResult iceberg.Type) iceberg.Type {
-	keyID := mapType.KeyID
+	keyID := mapType.KeyID()
 	if _, ok := a.deletes[keyID]; ok {
 		panic(fmt.Errorf("cannot delete map keys: %s", mapType.String()))
 	}
@@ -1455,7 +1453,7 @@ func (a *applyChanges) Map(mapType iceberg.MapType, keyResult, valueResult icebe
 		panic(fmt.Errorf("cannot add fields to map keys: %s", mapType.String()))
 	}
 
-	if !mapType.KeyType.Equals(keyResult) {
+	if !mapType.KeyType().Equals(keyResult) {
 		panic(fmt.Errorf("cannot alter map keys: %s", mapType.String()))
 	}
 
@@ -1466,7 +1464,7 @@ func (a *applyChanges) Map(mapType iceberg.MapType, keyResult, valueResult icebe
 		panic(fmt.Errorf("cannot delete value type from map: %s", mapType.String()))
 	}
 
-	return iceberg.NewMapType(mapType.KeyID, mapType.KeyType, mapType.ValueID, valueType, a.updatedRequired(mapType.ValueID, mapType.ValueRequired))
+	return iceberg.NewMapType(mapType.KeyID(), mapType.KeyType(), mapType.ValueID(), valueType, a.updatedRequired(mapType.ValueID(), mapType.ValueRequired()))
 }
 
 func (a *applyChanges) Primitive(primitive iceberg.PrimitiveType) iceberg.Type {

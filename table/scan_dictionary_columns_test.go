@@ -40,10 +40,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-var (
-	dictUTF8   = &arrow.DictionaryType{IndexType: arrow.PrimitiveTypes.Int32, ValueType: arrow.BinaryTypes.String}
-	dictBinary = &arrow.DictionaryType{IndexType: arrow.PrimitiveTypes.Int32, ValueType: arrow.BinaryTypes.Binary}
-)
+var dictUTF8 = &arrow.DictionaryType{IndexType: arrow.PrimitiveTypes.Int32, ValueType: arrow.BinaryTypes.String}
 
 func newDictionaryColumnsTable(t *testing.T, schema *iceberg.Schema, props iceberg.Properties) *table.Table {
 	t.Helper()

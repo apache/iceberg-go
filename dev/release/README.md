@@ -47,6 +47,7 @@ Requirements to run `release_rc.sh`:
 
     * You must be an Apache Iceberg committer or PMC member
     * You must prepare your PGP key for signing
+    * Install GitHub CLI, Subversion, and `sha512sum`.
 
 If you don't have a PGP key, https://infra.apache.org/release-signing.html#generate
 may be helpful.
@@ -73,7 +74,8 @@ We need to do the following to publish a new release:
 
     * Publish to apache.org
 
-Run `dev/release/release.sh` to publish to apache.org:
+Install a `sort` that supports `--version-sort`. Run
+`dev/release/release.sh` to publish to apache.org:
 
 ```console
 $ GH_TOKEN=${YOUR_GITHUB_TOKEN} dev/release/release.sh ${VERSION} ${RC}
@@ -91,14 +93,17 @@ You must install the following to run the script:
     * `gpg`
     * `shasum` or `sha512sum`
     * `tar`
+    * Java and Python 3 for the RAT license check
+    * `jq` if the script downloads Go
 
-You don't need to have Go installed, if it isn't on the system the latest Go will be
-automatically downloaded and used only for verification.
+Use a Go toolchain that meets the requirement in the candidate's `go.mod`.
+If Go is unavailable, the script downloads a toolchain for verification.
 
-To verify a RC, run the following:
+To verify an RC, use a disposable module cache and keep `GITHUB_TOKEN` unset
+so it stays out of shell traces:
 
 ```console
-$ dev/release/verify_rc.sh ${VERSION} ${RC}
+$ env -u GITHUB_TOKEN GOMODCACHE="$(mktemp -d)" dev/release/verify_rc.sh ${VERSION} ${RC}
 ```
 
 If the verification is successful, the message `RC looks good!` is shown.

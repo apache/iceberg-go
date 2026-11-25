@@ -391,7 +391,7 @@ func TestAddColumnNameAlreadyExists(t *testing.T) {
 				return u.RenameColumn([]string{"age"}, "years").
 					AddColumn([]string{"years"}, str, "", false, nil)
 			},
-			wantErr: "field already exists: years",
+			wantErr: "cannot add column, name already exists: years",
 		},
 		{
 			name:          "name another column is renamed to, by union",
@@ -402,7 +402,16 @@ func TestAddColumnNameAlreadyExists(t *testing.T) {
 						iceberg.NestedField{ID: 1, Name: "years", Type: str},
 					))
 			},
-			wantErr: "field already exists: years",
+			wantErr: "cannot add column, name already exists: years",
+		},
+		{
+			name:          "name a nested column is renamed to",
+			caseSensitive: true,
+			build: func(u *UpdateSchema) *UpdateSchema {
+				return u.RenameColumn([]string{"address", "city"}, "town").
+					AddColumn([]string{"address", "town"}, str, "", false, nil)
+			},
+			wantErr: "cannot add column, name already exists: address.town",
 		},
 		{
 			name:          "column added with different case in case-insensitive mode",
@@ -411,7 +420,7 @@ func TestAddColumnNameAlreadyExists(t *testing.T) {
 				return u.AddColumn([]string{"x"}, str, "", false, nil).
 					AddColumn([]string{"X"}, str, "", false, nil)
 			},
-			wantErr: "field already exists in adds: X",
+			wantErr: "cannot add column, name already exists: X",
 		},
 	}
 
@@ -420,9 +429,11 @@ func TestAddColumnNameAlreadyExists(t *testing.T) {
 			txn := New([]string{"id"}, testMetadata, "", nil, nil).NewTransaction()
 
 			_, err := tt.build(NewUpdateSchema(txn, tt.caseSensitive, false)).Apply()
+			require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
 			require.ErrorContains(t, err, tt.wantErr)
 
 			err = tt.build(NewUpdateSchema(txn, tt.caseSensitive, false)).Commit()
+			require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
 			require.ErrorContains(t, err, tt.wantErr)
 		})
 	}
@@ -470,6 +481,139 @@ func TestAddColumnNameAlreadyExists(t *testing.T) {
 			tt.checkID(t, s)
 		})
 	}
+}
+
+func TestRenameColumnNameAlreadyExists(t *testing.T) {
+	str := iceberg.PrimitiveTypes.String
+
+	rejected := []struct {
+		name          string
+		caseSensitive bool
+		build         func(*UpdateSchema) *UpdateSchema
+		wantErr       string
+	}{
+		{
+			name:          "existing column",
+			caseSensitive: true,
+			build: func(u *UpdateSchema) *UpdateSchema {
+				return u.RenameColumn([]string{"name"}, "age")
+			},
+			wantErr: "cannot rename column, name already exists: age",
+		},
+		{
+			name:          "existing column with different case in case-insensitive mode",
+			caseSensitive: false,
+			build: func(u *UpdateSchema) *UpdateSchema {
+				return u.RenameColumn([]string{"name"}, "AGE")
+			},
+			wantErr: "cannot rename column, name already exists: AGE",
+		},
+		{
+			name:          "added column with different case in case-insensitive mode",
+			caseSensitive: false,
+			build: func(u *UpdateSchema) *UpdateSchema {
+				return u.AddColumn([]string{"x"}, str, "", false, nil).
+					RenameColumn([]string{"age"}, "X")
+			},
+			wantErr: "cannot rename column, name already exists: X",
+		},
+		{
+			name:          "renamed column with different case in case-insensitive mode",
+			caseSensitive: false,
+			build: func(u *UpdateSchema) *UpdateSchema {
+				return u.RenameColumn([]string{"name"}, "y").
+					RenameColumn([]string{"age"}, "Y")
+			},
+			wantErr: "cannot rename column, name already exists: Y",
+		},
+		{
+			name:          "nested added column with different case in case-insensitive mode",
+			caseSensitive: false,
+			build: func(u *UpdateSchema) *UpdateSchema {
+				return u.AddColumn([]string{"address", "town"}, str, "", false, nil).
+					RenameColumn([]string{"address", "city"}, "Town")
+			},
+			wantErr: "cannot rename column, name already exists: address.Town",
+		},
+	}
+
+	for _, tt := range rejected {
+		t.Run(tt.name, func(t *testing.T) {
+			txn := New([]string{"id"}, testMetadata, "", nil, nil).NewTransaction()
+
+			_, err := tt.build(NewUpdateSchema(txn, tt.caseSensitive, false)).Apply()
+			require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+			require.ErrorContains(t, err, tt.wantErr)
+
+			err = tt.build(NewUpdateSchema(txn, tt.caseSensitive, false)).Commit()
+			require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+			require.ErrorContains(t, err, tt.wantErr)
+		})
+	}
+
+	allowed := []struct {
+		name          string
+		caseSensitive bool
+		build         func(*UpdateSchema) *UpdateSchema
+		wantIDs       map[string]int
+	}{
+		{
+			name:          "same column with different case in case-insensitive mode",
+			caseSensitive: false,
+			build: func(u *UpdateSchema) *UpdateSchema {
+				return u.RenameColumn([]string{"name"}, "Name")
+			},
+			wantIDs: map[string]int{"Name": 2},
+		},
+		{
+			name:          "same column with different case in case-sensitive mode",
+			caseSensitive: true,
+			build: func(u *UpdateSchema) *UpdateSchema {
+				return u.RenameColumn([]string{"name"}, "Name")
+			},
+			wantIDs: map[string]int{"Name": 2},
+		},
+		{
+			name:          "name of a column renamed away",
+			caseSensitive: true,
+			build: func(u *UpdateSchema) *UpdateSchema {
+				return u.RenameColumn([]string{"name"}, "full_name").
+					RenameColumn([]string{"age"}, "name")
+			},
+			wantIDs: map[string]int{"full_name": 2, "name": 3},
+		},
+	}
+
+	for _, tt := range allowed {
+		t.Run(tt.name, func(t *testing.T) {
+			txn := New([]string{"id"}, testMetadata, "", nil, nil).NewTransaction()
+
+			applied, err := tt.build(NewUpdateSchema(txn, tt.caseSensitive, false)).Apply()
+			require.NoError(t, err)
+
+			require.NoError(t, tt.build(NewUpdateSchema(txn, tt.caseSensitive, false)).Commit())
+
+			for _, s := range []*iceberg.Schema{applied, txn.meta.CurrentSchema()} {
+				for name, id := range tt.wantIDs {
+					f, ok := s.FindFieldByName(name)
+					require.True(t, ok, name)
+					assert.Equal(t, id, f.ID)
+				}
+			}
+		})
+	}
+
+	// The first rename of a swap asks for a name that is still in use.
+	t.Run("swapped names", func(t *testing.T) {
+		txn := New([]string{"id"}, testMetadata, "", nil, nil).NewTransaction()
+
+		_, err := NewUpdateSchema(txn, true, false).
+			RenameColumn([]string{"name"}, "age").
+			RenameColumn([]string{"age"}, "name").
+			Apply()
+		require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+		require.ErrorContains(t, err, "cannot rename column, name already exists: age")
+	})
 }
 
 func TestApplyChanges(t *testing.T) {
@@ -863,8 +1007,8 @@ func TestRenameColumn(t *testing.T) {
 		txn := table.NewTransaction()
 
 		_, err := NewUpdateSchema(txn, true, true).RenameColumn([]string{"name"}, "age").Apply()
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "field already exists")
+		assert.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+		assert.Contains(t, err.Error(), "cannot rename column, name already exists: age")
 	})
 }
 
@@ -1079,9 +1223,9 @@ func TestSetIdentifierField(t *testing.T) {
 		assert.NotNil(t, newSchema)
 
 		// Check that the schema has identifier field IDs set
-		assert.Len(t, newSchema.IdentifierFieldIDs, 1)
-		if len(newSchema.IdentifierFieldIDs) > 0 {
-			assert.Equal(t, 1, newSchema.IdentifierFieldIDs[0]) // id field has ID 1
+		assert.Len(t, newSchema.IdentifierFieldIDs(), 1)
+		if len(newSchema.IdentifierFieldIDs()) > 0 {
+			assert.Equal(t, 1, newSchema.IdentifierFieldIDs()[0]) // id field has ID 1
 		}
 	})
 
@@ -1094,9 +1238,9 @@ func TestSetIdentifierField(t *testing.T) {
 		assert.NotNil(t, newSchema)
 
 		// Check that the schema has identifier field IDs set
-		assert.Len(t, newSchema.IdentifierFieldIDs, 2)
-		assert.Contains(t, newSchema.IdentifierFieldIDs, 1) // id field
-		assert.Contains(t, newSchema.IdentifierFieldIDs, 2) // name field
+		assert.Len(t, newSchema.IdentifierFieldIDs(), 2)
+		assert.Contains(t, newSchema.IdentifierFieldIDs(), 1) // id field
+		assert.Contains(t, newSchema.IdentifierFieldIDs(), 2) // name field
 	})
 
 	t.Run("test set identifier field with case sensitive matching", func(t *testing.T) {
@@ -1117,8 +1261,8 @@ func TestSetIdentifierField(t *testing.T) {
 		assert.NotNil(t, newSchema)
 
 		// Check that the schema has identifier field IDs set
-		assert.Len(t, newSchema.IdentifierFieldIDs, 1)
-		assert.Equal(t, 1, newSchema.IdentifierFieldIDs[0]) // id field (case insensitive match)
+		assert.Len(t, newSchema.IdentifierFieldIDs(), 1)
+		assert.Equal(t, 1, newSchema.IdentifierFieldIDs()[0]) // id field (case insensitive match)
 	})
 
 	t.Run("test set identifier field with non-existent field", func(t *testing.T) {
@@ -1139,7 +1283,7 @@ func TestSetIdentifierField(t *testing.T) {
 		assert.NotNil(t, newSchema)
 
 		// Check that the schema has no identifier field IDs
-		assert.Len(t, newSchema.IdentifierFieldIDs, 0)
+		assert.Len(t, newSchema.IdentifierFieldIDs(), 0)
 	})
 
 	t.Run("test set identifier field chained with other operations", func(t *testing.T) {
@@ -1154,9 +1298,9 @@ func TestSetIdentifierField(t *testing.T) {
 		assert.NotNil(t, newSchema)
 
 		// Check that the schema has identifier field IDs set
-		assert.Len(t, newSchema.IdentifierFieldIDs, 2)
-		assert.Contains(t, newSchema.IdentifierFieldIDs, 1)  // id field
-		assert.Contains(t, newSchema.IdentifierFieldIDs, 12) // email field (newly added)
+		assert.Len(t, newSchema.IdentifierFieldIDs(), 2)
+		assert.Contains(t, newSchema.IdentifierFieldIDs(), 1)  // id field
+		assert.Contains(t, newSchema.IdentifierFieldIDs(), 12) // email field (newly added)
 	})
 
 	t.Run("test set identifier field with duplicate field paths", func(t *testing.T) {
@@ -1168,8 +1312,8 @@ func TestSetIdentifierField(t *testing.T) {
 		assert.NotNil(t, newSchema)
 
 		// Check that the schema has identifier field IDs set (duplicates should be deduplicated)
-		assert.Len(t, newSchema.IdentifierFieldIDs, 1)
-		assert.Equal(t, 1, newSchema.IdentifierFieldIDs[0]) // id field
+		assert.Len(t, newSchema.IdentifierFieldIDs(), 1)
+		assert.Equal(t, 1, newSchema.IdentifierFieldIDs()[0]) // id field
 	})
 
 	t.Run("test set identifier field replaces existing identifier fields", func(t *testing.T) {
@@ -1189,8 +1333,8 @@ func TestSetIdentifierField(t *testing.T) {
 		assert.NotNil(t, newSchema)
 
 		// Check that only name is now an identifier field
-		assert.Len(t, newSchema.IdentifierFieldIDs, 1)
-		assert.Equal(t, 2, newSchema.IdentifierFieldIDs[0]) // name field has ID 2
+		assert.Len(t, newSchema.IdentifierFieldIDs(), 1)
+		assert.Equal(t, 2, newSchema.IdentifierFieldIDs()[0]) // name field has ID 2
 	})
 
 	t.Run("test set identifier field multiple times", func(t *testing.T) {
@@ -1206,8 +1350,8 @@ func TestSetIdentifierField(t *testing.T) {
 		assert.NotNil(t, newSchema)
 
 		// Check that only the last SetIdentifierField call is applied
-		assert.Len(t, newSchema.IdentifierFieldIDs, 1)
-		assert.Equal(t, 2, newSchema.IdentifierFieldIDs[0]) // name field has ID 2
+		assert.Len(t, newSchema.IdentifierFieldIDs(), 1)
+		assert.Equal(t, 2, newSchema.IdentifierFieldIDs()[0]) // name field has ID 2
 	})
 
 	t.Run("test rename then set identifier to old name fails", func(t *testing.T) {
@@ -1233,9 +1377,9 @@ func TestSetIdentifierField(t *testing.T) {
 		require.NoError(t, err)
 		require.NotNil(t, newSchema)
 
-		require.Len(t, newSchema.IdentifierFieldIDs, 1)
+		require.Len(t, newSchema.IdentifierFieldIDs(), 1)
 		// Renamed field keeps ID 1
-		assert.Equal(t, 1, newSchema.IdentifierFieldIDs[0])
+		assert.Equal(t, 1, newSchema.IdentifierFieldIDs()[0])
 		field, ok := newSchema.FindColumnName(1)
 		require.True(t, ok)
 		assert.Equal(t, "new_id", field)
@@ -1319,7 +1463,7 @@ func TestDeleteIdentifierColumn(t *testing.T) {
 			SetIdentifierField([][]string{}).
 			Apply()
 		require.NoError(t, err)
-		assert.Empty(t, newSchema.IdentifierFieldIDs)
+		assert.Empty(t, newSchema.IdentifierFieldIDs())
 		_, found := newSchema.FindFieldByName("id")
 		assert.False(t, found)
 	})
@@ -1330,7 +1474,7 @@ func TestDeleteIdentifierColumn(t *testing.T) {
 			DeleteColumn([]string{"id"}).
 			Apply()
 		require.NoError(t, err)
-		assert.Equal(t, []int{2}, newSchema.IdentifierFieldIDs)
+		assert.Equal(t, []int{2}, newSchema.IdentifierFieldIDs())
 	})
 }
 
@@ -1349,7 +1493,7 @@ func TestSetIdentifierFieldDeterministicOrder(t *testing.T) {
 			require.NoError(t, err)
 			require.NotNil(t, newSchema)
 
-			assert.Equal(t, []int{1, 2, 3}, newSchema.IdentifierFieldIDs)
+			assert.Equal(t, []int{1, 2, 3}, newSchema.IdentifierFieldIDs())
 
 			// Every independently-produced schema must compare equal, which is
 			// exactly the invariant the ordering bug breaks.
@@ -1614,7 +1758,7 @@ func TestApplyChangesListElementOptionalityUpdates(t *testing.T) {
 		require.True(t, ok, "tags field must be present in the applied schema")
 		listType, ok := tags.Type.(*iceberg.ListType)
 		require.True(t, ok, "tags must remain a ListType after apply")
-		assert.False(t, listType.ElementRequired,
+		assert.False(t, listType.ElementRequired(),
 			"list element optionality update must be reflected in the applied schema")
 	})
 
@@ -1633,7 +1777,7 @@ func TestApplyChangesListElementOptionalityUpdates(t *testing.T) {
 		require.True(t, ok, "tags field must be present in the applied schema")
 		listType, ok := tags.Type.(*iceberg.ListType)
 		require.True(t, ok, "tags must remain a ListType after apply")
-		assert.True(t, listType.ElementRequired,
+		assert.True(t, listType.ElementRequired(),
 			"list element optionality update must be reflected in the applied schema")
 	})
 
@@ -1666,9 +1810,9 @@ func TestApplyChangesListElementOptionalityUpdates(t *testing.T) {
 		require.True(t, ok, "tags field must be present in the applied schema")
 		listType, ok := tags.Type.(*iceberg.ListType)
 		require.True(t, ok, "tags must remain a ListType after apply")
-		assert.True(t, iceberg.PrimitiveTypes.Int64.Equals(listType.Element),
+		assert.True(t, iceberg.PrimitiveTypes.Int64.Equals(listType.Element()),
 			"type promotion must still be applied alongside optionality change")
-		assert.False(t, listType.ElementRequired,
+		assert.False(t, listType.ElementRequired(),
 			"optionality change must be applied alongside type promotion")
 	})
 
@@ -1687,7 +1831,7 @@ func TestApplyChangesListElementOptionalityUpdates(t *testing.T) {
 		require.True(t, ok, "tags field must be present in the applied schema")
 		listType, ok := tags.Type.(*iceberg.ListType)
 		require.True(t, ok, "tags must remain a ListType after apply")
-		assert.True(t, listType.ElementRequired,
+		assert.True(t, listType.ElementRequired(),
 			"ElementRequired must be preserved from the original schema when no Required update is registered")
 	})
 
@@ -1706,7 +1850,7 @@ func TestApplyChangesListElementOptionalityUpdates(t *testing.T) {
 		require.True(t, ok, "tags field must be present in the applied schema")
 		listType, ok := tags.Type.(*iceberg.ListType)
 		require.True(t, ok, "tags must remain a ListType after apply")
-		assert.True(t, listType.ElementRequired,
+		assert.True(t, listType.ElementRequired(),
 			"ElementRequired must be preserved when the registered update leaves Required unset")
 	})
 }
@@ -1734,7 +1878,7 @@ func TestApplyChangesMapValueOptionalityUpdates(t *testing.T) {
 		require.True(t, ok, "properties field must be present in the applied schema")
 		mapType, ok := props.Type.(*iceberg.MapType)
 		require.True(t, ok, "properties must remain a MapType after apply")
-		assert.False(t, mapType.ValueRequired,
+		assert.False(t, mapType.ValueRequired(),
 			"map value optionality update must be reflected in the applied schema")
 	})
 
@@ -1753,7 +1897,7 @@ func TestApplyChangesMapValueOptionalityUpdates(t *testing.T) {
 		require.True(t, ok, "properties field must be present in the applied schema")
 		mapType, ok := props.Type.(*iceberg.MapType)
 		require.True(t, ok, "properties must remain a MapType after apply")
-		assert.True(t, mapType.ValueRequired,
+		assert.True(t, mapType.ValueRequired(),
 			"map value optionality update must be reflected in the applied schema")
 	})
 
@@ -1786,9 +1930,9 @@ func TestApplyChangesMapValueOptionalityUpdates(t *testing.T) {
 		require.True(t, ok, "properties field must be present in the applied schema")
 		mapType, ok := props.Type.(*iceberg.MapType)
 		require.True(t, ok, "properties must remain a MapType after apply")
-		assert.True(t, iceberg.PrimitiveTypes.Int64.Equals(mapType.ValueType),
+		assert.True(t, iceberg.PrimitiveTypes.Int64.Equals(mapType.ValueType()),
 			"type promotion must still be applied alongside optionality change")
-		assert.False(t, mapType.ValueRequired,
+		assert.False(t, mapType.ValueRequired(),
 			"optionality change must be applied alongside type promotion")
 	})
 
@@ -1807,7 +1951,7 @@ func TestApplyChangesMapValueOptionalityUpdates(t *testing.T) {
 		require.True(t, ok, "properties field must be present in the applied schema")
 		mapType, ok := props.Type.(*iceberg.MapType)
 		require.True(t, ok, "properties must remain a MapType after apply")
-		assert.True(t, mapType.ValueRequired,
+		assert.True(t, mapType.ValueRequired(),
 			"ValueRequired must be preserved from the original schema when no Required update is registered")
 	})
 
@@ -1826,7 +1970,7 @@ func TestApplyChangesMapValueOptionalityUpdates(t *testing.T) {
 		require.True(t, ok, "properties field must be present in the applied schema")
 		mapType, ok := props.Type.(*iceberg.MapType)
 		require.True(t, ok, "properties must remain a MapType after apply")
-		assert.True(t, mapType.ValueRequired,
+		assert.True(t, mapType.ValueRequired(),
 			"ValueRequired must be preserved when the registered update leaves Required unset")
 	})
 }
@@ -2398,6 +2542,91 @@ func TestAddColumnStoresBinaryDefaultAsHex(t *testing.T) {
 	assert.True(t, applied.Equals(&decoded))
 }
 
+// Struct, list and map columns can have a write default ({} for a struct, a JSON
+// array or object otherwise). Those defaults are Go maps and slices, which ==
+// cannot compare, so they must not break evolving any other column.
+func TestUpdateSchemaWithNestedTypeWriteDefault(t *testing.T) {
+	newTxn := func(t *testing.T, field string) *Transaction {
+		t.Helper()
+
+		var current iceberg.Schema
+		require.NoError(t, json.Unmarshal([]byte(`{"type":"struct","schema-id":0,"fields":[`+
+			`{"id":1,"name":"id","required":true,"type":"long"},`+field+`]}`), &current))
+
+		meta, err := NewMetadata(&current, iceberg.UnpartitionedSpec, UnsortedSortOrder, "",
+			iceberg.Properties{PropertyFormatVersion: "3"})
+		require.NoError(t, err)
+
+		return New([]string{"tbl"}, meta, "", nil, nil).NewTransaction()
+	}
+
+	tests := []struct {
+		name           string
+		field          string
+		writeDefault   any
+		initialDefault any
+	}{
+		{
+			name: "struct",
+			field: `{"id":2,"name":"point","required":false,"initial-default":{},"write-default":{},` +
+				`"type":{"type":"struct","fields":[{"id":3,"name":"x","required":false,"type":"int"}]}}`,
+			writeDefault:   map[string]any{},
+			initialDefault: map[string]any{},
+		},
+		{
+			name: "list",
+			field: `{"id":2,"name":"tags","required":false,"write-default":[],` +
+				`"type":{"type":"list","element-id":3,"element":"string","element-required":false}}`,
+			writeDefault: []any{},
+		},
+		{
+			name: "map",
+			field: `{"id":2,"name":"attrs","required":false,"write-default":{"keys":[],"values":[]},` +
+				`"type":{"type":"map","key-id":3,"key":"string","value-id":4,"value":"string","value-required":false}}`,
+			writeDefault: map[string]any{"keys": []any{}, "values": []any{}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			txn := newTxn(t, tt.field)
+
+			require.NoError(t, txn.UpdateSchema(true, false).
+				AddColumn([]string{"name"}, iceberg.PrimitiveTypes.String, "", false, nil).
+				RenameColumn([]string{"id"}, "row_id").
+				Commit())
+
+			applied := txn.meta.CurrentSchema()
+			_, ok := applied.FindFieldByName("name")
+			assert.True(t, ok)
+			_, ok = applied.FindFieldByName("row_id")
+			assert.True(t, ok)
+			field, ok := applied.FindFieldByID(2)
+			require.True(t, ok)
+			assert.Equal(t, tt.writeDefault, field.WriteDefault)
+		})
+
+		// Renaming the nested column itself rebuilds the field, which must keep
+		// both of its defaults.
+		t.Run(tt.name+" renamed", func(t *testing.T) {
+			txn := newTxn(t, tt.field)
+
+			before, ok := txn.meta.CurrentSchema().FindFieldByID(2)
+			require.True(t, ok)
+
+			require.NoError(t, txn.UpdateSchema(true, false).
+				RenameColumn([]string{before.Name}, "renamed").
+				Commit())
+
+			field, ok := txn.meta.CurrentSchema().FindFieldByID(2)
+			require.True(t, ok)
+			assert.Equal(t, "renamed", field.Name)
+			assert.Equal(t, tt.writeDefault, field.WriteDefault)
+			assert.Equal(t, tt.initialDefault, field.InitialDefault)
+		})
+	}
+}
+
 // A binary write default read from metadata and the same default built in
 // process must compare equal, so union-by-name does not rewrite it.
 func TestUnionByNameKeepsUnchangedBinaryWriteDefault(t *testing.T) {
@@ -2604,7 +2833,7 @@ func TestUnionByNameCannotExtendStructAddedByPriorOp(t *testing.T) {
 		), "", false, nil).
 		UnionByNameWith(extend).
 		Apply()
-	require.ErrorContains(t, err, "field already exists in adds: addr")
+	require.ErrorContains(t, err, "cannot add column, name already exists: addr")
 }
 
 func TestUnionByNameMirroredSchemas(t *testing.T) {
@@ -2981,4 +3210,72 @@ func TestAddFilesAfterAddColumnReadsNewColumnByName(t *testing.T) {
 	category := result.Column(result.Schema().FieldIndices("category")[0]).Data().Chunk(0).(*array.String)
 	require.False(t, category.IsNull(0), "category was read as null")
 	assert.Equal(t, "books", category.Value(0))
+}
+
+// A decimal default added by AddColumn must survive the metadata JSON round
+// trip, so files written before the column existed still read the default
+// after the table is reloaded.
+func TestAddColumnDecimalDefaultSurvivesMetadataRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	dir := filepath.ToSlash(t.TempDir())
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true})
+	meta, err := NewMetadata(schema, iceberg.UnpartitionedSpec, UnsortedSortOrder, dir,
+		iceberg.Properties{PropertyFormatVersion: "3"})
+	require.NoError(t, err)
+	fsF := func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil }
+	tbl := New(Identifier{"default", "decimal_default"}, meta, dir+"/metadata/00000.json", fsF,
+		&countingCatalog{metadata: meta})
+
+	// A file written before the price column exists.
+	arrSchema := arrow.NewSchema([]arrow.Field{{Name: "id", Type: arrow.PrimitiveTypes.Int32}}, nil)
+	ids := array.NewInt32Builder(memory.DefaultAllocator)
+	defer ids.Release()
+	ids.AppendValues([]int32{1}, nil)
+	idArr := ids.NewArray()
+	defer idArr.Release()
+	rec := array.NewRecordBatch(arrSchema, []arrow.Array{idArr}, 1)
+	defer rec.Release()
+	arrTbl := array.NewTableFromRecords(arrSchema, []arrow.RecordBatch{rec})
+	defer arrTbl.Release()
+	path := dir + "/data/before.parquet"
+	fo, err := iceio.LocalFS{}.Create(ctx, path)
+	require.NoError(t, err)
+	require.NoError(t, pqarrow.WriteTable(arrTbl, fo, arrTbl.NumRows(), nil, pqarrow.DefaultWriterProps()))
+
+	txn := tbl.NewTransaction()
+	require.NoError(t, txn.AddDataFilesByPath(ctx, []string{path}, nil, false))
+	tbl, err = txn.Commit(ctx)
+	require.NoError(t, err)
+
+	decimalType := iceberg.MustDecimalTypeOf(9, 2)
+	price, err := iceberg.NewLiteral("14.20").To(decimalType)
+	require.NoError(t, err)
+	txn = tbl.NewTransaction()
+	require.NoError(t, txn.UpdateSchema(true, false).
+		AddColumn([]string{"price"}, decimalType, "", false, price).
+		Commit())
+	tbl, err = txn.Commit(ctx)
+	require.NoError(t, err)
+
+	// Reload the table from its metadata JSON, as a catalog would.
+	metaJSON, err := json.Marshal(tbl.Metadata())
+	require.NoError(t, err)
+	reloaded, err := ParseMetadataBytes(metaJSON)
+	require.NoError(t, err)
+	field, ok := reloaded.CurrentSchema().FindFieldByName("price")
+	require.True(t, ok)
+	assert.Equal(t, "14.20", field.InitialDefault)
+	assert.Equal(t, "14.20", field.WriteDefault)
+
+	tbl = New(Identifier{"default", "decimal_default"}, reloaded, dir+"/metadata/00002.json", fsF,
+		&countingCatalog{metadata: reloaded})
+	result, err := tbl.Scan().ToArrowTable(ctx)
+	require.NoError(t, err)
+	defer result.Release()
+
+	require.EqualValues(t, 1, result.NumRows())
+	prices := result.Column(result.Schema().FieldIndices("price")[0]).Data().Chunk(0).(*array.Decimal128)
+	require.False(t, prices.IsNull(0))
+	assert.Equal(t, "14.20", prices.Value(0).ToString(2))
 }

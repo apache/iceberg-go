@@ -234,6 +234,11 @@ func TestToHumanStringValues(t *testing.T) {
 		{iceberg.HourTransform{}, iceberg.PrimitiveTypes.Int32, int32(4645896), "2500-01-01-00"},
 		{iceberg.HourTransform{}, iceberg.PrimitiveTypes.Int32, int32(-4119936), "1500-01-01-00"},
 		{iceberg.YearTransform{}, iceberg.PrimitiveTypes.Int32, int32(-1), "1969"},
+		{iceberg.YearTransform{}, iceberg.PrimitiveTypes.Int32, int32(-1035), "0935"},
+		{iceberg.YearTransform{}, iceberg.PrimitiveTypes.Int32, int32(-1969), "0001"},
+		{iceberg.YearTransform{}, iceberg.PrimitiveTypes.Int32, int32(-1970), "0000"},
+		{iceberg.YearTransform{}, iceberg.PrimitiveTypes.Int32, int32(-1971), "-001"},
+		{iceberg.YearTransform{}, iceberg.PrimitiveTypes.Int32, int32(10375), "12345"},
 		{iceberg.MonthTransform{}, iceberg.PrimitiveTypes.Int32, int32(-1), "1969-12"},
 		{iceberg.DayTransform{}, iceberg.PrimitiveTypes.Date, int32(-1), "1969-12-31"},
 		{iceberg.HourTransform{}, iceberg.PrimitiveTypes.Int32, int32(-1), "1969-12-31-23"},
@@ -386,6 +391,35 @@ func TestPartitionToPath_TimestampTzIdentity(t *testing.T) {
 	}, "/")
 
 	assert.Equal(t, expected, spec.PartitionToPath(record, schema))
+}
+
+func TestPartitionToPath_YearMatchesJava(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "ts", Type: iceberg.PrimitiveTypes.Date, Required: true},
+	)
+	spec := iceberg.NewPartitionSpecID(0,
+		iceberg.PartitionField{
+			SourceIDs: []int{1}, FieldID: 1000,
+			Transform: iceberg.YearTransform{}, Name: "ts_year",
+		},
+	)
+
+	tests := []struct {
+		name     string
+		year     int32
+		expected string
+	}{
+		{"four digit year", int32(47), "ts_year=2017"},
+		{"year below 1000 is zero padded", int32(-1035), "ts_year=0935"},
+		{"year 1 is zero padded", int32(-1969), "ts_year=0001"},
+		{"negative year keeps the sign in the padded width", int32(-1971), "ts_year=-001"},
+		{"five digit year is not truncated", int32(10375), "ts_year=12345"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, spec.PartitionToPath(partitionRecord{tt.year}, schema))
+		})
+	}
 }
 
 func TestManifestPartitionVals(t *testing.T) {

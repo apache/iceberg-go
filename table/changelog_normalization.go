@@ -287,7 +287,7 @@ func changelogIdentifiers(schema *iceberg.Schema, opts ChangelogNormalizationOpt
 	if !opts.ComputeUpdates {
 		return nil, nil
 	}
-	ids := slices.Clone(schema.IdentifierFieldIDs)
+	ids := schema.IdentifierFieldIDs()
 	if len(opts.IdentifierFields) != 0 {
 		ids = make([]int, 0, len(opts.IdentifierFields))
 		for _, name := range opts.IdentifierFields {

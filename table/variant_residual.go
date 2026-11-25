@@ -46,7 +46,7 @@ func augmentSchemaWithExtracts(fileSchema *iceberg.Schema, cols []iceberg.Varian
 		})
 	}
 
-	return iceberg.NewSchemaWithIdentifiers(fileSchema.ID, fileSchema.IdentifierFieldIDs, fields...)
+	return iceberg.NewSchemaWithIdentifiers(fileSchema.ID, fileSchema.IdentifierFieldIDs(), fields...)
 }
 
 // buildExtractColumn materializes one variant extract term into a typed Arrow array over rec,

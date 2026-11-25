@@ -578,22 +578,6 @@ func TestPartitionTypeResolvesEachSchema(t *testing.T) {
 	}
 }
 
-func TestPartitionTypeReturnsIndependentFields(t *testing.T) {
-	schema := iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "value", Type: iceberg.StringType{}})
-	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
-		SourceIDs: []int{1}, FieldID: 1000, Name: "value", Transform: iceberg.IdentityTransform{},
-	})
-	first := spec.PartitionType(schema)
-	second := spec.PartitionType(schema)
-	first.FieldList[0] = iceberg.NestedField{ID: 2000, Name: "changed", Type: iceberg.Int64Type{}, Required: true}
-
-	want := []iceberg.NestedField{{ID: 1000, Name: "value", Type: iceberg.StringType{}}}
-	require.Equal(t, want, second.Fields())
-	require.Equal(t, want, spec.PartitionType(schema).Fields())
-	require.Equal(t, "value", spec.Field(0).Name)
-	require.Equal(t, 1000, spec.Field(0).FieldID)
-}
-
 func TestPartitionTypeUnpartitioned(t *testing.T) {
 	for _, spec := range []iceberg.PartitionSpec{{}, iceberg.NewPartitionSpec()} {
 		partitionType := spec.PartitionType(nil)

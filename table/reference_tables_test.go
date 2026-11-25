@@ -149,7 +149,7 @@ func expectedReferenceRow(fields []iceberg.NestedField, raw json.RawMessage) (st
 	if err := dec.Decode(&v); err != nil {
 		return "", err
 	}
-	row, err := expectedReferenceValue(&iceberg.StructType{FieldList: fields}, v)
+	row, err := expectedReferenceValue(iceberg.NewStructType(fields...), v)
 	if err != nil {
 		return "", err
 	}
@@ -211,8 +211,8 @@ func expectedReferenceValue(typ iceberg.Type, v any) (any, error) {
 		if !ok {
 			return nil, fmt.Errorf("struct must be a JSON object, got %v", v)
 		}
-		out := make(map[string]any, len(typ.FieldList))
-		for _, f := range typ.FieldList {
+		out := make(map[string]any, typ.NumFields())
+		for _, f := range typ.Fields() {
 			key := strconv.Itoa(f.ID)
 			raw, present := obj[key]
 			if !present {
@@ -224,7 +224,7 @@ func expectedReferenceValue(typ iceberg.Type, v any) (any, error) {
 			}
 			out[key] = fv
 		}
-		if len(obj) != len(typ.FieldList) {
+		if len(obj) != typ.NumFields() {
 			return nil, fmt.Errorf("struct %v has keys the schema does not", obj)
 		}
 
@@ -236,7 +236,7 @@ func expectedReferenceValue(typ iceberg.Type, v any) (any, error) {
 		}
 		out := make([]any, len(elems))
 		for i, e := range elems {
-			ev, err := expectedReferenceValue(typ.Element, e)
+			ev, err := expectedReferenceValue(typ.Element(), e)
 			if err != nil {
 				return nil, err
 			}
@@ -256,11 +256,11 @@ func expectedReferenceValue(typ iceberg.Type, v any) (any, error) {
 		}
 		pairs := make([][2]any, len(keys))
 		for i := range keys {
-			k, err := expectedReferenceValue(typ.KeyType, keys[i])
+			k, err := expectedReferenceValue(typ.KeyType(), keys[i])
 			if err != nil {
 				return nil, err
 			}
-			val, err := expectedReferenceValue(typ.ValueType, values[i])
+			val, err := expectedReferenceValue(typ.ValueType(), values[i])
 			if err != nil {
 				return nil, err
 			}
@@ -351,11 +351,11 @@ func arrowReferenceValue(typ iceberg.Type, arr arrow.Array, i int) (any, error) 
 		return a.Value(i).ToTime(dt.Unit).UnixMicro(), nil
 	case *iceberg.StructType:
 		a, ok := arr.(*array.Struct)
-		if !ok || a.NumField() != len(typ.FieldList) {
+		if !ok || a.NumField() != typ.NumFields() {
 			return nil, fmt.Errorf("struct read as %s", arr.DataType())
 		}
-		out := make(map[string]any, len(typ.FieldList))
-		for j, f := range typ.FieldList {
+		out := make(map[string]any, typ.NumFields())
+		for j, f := range typ.Fields() {
 			v, err := arrowReferenceValue(f.Type, a.Field(j), i)
 			if err != nil {
 				return nil, fmt.Errorf("field %d: %w", f.ID, err)
@@ -372,11 +372,11 @@ func arrowReferenceValue(typ iceberg.Type, arr arrow.Array, i int) (any, error) 
 		start, end := a.ValueOffsets(i)
 		pairs := make([][2]any, 0, end-start)
 		for j := int(start); j < int(end); j++ {
-			k, err := arrowReferenceValue(typ.KeyType, a.Keys(), j)
+			k, err := arrowReferenceValue(typ.KeyType(), a.Keys(), j)
 			if err != nil {
 				return nil, err
 			}
-			v, err := arrowReferenceValue(typ.ValueType, a.Items(), j)
+			v, err := arrowReferenceValue(typ.ValueType(), a.Items(), j)
 			if err != nil {
 				return nil, err
 			}
@@ -392,7 +392,7 @@ func arrowReferenceValue(typ iceberg.Type, arr arrow.Array, i int) (any, error) 
 		start, end := a.ValueOffsets(i)
 		out := make([]any, 0, end-start)
 		for j := int(start); j < int(end); j++ {
-			v, err := arrowReferenceValue(typ.Element, a.ListValues(), j)
+			v, err := arrowReferenceValue(typ.Element(), a.ListValues(), j)
 			if err != nil {
 				return nil, err
 			}

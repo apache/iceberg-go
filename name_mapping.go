@@ -449,7 +449,7 @@ func (n *nameMapProjectVisitor) Schema(_ *Schema, _ *MappedField, structResult N
 
 func (n *nameMapProjectVisitor) Struct(_ StructType, _ *MappedField, fieldResults []NestedField) NestedField {
 	return NestedField{
-		Type: &StructType{FieldList: fieldResults},
+		Type: &StructType{fields: fieldResults},
 	}
 }
 
@@ -489,9 +489,9 @@ func (n *nameMapProjectVisitor) List(lt ListType, listPartner *MappedField, elem
 
 	return NestedField{
 		Type: &ListType{
-			ElementID:       elementID,
-			Element:         elemResult.Type,
-			ElementRequired: lt.ElementRequired,
+			elementID:       elementID,
+			element:         elemResult.Type,
+			elementRequired: lt.elementRequired,
 		},
 	}
 }
@@ -507,11 +507,11 @@ func (n *nameMapProjectVisitor) Map(m MapType, mapPartner *MappedField, keyResul
 
 	return NestedField{
 		Type: &MapType{
-			KeyID:         keyID,
-			KeyType:       keyResult.Type,
-			ValueID:       valID,
-			ValueType:     valResult.Type,
-			ValueRequired: m.ValueRequired,
+			keyID:         keyID,
+			keyType:       keyResult.Type,
+			valueID:       valID,
+			valueType:     valResult.Type,
+			valueRequired: m.valueRequired,
 		},
 	}
 }
@@ -552,7 +552,7 @@ func ApplyNameMapping(schemaWithoutIDs *Schema, nameMapping NameMapping) (*Schem
 		return nil, err
 	}
 
-	fields := top.Type.(*StructType).FieldList
+	fields := top.Type.(*StructType).fields
 	if err := checkDuplicateFieldIDs(nil, fields); err != nil {
 		return nil, err
 	}
@@ -567,8 +567,8 @@ func (createMapping) Schema(_ *Schema, result []MappedField) []MappedField {
 }
 
 func (createMapping) Struct(st StructType, result [][]MappedField) []MappedField {
-	output := make([]MappedField, len(st.FieldList))
-	for i, field := range st.FieldList {
+	output := make([]MappedField, len(st.fields))
+	for i, field := range st.fields {
 		output[i] = MappedField{
 			Names:   []string{field.Name},
 			FieldID: &field.ID,
@@ -586,7 +586,7 @@ func (createMapping) Field(_ NestedField, result []MappedField) []MappedField {
 func (createMapping) List(listType ListType, elemResult []MappedField) []MappedField {
 	return []MappedField{{
 		Names:   []string{"element"},
-		FieldID: &listType.ElementID,
+		FieldID: &listType.elementID,
 		Fields:  elemResult,
 	}}
 }
@@ -595,12 +595,12 @@ func (createMapping) Map(mapType MapType, keyResult, valResult []MappedField) []
 	return []MappedField{
 		{
 			Names:   []string{"key"},
-			FieldID: &mapType.KeyID,
+			FieldID: &mapType.keyID,
 			Fields:  keyResult,
 		},
 		{
 			Names:   []string{"value"},
-			FieldID: &mapType.ValueID,
+			FieldID: &mapType.valueID,
 			Fields:  valResult,
 		},
 	}

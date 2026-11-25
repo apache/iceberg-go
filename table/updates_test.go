@@ -668,7 +668,6 @@ func TestUnmarshalUpdates(t *testing.T) {
 						expectedAddSchema := expected.(*addSchemaUpdate)
 						actualAddSchema := actual[idx].(*addSchemaUpdate)
 						assert.True(t, expectedAddSchema.Schema.Equals(actualAddSchema.Schema))
-						assert.Equal(t, expectedAddSchema.initial, actualAddSchema.initial)
 					case UpdateAddSpec:
 						expectedAddPartitionSpec := expected.(*addPartitionSpecUpdate)
 						actualAddPartitionSpec := actual[idx].(*addPartitionSpecUpdate)
@@ -678,7 +677,6 @@ func TestUnmarshalUpdates(t *testing.T) {
 						expectedAddSortOrder := expected.(*addSortOrderUpdate)
 						actualAddSortOrder := actual[idx].(*addSortOrderUpdate)
 						assert.True(t, expectedAddSortOrder.SortOrder.Equals(actualAddSortOrder.SortOrder.SortOrder))
-						assert.Equal(t, expectedAddSortOrder.initial, actualAddSortOrder.initial)
 					default:
 						assert.Equal(t, expected, actual[idx])
 					}

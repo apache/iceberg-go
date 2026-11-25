@@ -30,9 +30,8 @@ import (
 )
 
 type mockCatalogForProperties struct {
-	tbl            *table.Table
-	nsProps        iceberg.Properties
-	propsGetCalled bool
+	tbl     *table.Table
+	nsProps iceberg.Properties
 }
 
 func (m *mockCatalogForProperties) LoadNamespaceProperties(ctx context.Context, namespace table.Identifier) (iceberg.Properties, error) {
