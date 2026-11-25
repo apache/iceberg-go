@@ -24,7 +24,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"maps"
 	"math"
 	"reflect"
 	"slices"
@@ -54,10 +53,15 @@ var ErrConflictingEqualityDeleteMetadata = errors.New("conflicting equality dele
 // produce separate sets. Key material and metadata are immutable after
 // construction; derived typed indexes are built once and shared safely.
 // Typed indexes retain additional map storage alongside keys for the lifetime
-// of the set. Merged groups can hold their own indexes on top of per-file ones.
-// Do not copy the set after the first use of an index.
+// of the set. Do not copy the set after the first use of an index.
+//
+// A set that combines several delete files holds their sets in fileSets and
+// has no keys of its own. Each data file sees a different group of delete
+// files (only deletes with a higher sequence number apply), so copying the
+// keys into each group grew with the square of the number of delete files.
 type equalityDeleteSet struct {
 	keys       set[string]
+	fileSets   []*equalityDeleteSet
 	fieldIDs   []int
 	colNames   []string
 	fieldTypes []iceberg.Type // Logical types used to encode keys across schema promotions.
@@ -1043,7 +1047,7 @@ func buildEqualityDeleteSetsForFiles(
 	}
 	if oneGroup {
 		deleteSet := combine(files)
-		if len(deleteSet.keys) == 0 {
+		if deleteSet.empty() {
 			return nil
 		}
 
@@ -1058,7 +1062,7 @@ func buildEqualityDeleteSetsForFiles(
 	sets := make([]*equalityDeleteSet, 0, len(groups))
 	for _, groupFiles := range groups {
 		deleteSet := combine(groupFiles)
-		if len(deleteSet.keys) > 0 {
+		if !deleteSet.empty() {
 			sets = append(sets, deleteSet)
 		}
 	}
@@ -1141,31 +1145,48 @@ func equalityDeleteSetCombinationKey(files []*equalityDeleteFileSet) string {
 	return string(combinationKey)
 }
 
+// mergeEqualityDeleteSets combines the files' sets without copying their keys.
+// The largest file goes first, since most deleted rows are found there.
 func mergeEqualityDeleteSets(files []*equalityDeleteFileSet) *equalityDeleteSet {
-	largest := 0
-	for i := 1; i < len(files); i++ {
-		if len(files[i].keys) > len(files[largest].keys) {
-			largest = i
-		}
-	}
-
 	deleteSet := &equalityDeleteSet{
-		keys:       maps.Clone(files[largest].keys),
 		fieldIDs:   files[0].fieldIDs,
 		colNames:   files[0].colNames,
 		fieldTypes: slices.Clone(files[0].fieldTypes),
 	}
-	for i, file := range files {
-		if i == largest {
-			continue
+	for _, file := range files {
+		if len(file.keys) > 0 {
+			deleteSet.fileSets = append(deleteSet.fileSets, file.equalityDeleteSet)
 		}
+	}
+	slices.SortStableFunc(deleteSet.fileSets, func(a, b *equalityDeleteSet) int {
+		return cmp.Compare(len(b.keys), len(a.keys))
+	})
 
-		for key := range file.keys {
-			deleteSet.keys[key] = struct{}{}
+	return deleteSet
+}
+
+// empty reports whether no delete file in the set has a key.
+func (e *equalityDeleteSet) empty() bool {
+	return len(e.keys) == 0 && len(e.fileSets) == 0
+}
+
+// expandEqualityDeleteSets replaces each combined set with the sets of its
+// delete files, so every file's keys and typed indexes are used in place.
+func expandEqualityDeleteSets(sets []*equalityDeleteSet) []*equalityDeleteSet {
+	if !slices.ContainsFunc(sets, func(s *equalityDeleteSet) bool { return s.fileSets != nil }) {
+		return sets
+	}
+
+	expanded := make([]*equalityDeleteSet, 0, len(sets))
+	for _, s := range sets {
+		if s.fileSets == nil {
+			expanded = append(expanded, s)
+		} else {
+			expanded = append(expanded, s.fileSets...)
 		}
 	}
 
-	return deleteSet
+	return expanded
 }
 
 // readEqualityDeleteFile reads a single equality delete file and returns
@@ -2095,6 +2116,7 @@ func (m *equalityDeleteMask) applySingleInt32(
 // switches. Each delete set is applied independently because sets may have
 // different field IDs.
 func processEqualityDeletesColumnarForFile(ctx context.Context, eqDeleteSets []*equalityDeleteSet, fileSchema *iceberg.Schema, dataFilePath string) (recProcessFn, error) {
+	eqDeleteSets = expandEqualityDeleteSets(eqDeleteSets)
 	requestedFieldIDs := make([]int, 0)
 	requestedFieldIDSet := make(map[int]struct{})
 	sourceFieldTypes := make([][]iceberg.Type, len(eqDeleteSets))

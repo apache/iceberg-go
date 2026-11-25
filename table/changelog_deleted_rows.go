@@ -286,6 +286,7 @@ func keepAddedDeleteRows(
 // equalityRowsMatched reports rows that match an added equality delete. Keys use
 // the same encoding as the scan filter that drops equality-deleted rows.
 func equalityRowsMatched(ctx context.Context, r arrow.RecordBatch, eqDeleteSets []*equalityDeleteSet, fileSchema *iceberg.Schema, dataFilePath string) ([]bool, error) {
+	eqDeleteSets = expandEqualityDeleteSets(eqDeleteSets)
 	requestedFieldIDs := make([]int, 0)
 	requestedFieldIDSet := make(map[int]struct{})
 	for _, eqDel := range eqDeleteSets {

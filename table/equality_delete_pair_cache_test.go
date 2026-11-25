@@ -49,8 +49,8 @@ func TestEqualityDeletePairCombinationCache(t *testing.T) {
 		if get(second, first) != ab || get(first, second, first) != ab {
 			t.Fatal("equivalent pairs must share their merged delete set")
 		}
-		if len(ab.keys) != 2 {
-			t.Fatalf("pair contains %d keys, want 2", len(ab.keys))
+		if len(ab.fileSets) != 2 {
+			t.Fatalf("pair contains %d files, want 2", len(ab.fileSets))
 		}
 		if get(first, third) == ab || get(first, second, third) == ab {
 			t.Fatal("different combinations must not share delete sets")
