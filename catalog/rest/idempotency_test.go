@@ -498,6 +498,7 @@ func TestKeyedNoResendWithoutUsableLifetime(t *testing.T) {
 		{"zero", lifetimeConfig("PT0S"), true},
 		{"negative", lifetimeConfig("-PT1S"), true},
 		{"malformed", lifetimeConfig("soon"), true},
+		{"out of range", lifetimeConfig("PT9223372036854775808S"), true},
 		{"empty", lifetimeConfig(""), true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -704,19 +705,129 @@ func TestKeyedDeleteTransportReplayIsNotBounded(t *testing.T) {
 func TestParseKeyLifetime(t *testing.T) {
 	t.Parallel()
 	for in, want := range map[string]time.Duration{
-		"PT30M":                 30 * time.Minute,
-		"PT1H30M":               90 * time.Minute,
-		"P1DT2H3M4.5S":          26*time.Hour + 3*time.Minute + 4500*time.Millisecond,
-		"P2D":                   48 * time.Hour,
-		"PT0.25S":               250 * time.Millisecond,
-		"PT999999999999999999H": math.MaxInt64,
+		"PT30M":                            30 * time.Minute,
+		"pt30m":                            30 * time.Minute,
+		"+PT1,5S":                          1500 * time.Millisecond,
+		"PT2M-30S":                         90 * time.Second,
+		"-PT-1S":                           time.Second,
+		"PT0.000000001S":                   time.Nanosecond,
+		"PT1H30M":                          90 * time.Minute,
+		"P1DT2H3M4.5S":                     26*time.Hour + 3*time.Minute + 4500*time.Millisecond,
+		"P2D":                              48 * time.Hour,
+		"PT0.25S":                          250 * time.Millisecond,
+		"PT9223372036854775807.999999999S": math.MaxInt64,
 	} {
 		got, ok := parseKeyLifetime(in)
 		require.True(t, ok, in)
 		require.Equal(t, want, got, in)
 	}
-	for _, in := range []string{"", "P", "PT", "P1DT", "PT0S", "P0D", "-PT1S", "PT-1S", "30m", "PT1.5H", "pt30m", "PT30", "soon"} {
+	for _, in := range []string{"", "P", "PT", "P1DT", "PT0S", "P0D", "-PT1S", "PT-1S", "30m", "PT1.5H", "PT0.1234567890S", "PT9223372036854775808S", "-PT-9223372036854775808S", "-PT-9223372036854775808.000000001S", "PT153722867280912930M8S", "PT999999999999999999H", "PT2562047788015216H-1S", "PT30", "PT1ſ", "soon"} {
 		_, ok := parseKeyLifetime(in)
 		require.False(t, ok, in)
 	}
+}
+
+func TestKeyedSignerReadsBodyBeforeFirstSend(t *testing.T) {
+	for _, lifetime := range []string{"PT0S", "-PT1S", "invalid"} {
+		t.Run(lifetime, func(t *testing.T) {
+			c, attempts := newKeyedTestCatalog(t, lifetimeConfig(lifetime), func(_ int, w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusBadRequest) })
+			c.cl.Transport.(*sessionTransport).signer = signerFunc(func(r *http.Request) error {
+				if r.GetBody != nil {
+					body, err := r.GetBody()
+					if err != nil {
+						return err
+					}
+					defer body.Close()
+					_, err = io.Copy(io.Discard, body)
+
+					return err
+				}
+
+				return nil
+			})
+			require.Error(t, c.CreateNamespace(t.Context(), table.Identifier{"ns"}, nil))
+			_, _, err := c.CommitTable(t.Context(), table.Identifier{"ns", "name"}, nil, nil)
+			require.Error(t, err)
+			require.NotErrorIs(t, err, ErrCommitStateUnknown)
+			require.Len(t, attempts(), 2)
+		})
+	}
+}
+
+func TestCommitCancellationDuringFirstBackoff(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	c, attempts := newKeyedTestCatalog(t, lifetimeConfig("PT2H"), func(_ int, w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		time.AfterFunc(20*time.Millisecond, cancel)
+	})
+	_, _, err := c.CommitTable(ctx, table.Identifier{"ns", "name"}, nil, nil)
+	require.ErrorIs(t, err, context.Canceled)
+	require.ErrorIs(t, err, ErrCommitStateUnknown)
+	require.Len(t, attempts(), 1)
+}
+
+func TestKeyedCancellationDuringFirstSend(t *testing.T) {
+	for _, commit := range []bool{false, true} {
+		for _, beforeSend := range []bool{false, true} {
+			ctx, cancel := context.WithCancel(t.Context())
+			called := false
+			cl := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				called = true
+				cancel()
+
+				return nil, context.Canceled
+			})}
+			if beforeSend {
+				cancel()
+			}
+			kc := &keyedCall{policy: &idempotencyPolicy{}, commit: commit, key: "key", start: time.Now(), lifetime: time.Hour, now: time.Now}
+			_, err := send(ctx, cl, kc, &reqConfig{}, nil, func() (*http.Request, error) {
+				return http.NewRequestWithContext(ctx, http.MethodPost, "http://catalog.test", strings.NewReader("{}"))
+			})
+			require.ErrorIs(t, err, context.Canceled)
+			require.Equal(t, !beforeSend, called)
+			if commit && !beforeSend {
+				require.ErrorIs(t, err, ErrCommitStateUnknown)
+			} else {
+				require.NotErrorIs(t, err, ErrCommitStateUnknown)
+			}
+			cancel()
+		}
+	}
+}
+
+func TestCommitCancellationAfterBackoff(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	calls := 0
+	cl := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		calls++
+
+		return nil, io.EOF
+	})}
+	kc := &keyedCall{policy: &idempotencyPolicy{onRetry: cancel}, commit: true, key: "key", start: time.Now(), lifetime: time.Hour, now: time.Now}
+	_, err := send(ctx, cl, kc, &reqConfig{}, nil, func() (*http.Request, error) {
+		return http.NewRequestWithContext(ctx, http.MethodPost, "http://catalog.test", strings.NewReader("{}"))
+	})
+	require.ErrorIs(t, err, context.Canceled)
+	require.ErrorIs(t, err, ErrCommitStateUnknown)
+	require.Equal(t, 1, calls)
+}
+
+func TestCommitCancellationPreservesTransportError(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	cl := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		cancel()
+
+		return nil, io.ErrUnexpectedEOF
+	})}
+	kc := &keyedCall{policy: &idempotencyPolicy{}, commit: true, key: "key", start: time.Now(), lifetime: time.Hour, now: time.Now}
+	_, err := send(ctx, cl, kc, &reqConfig{}, nil, func() (*http.Request, error) {
+		return http.NewRequestWithContext(ctx, http.MethodPost, "http://catalog.test", strings.NewReader("{}"))
+	})
+	require.ErrorIs(t, err, ErrCommitStateUnknown)
+	require.ErrorIs(t, err, context.Canceled)
+	require.ErrorIs(t, err, io.ErrUnexpectedEOF)
 }

@@ -23,11 +23,13 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"math/big"
 	"net"
 	"net/http"
 	"net/url"
 	"regexp"
-	"strconv"
+	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/apache/iceberg-go/table"
@@ -111,15 +113,33 @@ func newKeyedCall(cfg *reqConfig) (*keyedCall, error) {
 
 func (kc *keyedCall) open() bool { return kc.now().Sub(kc.start) < kc.lifetime }
 
-// prepare adds the key and stops net/http replaying the request on its own
-// (reused-connection failures, 307/308 redirects) once the window is closed.
-// Bodyless requests (keyed DELETE) never call GetBody, so their transport
-// replay cannot be bounded here.
+// observedBody distinguishes a signer's body read from a transport replay.
+type observedBody struct {
+	io.ReadCloser
+	sent *atomic.Bool
+}
+
+func (b observedBody) Read(p []byte) (int, error) {
+	b.sent.Store(true)
+
+	return b.ReadCloser.Read(p)
+}
+
+func (b observedBody) Close() error {
+	b.sent.Store(true)
+
+	return b.ReadCloser.Close()
+}
+
+// prepare adds the key and bounds transport replays and redirects with bodies.
+// Bodyless requests (keyed DELETE) never call GetBody and cannot be bounded here.
 func (kc *keyedCall) prepare(req *http.Request) {
 	req.Header.Set(headerIdempotencyKey, kc.key)
 	if body := req.GetBody; body != nil {
+		sent := &atomic.Bool{}
+		req.Body = observedBody{ReadCloser: req.Body, sent: sent}
 		req.GetBody = func() (io.ReadCloser, error) {
-			if !kc.open() {
+			if sent.Load() && !kc.open() {
 				return nil, errReplayWindowClosed
 			}
 
@@ -155,8 +175,8 @@ func keyedRetryError(ctx context.Context, err error) bool {
 	return ok
 }
 
-// send performs one HTTP call; kc is nil for an unkeyed call. An unkeyed call is a single cl.Do. A keyed call
-// resends the same request and key after a retryable 5xx, timeout or connection
+// send performs one HTTP call. An unkeyed call (kc == nil) is a single cl.Do.
+// A keyed call resends the same request and key after a retryable 5xx, timeout or connection
 // error while the key lifetime allows it, and returns every other response as
 // is. It returns either a response to handle or the final error; a retryable
 // status that was not resent is returned as the error handleNon200 maps it to.
@@ -186,6 +206,13 @@ func send(ctx context.Context, cl *http.Client, kc *keyedCall, cfg *reqConfig, o
 			return cl.Do(req)
 		}
 		kc.prepare(req)
+		if err := ctx.Err(); err != nil {
+			if attempt > 0 && kc.commit {
+				return nil, fmt.Errorf("%w: cancelled after an ambiguous attempt: %w", ErrCommitStateUnknown, err)
+			}
+
+			return nil, err
+		}
 		resent = attempt > 0
 		rsp, err := cl.Do(req)
 		var retryAfter time.Duration
@@ -204,6 +231,10 @@ func send(ctx context.Context, cl *http.Client, kc *keyedCall, cfg *reqConfig, o
 			_, _ = io.Copy(io.Discard, rsp.Body)
 			_ = rsp.Body.Close()
 		case !keyedRetryError(ctx, err):
+			if kc.commit && ctx.Err() != nil {
+				return nil, fmt.Errorf("%w: cancelled after an ambiguous attempt: %w: %w", ErrCommitStateUnknown, err, ctx.Err())
+			}
+
 			return nil, err
 		}
 
@@ -220,6 +251,9 @@ func send(ctx context.Context, cl *http.Client, kc *keyedCall, cfg *reqConfig, o
 		select {
 		case <-ctx.Done():
 			timer.Stop()
+			if kc.commit {
+				return nil, fmt.Errorf("%w: cancelled after an ambiguous attempt: %w", ErrCommitStateUnknown, ctx.Err())
+			}
 
 			return nil, ctx.Err()
 		case <-timer.C:
@@ -237,35 +271,73 @@ func send(ctx context.Context, cl *http.Client, kc *keyedCall, cfg *reqConfig, o
 	}
 }
 
-// keyLifetimeRE matches the ISO-8601 duration form Java's Duration.parse
-// accepts for a non-negative duration: PnDTnHnMn.nS.
-var keyLifetimeRE = regexp.MustCompile(`^P(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+(?:\.\d+)?)S)?)?$`)
+// keyLifetimeRE matches Java Duration.parse's day/time syntax.
+var keyLifetimeRE = regexp.MustCompile(`(?i)^([+-]?)P(?:([+-]?\d+)D)?(?:T(?:([+-]?\d+)H)?(?:([+-]?\d+)M)?(?:([+-]?\d+(?:[.,]\d{0,9})?)S)?)?$`)
 
-// parseKeyLifetime returns the advertised lifetime and whether it is usable:
-// it must parse and be positive. Unlike Java, which stops bounding resends on a
-// malformed value, Go does not resend keyed requests then.
+// parseKeyLifetime accepts positive durations; zero, negative and malformed
+// values disable resends. Java allows unbounded resends for malformed values.
 func parseKeyLifetime(s string) (time.Duration, bool) {
-	m := keyLifetimeRE.FindStringSubmatch(s)
-	if m == nil || s[len(s)-1] == 'T' {
-		return 0, false
-	}
-	var secs float64
-	for i, unit := range []float64{86400, 3600, 60, 1} {
-		if m[i+1] == "" {
-			continue
-		}
-		v, err := strconv.ParseFloat(m[i+1], 64)
-		if err != nil {
+	for i := range len(s) {
+		if s[i] >= 0x80 {
 			return 0, false
 		}
-		secs += v * unit
 	}
-	if secs <= 0 {
+	m := keyLifetimeRE.FindStringSubmatch(s)
+	if m == nil || strings.EqualFold(s[len(s)-1:], "T") {
 		return 0, false
 	}
-	if secs >= math.MaxInt64/1e9 {
+	total := new(big.Rat)
+	var wholeSeconds [4]*big.Int
+	for i, unit := range []int64{86400, 3600, 60, 1} {
+		if m[i+2] == "" {
+			continue
+		}
+		component := m[i+2]
+		integer := component
+		if dot := strings.IndexAny(integer, ".,"); dot >= 0 {
+			integer = integer[:dot]
+		}
+		whole, ok := new(big.Int).SetString(integer, 10)
+		if !ok || !whole.IsInt64() {
+			return 0, false
+		}
+		whole.Mul(whole, big.NewInt(unit))
+		if !whole.IsInt64() {
+			return 0, false
+		}
+		wholeSeconds[i] = whole
+		value, ok := new(big.Rat).SetString(strings.ReplaceAll(component, ",", "."))
+		if !ok {
+			return 0, false
+		}
+		total.Add(total, value.Mul(value, big.NewRat(unit, 1)))
+	}
+	// Duration.parse adds seconds from smallest unit to largest with overflow checks.
+	sum := new(big.Int)
+	for i := len(wholeSeconds) - 1; i >= 0; i-- {
+		if wholeSeconds[i] != nil {
+			sum.Add(sum, wholeSeconds[i])
+			if !sum.IsInt64() {
+				return 0, false
+			}
+		}
+	}
+	minSeconds := new(big.Rat).SetInt64(math.MinInt64)
+	maxSeconds := new(big.Rat).Neg(minSeconds) // exclusive upper bound
+	if total.Cmp(minSeconds) < 0 || total.Cmp(maxSeconds) >= 0 {
+		return 0, false
+	}
+	if m[1] == "-" {
+		total.Neg(total)
+	}
+	if total.Sign() <= 0 || total.Cmp(maxSeconds) >= 0 {
+		return 0, false
+	}
+	total.Mul(total, big.NewRat(1e9, 1))
+	nanos := new(big.Int).Quo(total.Num(), total.Denom())
+	if !nanos.IsInt64() {
 		return math.MaxInt64, true
 	}
 
-	return time.Duration(secs * 1e9), true
+	return time.Duration(nanos.Int64()), true
 }

@@ -1054,7 +1054,7 @@ func (r *Catalog) scanKey(ctx context.Context, operation string, key *string) re
 
 func idempotencyHeaderValue(idempotencyKey *string) (string, error) {
 	if idempotencyKey == nil {
-		// Plan and task POSTs always send an idempotency key. The spec pins it
+		// Generated idempotency keys follow the spec, which pins them
 		// to a UUIDv7 string (RFC 9562) so a server can key its dedup window off
 		// the embedded timestamp, matching Java's UUIDUtil.generateUuidV7(). A
 		// v4 key would be treated as undefined by such servers. All automatic
