@@ -306,6 +306,10 @@ configuration is required.</p>
 <p>Filter on a field inside a variant with <code>iceberg.Extract</code>, which plugs into the
 usual predicate builders. See <a href="./row-filter-syntax.html#variant-extraction">Row Filter Syntax</a>
 for usage, supported target types, and caveats.</p>
+<h2 id="casting-a-primitive-variant-literal"><a class="header" href="#casting-a-primitive-variant-literal">Casting a primitive variant literal</a></h2>
+<p><code>VariantLiteral.To(typ)</code> converts primitive variant values using the cast
+rules for the underlying literal. Null, object, array, and zero-value variants
+return <code>ErrBadCast</code> when cast to a non-variant type.</p>
 <h2 id="constraints"><a class="header" href="#constraints">Constraints</a></h2>
 <ul>
 <li>A variant column cannot be a partition source or an identity-transform source.</li>

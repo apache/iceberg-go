@@ -240,6 +240,9 @@
 <p>You must be an Apache Iceberg committer or PMC member.</p>
 </li>
 <li>
+<p>Install GitHub CLI, Subversion, and <code>sha512sum</code> for candidate preparation. Publishing also uses <code>sort --version-sort</code>.</p>
+</li>
+<li>
 <p>You must prepare a PGP key for signing. See <a href="https://infra.apache.org/release-signing.html#generate">https://infra.apache.org/release-signing.html#generate</a>.</p>
 </li>
 <li>
@@ -288,6 +291,7 @@ GH_TOKEN=${YOUR_GITHUB_TOKEN} dev/release/release_rc.sh ${VERSION} ${RC}
 <ol>
 <li>Add the release to ASF's report database at the <a href="https://reporter.apache.org/addrelease.html?iceberg">Apache Committee Report Helper</a>.</li>
 <li>Verify the GitHub Release at <code>https://github.com/apache/iceberg-go/releases</code> is correctly tagged, has generated release notes against the prior tag, and is marked as latest. <code>release.sh</code> runs <code>gh release create ... --generate-notes --verify-tag</code> so the release should already exist; double-check the notes and the &quot;Latest&quot; badge.</li>
+<li>Update <a href="./getting-started.html#install">Getting Started</a> to pin the new release. Check the Go minimum and dependency versions against the tag's <code>go.mod</code>, then run the walkthrough in a fresh module. Update the release-tag link and version-specific flag notes in the <a href="./cli.html">CLI guide</a>.</li>
 <li>Send the <code>[ANNOUNCE]</code> email to <code>dev@iceberg.apache.org</code> and <code>announce@apache.org</code>.</li>
 <li>File a release blog post in <a href="https://github.com/apache/iceberg"><code>apache/iceberg</code></a> under <code>site/docs/blog/posts/</code>. See the prior 0.5.0 post (<code>2026-03-05-iceberg-go-0.5.0-release.md</code>) for the frontmatter and structure.</li>
 </ol>

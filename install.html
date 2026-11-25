@@ -233,24 +233,18 @@
   ~ under the License.
 -->
 <h1 id="install"><a class="header" href="#install">Install</a></h1>
-<p>In this quickstart, we’ll glean insights from code segments and learn how to:</p>
-<h2 id="requirements"><a class="header" href="#requirements">Requirements</a></h2>
-<div class="warning">
-Go 1.26 or later is required to build.
-</div>
-<h2 id="installation"><a class="header" href="#installation">Installation</a></h2>
-<p>To install <code>iceberg-go</code> package, you need to install Go and set your Go workspace first.
-If you don't have a go.mod file, create it with <code>go mod init gin</code>.</p>
-<ol>
-<li>Download and install it:</li>
-</ol>
-<pre><code class="language-sh">go get -u github.com/apache/iceberg-go
+<h2 id="go-library"><a class="header" href="#go-library">Go library</a></h2>
+<p>Use Go 1.26.3 or later to build from <code>main</code>. For a tagged release, see the
+Go requirement in that tag's <code>go.mod</code>.</p>
+<p>From your Go module, install the latest release:</p>
+<pre><code class="language-sh">go get github.com/apache/iceberg-go@latest
 </code></pre>
-<ol start="2">
-<li>Import it in your code:</li>
-</ol>
-<pre><code class="language-go">import &quot;github.com/apache/iceberg-go&quot;
+<p>Start with the <a href="./getting-started.html">Getting Started</a> walkthrough or see
+<a href="./releases.html#using-a-release">Releases</a> for version selection.</p>
+<h2 id="cli"><a class="header" href="#cli">CLI</a></h2>
+<pre><code class="language-sh">go install github.com/apache/iceberg-go/cmd/iceberg@latest
 </code></pre>
+<p>See the <a href="./cli.html">CLI guide</a> for command examples and source builds.</p>
 
                     </main>
 

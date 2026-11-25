@@ -233,7 +233,7 @@
   ~ under the License.
 -->
 <h1 id="api"><a class="header" href="#api">API</a></h1>
-<p>The Go API surface for Apache Iceberg Go. New to the project? Walk through the <a href="./getting-started.html">Getting Started</a> tutorial first - the recipes here assume you already have a catalog and a table.</p>
+<p>This reference follows the development branch of Apache Iceberg Go. New to the project? Walk through the <a href="./getting-started.html">Getting Started</a> tutorial first - the recipes here assume you already have a catalog and a table.</p>
 <p>For configuration knobs (catalog options, FileIO credentials, table properties), see <a href="./configuration.html">Configuration</a>. For predicate construction details, see <a href="./row-filter-syntax.html">Row Filter Syntax</a> and <a href="./expression-dsl.html">Expression DSL</a>.</p>
 <h2 id="catalog"><a class="header" href="#catalog">Catalog</a></h2>
 <p><code>catalog.Catalog</code> is the entry point for everything: namespaces, tables, views.</p>
@@ -247,9 +247,12 @@
 
 cat, err := rest.NewCatalog(context.Background(), &quot;rest&quot;, &quot;http://localhost:8181&quot;,
     rest.WithOAuthToken(&quot;your-token&quot;))
+if err != nil { panic(err) }
+defer cat.Close()
 </code></pre>
 <h4 id="sql-sqlite-postgres-mysql-oracle-mssql"><a class="header" href="#sql-sqlite-postgres-mysql-oracle-mssql">SQL (SQLite, Postgres, MySQL, Oracle, MSSQL)</a></h4>
 <pre><code class="language-go">import (
+    &quot;context&quot;
     &quot;database/sql&quot;
 
     &quot;github.com/apache/iceberg-go&quot;
@@ -258,23 +261,32 @@ cat, err := rest.NewCatalog(context.Background(), &quot;rest&quot;, &quot;http:/
 )
 
 db, err := sql.Open(sqliteshim.ShimName, &quot;file:catalog.db&quot;)
-// handle err
+if err != nil { panic(err) }
+defer db.Close()
 cat, err := sqlcat.NewCatalog(context.Background(), &quot;default&quot;, db, sqlcat.SQLite, iceberg.Properties{
     &quot;warehouse&quot;: &quot;file:///tmp/warehouse&quot;,
 })
+if err != nil { panic(err) }
+defer cat.Close()
 </code></pre>
 <h4 id="glue"><a class="header" href="#glue">Glue</a></h4>
 <pre><code class="language-go">import (
+    &quot;context&quot;
+
     &quot;github.com/apache/iceberg-go/catalog/glue&quot;
     &quot;github.com/aws/aws-sdk-go-v2/config&quot;
 )
 
 awsCfg, err := config.LoadDefaultConfig(context.TODO())
-// handle err
-cat := glue.NewCatalog(glue.WithAWSConfig(awsCfg))
+if err != nil { panic(err) }
+cat, err := glue.NewCatalog(glue.WithAWSConfig(awsCfg))
+if err != nil { panic(err) }
+defer cat.Close()
 </code></pre>
 <h4 id="hive"><a class="header" href="#hive">Hive</a></h4>
 <pre><code class="language-go">import (
+    &quot;context&quot;
+
     &quot;github.com/apache/iceberg-go&quot;
     &quot;github.com/apache/iceberg-go/catalog/hive&quot;
 )
@@ -282,21 +294,27 @@ cat := glue.NewCatalog(glue.WithAWSConfig(awsCfg))
 cat, err := hive.NewCatalog(context.Background(), iceberg.Properties{},
     hive.WithURI(&quot;thrift://localhost:9083&quot;),
     hive.WithWarehouse(&quot;s3://my-bucket/warehouse&quot;))
+if err != nil { panic(err) }
+defer cat.Close()
 </code></pre>
 <h4 id="hadoop"><a class="header" href="#hadoop">Hadoop</a></h4>
 <pre><code class="language-go">import (
+    &quot;context&quot;
+
     &quot;github.com/apache/iceberg-go&quot;
     &quot;github.com/apache/iceberg-go/catalog/hadoop&quot;
-    &quot;context&quot;
 )
 
 cat, err := hadoop.NewCatalog(context.Background(), &quot;default&quot;, &quot;file:///tmp/warehouse&quot;, iceberg.Properties{})
+if err != nil { panic(err) }
+defer cat.Close()
 </code></pre>
 <h4 id="via-the-registry"><a class="header" href="#via-the-registry">Via the registry</a></h4>
 <p><code>catalog.Load</code> looks up the right backend via the <code>type</code> property (or <code>uri</code> scheme as a fallback) plus your <code>~/.iceberg-go.yaml</code>. Useful when you want runtime selection:</p>
 <pre><code class="language-go">import (
     &quot;github.com/apache/iceberg-go&quot;
     &quot;github.com/apache/iceberg-go/catalog&quot;
+    _ &quot;github.com/apache/iceberg-go/catalog/rest&quot;
 )
 
 cat, err := catalog.Load(ctx, &quot;default&quot;, iceberg.Properties{
@@ -324,6 +342,8 @@ summary, err := cat.UpdateNamespaceProperties(ctx, ns,
 err = cat.DropNamespace(ctx, ns)
 </code></pre>
 <p><code>table.Identifier</code> is <code>[]string</code>; use <code>catalog.ToIdentifier(&quot;sales&quot;, &quot;orders&quot;)</code> (or <code>catalog.ToIdentifier(&quot;sales.orders&quot;)</code>) to build one from string parts.</p>
+<p>Use <code>errors.Is(err, catalog.ErrNamespaceAlreadyExists)</code> to recognize an
+existing namespace when retrying creation.</p>
 <h3 id="tables"><a class="header" href="#tables">Tables</a></h3>
 <h4 id="defining-a-schema"><a class="header" href="#defining-a-schema">Defining a schema</a></h4>
 <pre><code class="language-go">import &quot;github.com/apache/iceberg-go&quot;
@@ -334,7 +354,7 @@ schema := iceberg.NewSchema(1,
     iceberg.NestedField{ID: 3, Name: &quot;active&quot;, Type: iceberg.PrimitiveTypes.Bool, Required: false},
 )
 </code></pre>
-<p>For nested types use <code>&amp;iceberg.StructType{...}</code>, <code>&amp;iceberg.ListType{...}</code>, or <code>&amp;iceberg.MapType{...}</code>. Use <code>NewSchemaWithIdentifiers(id, identifierIDs, fields...)</code> to mark identifier columns.</p>
+<p>For nested types use <code>iceberg.NewStructType(fields...)</code>, <code>iceberg.NewListType(elementID, element, required)</code>, or <code>iceberg.NewMapType(keyID, key, valueID, value, valueRequired)</code>. Their fields can't be assigned directly: read them through accessors, and to change one, build a new value. Use <code>NewSchemaWithIdentifiers(id, identifierIDs, fields...)</code> to mark identifier columns.</p>
 <h4 id="create"><a class="header" href="#create">Create</a></h4>
 <pre><code class="language-go">import &quot;github.com/apache/iceberg-go/catalog&quot;
 
@@ -363,6 +383,16 @@ renamed, err := cat.RenameTable(ctx,
     catalog.ToIdentifier(&quot;sales&quot;, &quot;orders_v2&quot;))
 </code></pre>
 <p><code>ListTables</code> returns an <code>iter.Seq2[table.Identifier, error]</code> that streams results.</p>
+<p>Use <code>catalog.As[catalog.RegisterableCatalog](cat)</code> to discover table
+registration support. <code>RegisterTable(ctx, ident, metadataLocation)</code>
+registers a table from an existing metadata file and returns the table.</p>
+<p>For a REST table with catalog-vended storage credentials, discover
+<code>catalog.RefreshableCredentialCatalog</code> with <code>catalog.As</code>. If the server
+supports the credentials endpoint, <code>RefreshTableCredentials(ctx, tbl)</code>
+returns the table to use for subsequent operations. When building a table
+yourself with <code>table.New</code>, pass <code>table.WithSavedConfig</code> so its file I/O
+properties are available to the refresh. REST-loaded tables and views also
+expose catalog-provided labels through <code>Labels()</code>.</p>
 <h4 id="inspecting-metadata"><a class="header" href="#inspecting-metadata">Inspecting metadata</a></h4>
 <pre><code class="language-go">tbl.Identifier()         // table.Identifier
 tbl.Location()           // string
@@ -391,6 +421,9 @@ for mf, err := range tbl.AllManifests(ctx) {
 </code></pre>
 <h2 id="reading-data"><a class="header" href="#reading-data">Reading data</a></h2>
 <p><code>(t Table) Scan(opts ...ScanOption) *Scan</code> returns a scan that you can resolve into Arrow data.</p>
+<p>Parquet and Avro data files are readable. Avro scan tasks must cover the
+whole file. The reader decodes the file before projecting columns, and
+supports nullable unions with <code>null</code> and one value type.</p>
 <h3 id="streaming-record-batches"><a class="header" href="#streaming-record-batches">Streaming record batches</a></h3>
 <pre><code class="language-go">import &quot;github.com/apache/iceberg-go/table&quot;
 
@@ -552,6 +585,10 @@ if err != nil { /* ... */ }
 
 newTbl, err := txn.Commit(ctx)
 </code></pre>
+<p>For bucket-partitioned Parquet files, provide each file's partition tuple
+with <code>WithAddDataFilesByPathPartitionValues</code>. Key the values by file path
+and partition field ID. Supply every non-void partition field, and make
+sure the values describe every row in the file.</p>
 <p><code>ReplaceDataFilesByPath(ctx, filesToDelete, filesToAdd, snapshotProps)</code> performs an
 <strong>overwrite</strong> of existing files. It is suitable when the logical table data
 changes. <code>ReplaceDataFiles(ctx, filesToDelete, dataFilesToAdd, snapshotProps, opts...)</code>
@@ -614,6 +651,11 @@ pin the refs they rely on. Divergent replays onto new branches also pin main;
 fast-forwards onto new branches do not. A moved pinned ref fails the commit;
 other conflicts can be retried under the normal commit retry policy.</p>
 <p><code>Commit</code> retries a conflict (<code>ErrCommitFailed</code>) up to <code>commit.retry.num-retries</code> times, 4 by default. See <a href="./concurrent-writes.html#automatic-retry">Automatic retry</a> for the <code>commit.retry.*</code> table properties.</p>
+<p><code>txn.SetLocation(location)</code> stages a new table base location in the same
+storage scheme and authority, including the bucket or container where
+applicable. Existing files keep their paths. New writes use the staged base
+and honor explicit write-path properties. Commit the transaction to publish
+the change.</p>
 <h2 id="schema-and-partition-evolution"><a class="header" href="#schema-and-partition-evolution">Schema and partition evolution</a></h2>
 <h3 id="schema-evolution"><a class="header" href="#schema-evolution">Schema evolution</a></h3>
 <pre><code class="language-go">import &quot;github.com/apache/iceberg-go/table&quot;
@@ -658,6 +700,8 @@ if err := txn.ReplaceSortOrder(order); err != nil { /* ... */ }
 </code></pre>
 <p>Replacing the default sort order affects future writes; it does not rewrite existing data files. To physically reorder existing data, run a separate sort compaction.</p>
 <p>The Go writers currently support only top-level sort columns. A nested-field order can be registered, as in Java, but a later append fails until the default order is replaced.</p>
+<p>Use <code>SortOrder.Satisfies(required)</code> to compare sort metadata using Iceberg's
+transform ordering rules.</p>
 <h2 id="snapshots-and-refs"><a class="header" href="#snapshots-and-refs">Snapshots and refs</a></h2>
 <h3 id="inspecting"><a class="header" href="#inspecting">Inspecting</a></h3>
 <pre><code class="language-go">if snap := tbl.CurrentSnapshot(); snap != nil {
@@ -690,7 +734,10 @@ not logical row changes.</p>
 <p>See the <a href="https://iceberg.apache.org/spec/#snapshots">Iceberg snapshot specification</a>
 and <a href="https://iceberg.apache.org/spec/#manifests">manifest specification</a>.</p>
 <h3 id="branches-and-tags"><a class="header" href="#branches-and-tags">Branches and tags</a></h3>
-<p>The CLI's <code>branch create</code> and <code>tag create</code> commands (<a href="./cli.html">CLI</a>) are the most ergonomic surface today. Programmatically, ref creation goes through <code>Catalog.CommitTable</code> with a <code>SetSnapshotRef</code> update:</p>
+<p>To create a branch or tag at an existing snapshot, use <code>branch create</code> or
+<code>tag create</code> in the <a href="./cli.html">CLI</a>. In Go, call <code>Catalog.CommitTable</code> with
+<code>table.NewSetSnapshotRefUpdate</code> to choose the starting snapshot and any retention
+settings. This example uses the table's current snapshot:</p>
 <pre><code class="language-go">import &quot;github.com/apache/iceberg-go/table&quot;
 
 snap := tbl.CurrentSnapshot()
@@ -709,7 +756,17 @@ reqs := []table.Requirement{
 
 _, _, err := cat.CommitTable(ctx, tbl.Identifier(), reqs, []table.Update{update})
 </code></pre>
-<p>Constants <code>table.MainBranch</code>, <code>table.BranchRef</code>, <code>table.TagRef</code> live in <a href="https://github.com/apache/iceberg-go/blob/main/table/refs.go"><code>table/refs.go</code></a>. A higher-level builder is on the roadmap.</p>
+<p>To create a branch with its first append, target it with
+<code>tbl.NewTransactionOnBranch</code>. The append starts from <code>main</code> if the branch is
+missing and creates the branch on commit. An append to an existing branch
+builds on that branch's head:</p>
+<pre><code class="language-go">txn, err := tbl.NewTransactionOnBranch(&quot;audit&quot;)
+if err != nil { /* ... */ }
+if err := txn.AppendTable(ctx, arrowTbl, 1024, nil); err != nil { /* ... */ }
+updated, err := txn.Commit(ctx)
+</code></pre>
+<p>See <a href="#reading-from-a-branch-or-tag">reading from a branch or tag</a> to scan
+the updated ref.</p>
 <h3 id="branch-promotion-and-replacement"><a class="header" href="#branch-promotion-and-replacement">Branch promotion and replacement</a></h3>
 <p>Use a transaction to advance a branch to another branch or tag, or to move it
 to an existing snapshot. Fast-forward checks that the target's current snapshot
@@ -741,6 +798,9 @@ cannot detect ref type changes with the same ID.</p>
 fast-forwards to fail. Load with <code>snapshot-loading-mode=all</code> instead.
 Replacing by snapshot ID can also fail if the requested historical snapshot
 was omitted. See <a href="./concurrent-writes.html">Concurrent Writes</a>.</p>
+<p><code>tbl.RenameBranch(ctx, from, to)</code> renames a non-main branch to an unused
+name and preserves its snapshot and retention settings. Use
+<code>txn.RenameBranch(from, to)</code> to stage the rename alongside other updates.</p>
 <h3 id="expiration-and-rollback"><a class="header" href="#expiration-and-rollback">Expiration and rollback</a></h3>
 <pre><code class="language-go">// Expire snapshots older than the table's retention properties
 err := txn.ExpireSnapshots(/* options */)
@@ -748,6 +808,8 @@ err := txn.ExpireSnapshots(/* options */)
 // Roll back to a previous snapshot
 err = txn.RollbackToSnapshot(targetSnapshotID)
 </code></pre>
+<p><code>txn.RollbackToTime(timestampMs)</code> selects the latest reachable ancestor
+strictly before the given Unix timestamp in milliseconds.</p>
 <p>Tune retention with the <code>history.expire.min-snapshots-to-keep</code>, <code>history.expire.max-snapshot-age-ms</code>, and <code>history.expire.max-ref-age-ms</code> table properties (see <a href="./configuration.html">Configuration</a>).</p>
 <h3 id="snapshot-integrity-audit-v1-and-later"><a class="header" href="#snapshot-integrity-audit-v1-and-later">Snapshot integrity audit (v1 and later)</a></h3>
 <p>Use <code>ValidateSnapshot</code> to inspect a snapshot's manifest list and entries without
@@ -808,6 +870,36 @@ fields are left NULL. <code>PartitionStatisticsSchema</code> exposes the version
 history. Dropped partition source fields and changed transform result types are
 not supported. A concurrent change to the target branch, current schema, or
 partition layout rejects the commit. Statistics do not create a new snapshot.</p>
+<h3 id="puffin-statistics"><a class="header" href="#puffin-statistics">Puffin statistics</a></h3>
+<p><code>puffin.Writer.AddBlob</code> accepts <code>BlobMetadataInput.CompressionCodec</code> with
+<code>CompressionCodecLZ4</code> or <code>CompressionCodecZstd</code>. <code>puffin.Reader.ReadBlob</code>
+decodes the stored codec. Write deletion-vector blobs with an empty codec.</p>
+<p><code>tbl.ComputeNDVs(ctx, snapshotID, columns...)</code> scans the selected snapshot and
+returns estimated distinct counts and serialized Theta sketches keyed by
+Iceberg field ID. Pass <code>0</code> for the current snapshot. Omit the column names to
+analyze all supported top-level primitive columns in the snapshot schema.
+Geometry, geography, and unknown types are skipped by default. Explicit column
+names must refer to supported top-level primitive columns. The estimates
+exclude null values and empty strings and binary values.</p>
+<p>Use <code>table/stats.NewSketch</code> to build a sketch directly from serialized Iceberg
+single values, and <code>NewUnion</code> to merge compatible sketches. The serialized
+sketch is the payload for an <code>apache-datasketches-theta-v1</code> Puffin blob.</p>
+<p>After writing a Puffin statistics file, pass its snapshot ID, path, sizes,
+and blob metadata to <code>txn.SetStatistics</code>. Commit to publish the reference.
+<code>txn.RemoveStatistics(snapshotID)</code> stages removal of the reference.</p>
+<h3 id="delete-file-maintenance"><a class="header" href="#delete-file-maintenance">Delete-file maintenance</a></h3>
+<ul>
+<li><code>RewritePositionDeleteFiles</code> compacts compatible v2 Parquet position-delete
+files from the current partition spec that have no deleted-row payload.</li>
+<li><code>ConvertEqualityDeletesToDeletionVectors</code> rewrites live equality deletes
+on a v3 table as file-specific deletion vectors.</li>
+<li><code>PlanDanglingDeleteFiles</code> identifies whole delete files that apply to no
+data file in the target snapshot. <code>RemoveDanglingDeleteFiles</code> removes their
+references on v2 and v3. The physical files remain available to older
+snapshots that reference them.</li>
+</ul>
+<p>The table-level methods operate on <code>main</code>. Use the transaction variants to
+target another branch or combine changes, then commit the transaction.</p>
 <h3 id="orphan-file-cleanup"><a class="header" href="#orphan-file-cleanup">Orphan file cleanup</a></h3>
 <pre><code class="language-go">import (
     &quot;time&quot;
@@ -918,6 +1010,9 @@ pass a filesystem factory from the registry. The IO-properties helpers
 keep filesystem configuration (<code>ioProps</code>) separate from persisted view
 properties (<code>metadataProps</code>). See
 <a href="./configuration.html#file-system-credentials">FileIO configuration</a>.</p>
+<p>Discover view updates with <code>catalog.As[catalog.UpdatableViewCatalog](cat)</code>.
+<code>catalog.RollbackView(ctx, cat, ident, versionID)</code> selects a retained version
+on a catalog that supports both loading and updating views.</p>
 <h2 id="iceberg--arrow-types"><a class="header" href="#iceberg--arrow-types">Iceberg ↔ Arrow types</a></h2>
 <p>When iceberg-go converts an Iceberg schema to Arrow (e.g. for the scanner output) or vice versa, the type mapping is:</p>
 <div class="table-wrapper"><table><thead><tr><th>Iceberg type</th><th>Arrow type</th></tr></thead><tbody>

@@ -233,203 +233,123 @@
   ~ under the License.
 -->
 <h1 id="getting-started"><a class="header" href="#getting-started">Getting Started</a></h1>
-<p>This walkthrough takes you from <code>go get</code> to a fully written-and-read Iceberg table in a few minutes, using a local SQLite-backed catalog so you do not need any external services. By the end you will have:</p>
-<ul>
-<li>An Iceberg catalog stored in a SQLite file</li>
-<li>A table with an Arrow schema</li>
-<li>Data written from Apache Arrow Go and read back</li>
-<li>A schema evolution committed</li>
-<li>A branch created on top of the table</li>
-</ul>
-<p>If you would rather see all the operations as a reference, jump straight to the <a href="./api.html">API</a>.</p>
-<h2 id="1-install"><a class="header" href="#1-install">1. Install</a></h2>
+<p>Create an Iceberg table in a local SQLite catalog, append three rows with Arrow,
+and read the rows back. The program uses a fresh temporary catalog and warehouse
+on each run and removes them when it exits.</p>
+<h2 id="install"><a class="header" href="#install">Install</a></h2>
+<p>This walkthrough uses Iceberg Go v0.7.0 and requires Go 1.25.9 or later.
+Create a new directory and run:</p>
 <pre><code class="language-sh">go mod init iceberg-go-tutorial
-go get github.com/apache/iceberg-go@latest
-go get github.com/apache/arrow-go/v18@latest
-go get github.com/uptrace/bun/driver/sqliteshim@latest
+go get github.com/apache/iceberg-go@v0.7.0 \
+  github.com/apache/arrow-go/v18@v18.8.0 \
+  github.com/uptrace/bun/driver/sqliteshim@v1.2.18
 </code></pre>
-<p><code>iceberg-go</code> itself only registers the local file system. For S3, GCS, or Azure Blob you would also blank-import the matching backend package, such as <code>github.com/apache/iceberg-go/io/gocloud/s3</code>. We are staying on local disk for this tutorial.</p>
-<h2 id="2-open-a-local-catalog"><a class="header" href="#2-open-a-local-catalog">2. Open a local catalog</a></h2>
-<p>The SQL catalog stores its metadata in a database, and the actual data files live under a &quot;warehouse&quot; directory. We will use SQLite for both the catalog DB and a local folder for the warehouse.</p>
+<h2 id="create-write-and-read-a-table"><a class="header" href="#create-write-and-read-a-table">Create, write, and read a table</a></h2>
+<p>Save the following as <code>main.go</code>. The SQL catalog stores table registrations in
+SQLite. The Iceberg metadata and Parquet data files go in the local warehouse.</p>
 <pre><code class="language-go">package main
 
 import (
-    &quot;context&quot;
-    &quot;database/sql&quot;
-    &quot;log&quot;
+	&quot;context&quot;
+	&quot;fmt&quot;
+	&quot;io&quot;
+	&quot;log&quot;
+	&quot;os&quot;
+	&quot;path/filepath&quot;
 
-    &quot;github.com/apache/iceberg-go&quot;
-    sqlcat &quot;github.com/apache/iceberg-go/catalog/sql&quot;
-    &quot;github.com/uptrace/bun/driver/sqliteshim&quot;
+	&quot;github.com/apache/arrow-go/v18/arrow&quot;
+	&quot;github.com/apache/arrow-go/v18/arrow/array&quot;
+	&quot;github.com/apache/arrow-go/v18/arrow/memory&quot;
+	&quot;github.com/apache/iceberg-go&quot;
+	&quot;github.com/apache/iceberg-go/catalog&quot;
+	_ &quot;github.com/apache/iceberg-go/catalog/sql&quot;
+	&quot;github.com/uptrace/bun/driver/sqliteshim&quot;
 )
 
-func openCatalog(ctx context.Context) (*sqlcat.Catalog, error) {
-    db, err := sql.Open(sqliteshim.ShimName, &quot;file:./tutorial-catalog.db?cache=shared&quot;)
-    if err != nil {
-        return nil, err
-    }
-    return sqlcat.NewCatalog(ctx, &quot;default&quot;, db, sqlcat.SQLite, iceberg.Properties{
-        &quot;warehouse&quot;:            &quot;file:///tmp/iceberg-tutorial&quot;,
-        &quot;init_catalog_tables&quot;:  &quot;true&quot;,
-    })
+func run(ctx context.Context) error {
+	dir, err := os.MkdirTemp(&quot;&quot;, &quot;iceberg-tutorial-&quot;)
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(dir)
+
+	cat, err := catalog.Load(ctx, &quot;tutorial&quot;, iceberg.Properties{
+		&quot;type&quot;:        &quot;sql&quot;,
+		&quot;uri&quot;:         &quot;file:&quot; + filepath.Join(dir, &quot;catalog.db&quot;),
+		&quot;sql.driver&quot;:  sqliteshim.ShimName,
+		&quot;sql.dialect&quot;: &quot;sqlite&quot;,
+		&quot;warehouse&quot;:   &quot;file://&quot; + filepath.Join(dir, &quot;warehouse&quot;),
+	})
+	if err != nil {
+		return err
+	}
+	if closer, ok := cat.(io.Closer); ok {
+		defer closer.Close()
+	}
+
+	if err := cat.CreateNamespace(ctx, catalog.ToIdentifier(&quot;taxi&quot;), nil); err != nil {
+		return err
+	}
+	trips := catalog.ToIdentifier(&quot;taxi&quot;, &quot;trips&quot;)
+	schema := iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: &quot;trip_id&quot;, Type: iceberg.PrimitiveTypes.Int64, Required: true})
+	tbl, err := cat.CreateTable(ctx, trips, schema)
+	if err != nil {
+		return err
+	}
+
+	arrowSchema := arrow.NewSchema([]arrow.Field{{Name: &quot;trip_id&quot;, Type: arrow.PrimitiveTypes.Int64}}, nil)
+	records := array.NewRecordBuilder(memory.DefaultAllocator, arrowSchema)
+	defer records.Release()
+	records.Field(0).(*array.Int64Builder).AppendValues([]int64{1, 2, 3}, nil)
+	batch := records.NewRecord()
+	defer batch.Release()
+	input := array.NewTableFromRecords(arrowSchema, []arrow.Record{batch})
+	defer input.Release()
+	tbl, err = tbl.AppendTable(ctx, input, 1024, nil)
+	if err != nil {
+		return err
+	}
+
+	output, err := tbl.Scan().ToArrowTable(ctx)
+	if err != nil {
+		return err
+	}
+	defer output.Release()
+	if tbl.CurrentSnapshot() == nil || output.NumRows() != 3 {
+		return fmt.Errorf(&quot;expected a committed snapshot and 3 rows, got %d rows&quot;, output.NumRows())
+	}
+	fmt.Printf(&quot;Read %d rows from taxi.trips and verified a committed snapshot.\n&quot;, output.NumRows())
+	return nil
+}
+
+func main() {
+	if err := run(context.Background()); err != nil {
+		log.Fatal(err)
+	}
 }
 </code></pre>
-<p><code>init_catalog_tables: &quot;true&quot;</code> lets the catalog create its bookkeeping tables (<code>iceberg_tables</code>, <code>iceberg_namespace_properties</code>) on first use. Make sure <code>/tmp/iceberg-tutorial</code> is writable.</p>
-<h2 id="3-create-a-namespace-and-a-table"><a class="header" href="#3-create-a-namespace-and-a-table">3. Create a namespace and a table</a></h2>
-<p>Iceberg organizes tables under namespaces (the analog of databases). We will create one and put a table inside it.</p>
-<pre><code class="language-go">import (
-    &quot;github.com/apache/iceberg-go/catalog&quot;
-    &quot;github.com/apache/iceberg-go/table&quot;
-)
-
-func createTrips(ctx context.Context, cat *sqlcat.Catalog) (*table.Table, error) {
-    ns := table.Identifier{&quot;taxi&quot;}
-    if err := cat.CreateNamespace(ctx, ns, nil); err != nil {
-        return nil, err
-    }
-
-    schema := iceberg.NewSchema(1,
-        iceberg.NestedField{ID: 1, Name: &quot;trip_id&quot;, Type: iceberg.PrimitiveTypes.Int64, Required: true},
-        iceberg.NestedField{ID: 2, Name: &quot;fare&quot;, Type: iceberg.PrimitiveTypes.Float64, Required: false},
-        iceberg.NestedField{ID: 3, Name: &quot;borough&quot;, Type: iceberg.PrimitiveTypes.String, Required: false},
-    )
-
-    ident := catalog.ToIdentifier(&quot;taxi&quot;, &quot;trips&quot;)
-    return cat.CreateTable(ctx, ident, schema)
-}
+<p>Run the program:</p>
+<pre><code class="language-sh">go mod tidy
+go run .
 </code></pre>
-<p>If the namespace already exists, <code>CreateNamespace</code> returns an error - the example skips error handling for brevity; production code should check for <code>iceberg.ErrAlreadyExists</code> and recover.</p>
-<h2 id="4-write-some-arrow-data"><a class="header" href="#4-write-some-arrow-data">4. Write some Arrow data</a></h2>
-<p>The write path takes either a streaming <a href="https://pkg.go.dev/github.com/apache/arrow-go/v18/arrow/array#RecordReader"><code>array.RecordReader</code></a> or a fully materialized <a href="https://pkg.go.dev/github.com/apache/arrow-go/v18/arrow#Table"><code>arrow.Table</code></a>. We will build a small Arrow table inline and append it.</p>
-<pre><code class="language-go">import (
-    &quot;github.com/apache/arrow-go/v18/arrow&quot;
-    &quot;github.com/apache/arrow-go/v18/arrow/array&quot;
-    &quot;github.com/apache/arrow-go/v18/arrow/memory&quot;
-)
-
-func writeSomeTrips(ctx context.Context, tbl *table.Table) (*table.Table, error) {
-    mem := memory.NewGoAllocator()
-
-    arrowSchema := arrow.NewSchema([]arrow.Field{
-        {Name: &quot;trip_id&quot;, Type: arrow.PrimitiveTypes.Int64, Nullable: false},
-        {Name: &quot;fare&quot;, Type: arrow.PrimitiveTypes.Float64, Nullable: true},
-        {Name: &quot;borough&quot;, Type: arrow.BinaryTypes.String, Nullable: true},
-    }, nil)
-
-    b := array.NewRecordBuilder(mem, arrowSchema)
-    defer b.Release()
-
-    b.Field(0).(*array.Int64Builder).AppendValues([]int64{1, 2, 3}, nil)
-    b.Field(1).(*array.Float64Builder).AppendValues([]float64{12.50, 8.75, 22.10}, nil)
-    b.Field(2).(*array.StringBuilder).AppendValues([]string{&quot;Manhattan&quot;, &quot;Brooklyn&quot;, &quot;Queens&quot;}, nil)
-
-    rec := b.NewRecord()
-    defer rec.Release()
-
-    arrowTbl := array.NewTableFromRecords(arrowSchema, []arrow.Record{rec})
-    defer arrowTbl.Release()
-
-    return tbl.AppendTable(ctx, arrowTbl, 1024 /* batchSize */, nil)
-}
+<pre><code class="language-text">Read 3 rows from taxi.trips and verified a committed snapshot.
 </code></pre>
-<p><code>AppendTable</code> returns a refreshed <code>*table.Table</code> reflecting the new snapshot.</p>
-<h2 id="5-read-the-data-back"><a class="header" href="#5-read-the-data-back">5. Read the data back</a></h2>
-<pre><code class="language-go">func readAll(ctx context.Context, tbl *table.Table) error {
-    arrowTbl, err := tbl.Scan().ToArrowTable(ctx)
-    if err != nil {
-        return err
-    }
-    defer arrowTbl.Release()
-
-    log.Printf(&quot;read %d rows in %d columns&quot;, arrowTbl.NumRows(), arrowTbl.NumCols())
-    return nil
-}
-</code></pre>
-<p>For larger tables, use streaming so only one batch is in memory at a time:</p>
-<pre><code class="language-go">arrowSchema, batches, err := tbl.Scan().ToArrowRecords(ctx)
-if err != nil {
-    return err
-}
-log.Printf(&quot;scan schema: %s&quot;, arrowSchema)
-
-for batch, err := range batches {
-    if err != nil {
-        return err
-    }
-    log.Printf(&quot;batch with %d rows&quot;, batch.NumRows())
-    batch.Release()
-}
-</code></pre>
-<h2 id="6-filter-and-project"><a class="header" href="#6-filter-and-project">6. Filter and project</a></h2>
-<p>Use the <a href="./row-filter-syntax.html">predicate DSL</a> to push filters down into the scan, and <code>WithSelectedFields</code> to project columns:</p>
-<pre><code class="language-go">filter := iceberg.GreaterThan(iceberg.Reference(&quot;fare&quot;), float64(10.0))
-
-arrowTbl, err := tbl.Scan(
-    table.WithSelectedFields(&quot;trip_id&quot;, &quot;fare&quot;),
-    table.WithRowFilter(filter),
-).ToArrowTable(ctx)
-</code></pre>
-<h2 id="7-evolve-the-schema"><a class="header" href="#7-evolve-the-schema">7. Evolve the schema</a></h2>
-<p>Most schema changes go through a transaction. Add a <code>tip</code> column:</p>
-<pre><code class="language-go">import &quot;github.com/apache/iceberg-go/table&quot;
-
-func addTipColumn(ctx context.Context, tbl *table.Table) (*table.Table, error) {
-    txn := tbl.NewTransaction()
-
-    err := table.NewUpdateSchema(txn, true /* caseSensitive */, false /* allowIncompatible */).
-        AddColumn([]string{&quot;tip&quot;}, iceberg.PrimitiveTypes.Float64, &quot;Tip in dollars&quot;, false, nil).
-        Commit()
-    if err != nil {
-        return nil, err
-    }
-
-    return txn.Commit(ctx)
-}
-</code></pre>
-<p>The returned table has the new schema and a fresh metadata file.</p>
-<h2 id="8-branch-the-table"><a class="header" href="#8-branch-the-table">8. Branch the table</a></h2>
-<p>A branch is a named ref that points at a snapshot. Creating one requires a metadata commit that adds the ref - <code>NewTransactionOnBranch</code> only writes to a branch that already exists. Two steps:</p>
-<pre><code class="language-go">import &quot;github.com/apache/iceberg-go/table&quot;
-
-// Step 1: create the branch via Catalog.CommitTable.
-func createExperimentBranch(ctx context.Context, cat *sqlcat.Catalog, tbl *table.Table) (*table.Table, error) {
-    snap := tbl.CurrentSnapshot()
-    update := table.NewSetSnapshotRefUpdate(
-        &quot;experiment&quot;, snap.SnapshotID, table.BranchRef,
-        0 /* maxRefAgeMs */, 0 /* maxSnapshotAgeMs */, 0 /* minSnapshotsToKeep */,
-    )
-    reqs := []table.Requirement{
-        table.AssertTableUUID(tbl.Metadata().TableUUID()),
-        table.AssertRefSnapshotID(&quot;experiment&quot;, nil), // branch must not yet exist
-    }
-    if _, _, err := cat.CommitTable(ctx, tbl.Identifier(), reqs, []table.Update{update}); err != nil {
-        return nil, err
-    }
-    // Reload so subsequent transactions see the new ref.
-    return cat.LoadTable(ctx, tbl.Identifier())
-}
-
-// Step 2: open a transaction on the branch and write.
-func writeOnBranch(ctx context.Context, tbl *table.Table, arrowTbl arrow.Table) (*table.Table, error) {
-    txn, err := tbl.NewTransactionOnBranch(&quot;experiment&quot;)
-    if err != nil {
-        return nil, err
-    }
-    if err := txn.AppendTable(ctx, arrowTbl, 1024, nil); err != nil {
-        return nil, err
-    }
-    return txn.Commit(ctx)
-}
-</code></pre>
-<p>Reads can target the branch with <code>tbl.Scan().UseRef(&quot;experiment&quot;)</code>.</p>
+<p>The append returns a new table handle with the committed snapshot. The scan
+uses that handle to read the rows back.</p>
 <h2 id="where-to-go-next"><a class="header" href="#where-to-go-next">Where to go next</a></h2>
 <ul>
-<li><a href="./api.html">API</a> - the full Go surface for catalogs, tables, scans, writes, transactions, schema and partition evolution, snapshot management, maintenance, and views.</li>
-<li><a href="./configuration.html">Configuration</a> - cloud credentials, table properties, concurrency, custom catalog and IO registration.</li>
-<li><a href="./cli.html">CLI</a> - inspect, expire, compact, branch, and tag from the command line.</li>
-<li><a href="./row-filter-syntax.html">Row Filter Syntax</a> and <a href="./expression-dsl.html">Expression DSL</a> - the predicate DSL in detail.</li>
+<li><a href="./api.html#projection-and-filters">Filter and project columns</a> or
+<a href="./api.html#streaming-record-batches">stream Arrow record batches</a>.</li>
+<li><a href="./api.html#schema-evolution">Evolve a schema</a> or
+<a href="./api.html#branches-and-tags">work with branches and tags</a>.</li>
+<li><a href="./configuration.html#catalog-options">Configure another catalog</a> or
+<a href="./cli.html#inspecting-tables">inspect a table from the CLI</a>.</li>
+<li>For an S3, GCS, or Azure warehouse, see
+<a href="./configuration.html#file-system-credentials">file-system credentials</a> for
+backend imports and credentials.</li>
+<li>See <a href="./releases.html#using-a-release">Releases</a> for other library versions and
+<a href="./api.html">API</a> for examples that follow the development branch.</li>
 </ul>
-<p>The full Iceberg specification, terminology, and engine integration policy live with the main project at <a href="https://iceberg.apache.org/">iceberg.apache.org</a>.</p>
 
                     </main>
 

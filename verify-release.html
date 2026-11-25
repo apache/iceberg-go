@@ -249,18 +249,23 @@
 <li><code>gpg</code></li>
 <li><code>shasum</code> or <code>sha512sum</code></li>
 <li><code>tar</code></li>
+<li>Java and Python 3 for the RAT license check</li>
+<li><code>jq</code> if the script needs to download Go</li>
 </ul>
-<p>You do not need Go installed - if Go is not on the system, the latest Go is downloaded automatically and used only for verification.</p>
+<p>Use a Go toolchain that meets the requirement in the candidate's <code>go.mod</code>.
+If Go is unavailable, the script downloads a toolchain for verification.</p>
 <h2 id="import-the-apache-iceberg-keys"><a class="header" href="#import-the-apache-iceberg-keys">Import the Apache Iceberg KEYS</a></h2>
 <pre><code class="language-sh">curl https://downloads.apache.org/iceberg/KEYS -o KEYS
 gpg --import KEYS
 </code></pre>
 <h2 id="run-the-verification-script"><a class="header" href="#run-the-verification-script">Run the verification script</a></h2>
-<p>The script takes the version and RC number as positional arguments:</p>
-<pre><code class="language-sh">dev/release/verify_rc.sh ${VERSION} ${RC}
+<p>Pass the version and RC number. Use a disposable module cache because the
+script cleans it on exit. Run with <code>GITHUB_TOKEN</code> unset to keep it out of
+shell traces if the script downloads Go.</p>
+<pre><code class="language-sh">env -u GITHUB_TOKEN GOMODCACHE=&quot;$(mktemp -d)&quot; dev/release/verify_rc.sh ${VERSION} ${RC}
 </code></pre>
 <p>For example, to verify <code>0.6.0</code> RC1:</p>
-<pre><code class="language-sh">dev/release/verify_rc.sh 0.6.0 1
+<pre><code class="language-sh">env -u GITHUB_TOKEN GOMODCACHE=&quot;$(mktemp -d)&quot; dev/release/verify_rc.sh 0.6.0 1
 </code></pre>
 <p>If the verification succeeds, the script prints:</p>
 <pre><code>RC looks good!
@@ -270,9 +275,8 @@ gpg --import KEYS
 <div class="table-wrapper"><table><thead><tr><th>Variable</th><th>Default</th><th>Effect</th></tr></thead><tbody>
 <tr><td><code>VERIFY_DEFAULT</code></td><td><code>1</code></td><td>Master switch propagated to <code>VERIFY_DOWNLOAD</code> and <code>VERIFY_SIGN</code> if they are unset.</td></tr>
 <tr><td><code>VERIFY_DOWNLOAD</code></td><td><code>${VERIFY_DEFAULT}</code></td><td>Re-download artifacts when <code>1</code>; reuse the local copy when <code>0</code>.</td></tr>
-<tr><td><code>VERIFY_SIGN</code></td><td><code>${VERIFY_DEFAULT}</code></td><td>Re-run signature and checksum verification when <code>1</code>.</td></tr>
+<tr><td><code>VERIFY_SIGN</code></td><td><code>${VERIFY_DEFAULT}</code></td><td>Verify the signature when <code>1</code>. The script always checks the checksum.</td></tr>
 <tr><td><code>VERIFY_FORCE_USE_GO_BINARY</code></td><td><code>0</code></td><td>When <code>1</code>, ignore any system Go and use the script's auto-downloaded Go.</td></tr>
-<tr><td><code>GITHUB_TOKEN</code></td><td>unset</td><td>Optional - supplies authenticated requests when fetching the latest Go release, avoiding rate limits.</td></tr>
 </tbody></table>
 </div>
 <h2 id="manual-verification-fallback"><a class="header" href="#manual-verification-fallback">Manual verification fallback</a></h2>
@@ -288,10 +292,16 @@ gpg --verify apache-iceberg-go-${VERSION}.tar.gz.asc apache-iceberg-go-${VERSION
 # Verify the checksum (or sha512sum -c on systems without shasum)
 shasum -a 512 --check apache-iceberg-go-${VERSION}.tar.gz.sha512
 
-# Inspect the contents
-tar xf apache-iceberg-go-${VERSION}.tar.gz
+# Inspect the archive, check licenses, and run the unit tests
+archive=&quot;apache-iceberg-go-${VERSION}&quot;
+tar xf &quot;${archive}.tar.gz&quot;
+(
+  cd &quot;${archive}&quot;
+  dev/release/run_rat.sh &quot;../${archive}.tar.gz&quot;
+  go test ./...
+)
 </code></pre>
-<p>You should reply to the <code>[VOTE]</code> thread with <code>+1</code>, <code>+0</code>, or <code>-1</code> and a one-line description of what you verified (for example, &quot;verified signatures, checksums, and <code>verify_rc.sh</code> passed on macOS arm64 with system Go 1.25.5&quot;).</p>
+<p>You should reply to the <code>[VOTE]</code> thread with <code>+1</code>, <code>+0</code>, or <code>-1</code> and a one-line description of what you verified (for example, &quot;verified signatures, checksums, and <code>verify_rc.sh</code> passed on macOS arm64&quot;).</p>
 
                     </main>
 

@@ -324,7 +324,17 @@
 <p><strong>REST mutation keys can enable transport replay.</strong> Namespace, table, view, transaction and scan-cancellation mutations listed in the <a href="./configuration.html">REST catalog documentation</a> now carry fresh UUIDv7 <code>Idempotency-Key</code> headers when <code>GET /v1/config</code> returns a non-null <code>idempotency-key-lifetime</code>. Go's HTTP transport may replay certain failed requests on reused connections with the same key; the advertised lifetime is not yet enforced. Scan plan and task key handling is unchanged. When a lifetime is advertised, a default <code>Idempotency-Key</code> configured via <code>WithHeaders</code> is dropped after <code>GET /v1/config</code>.</p>
 </li>
 <li>
-<p><strong><code>StructType.Fields()</code> returns a copy.</strong> Changing the returned slice no longer changes the struct, matching <code>ListType.Fields()</code> and <code>MapType.Fields()</code>. Build a new type with <code>NewStructType</code> instead. <code>NumFields()</code> and <code>Field(i)</code> read fields without copying, and <code>NewListType</code> and <code>NewMapType</code> are the constructors for the other nested types. The exported fields are unchanged for now; they become unexported before v1.0.0 (see <a href="https://github.com/apache/iceberg-go/issues/2062">#2062</a>).</p>
+<p><strong><code>StructType.Fields()</code> returns a copy.</strong> Changing the returned slice no longer changes the struct, matching <code>ListType.Fields()</code> and <code>MapType.Fields()</code>. Build a new type with <code>NewStructType</code> instead. <code>NumFields()</code> and <code>Field(i)</code> read fields without copying, and <code>NewListType</code> and <code>NewMapType</code> are the constructors for the other nested types. The struct's field list is no longer exported; see the next note.</p>
+</li>
+<li>
+<p><strong>Nested type fields are unexported.</strong> <code>StructType</code>, <code>ListType</code> and <code>MapType</code> can no longer be built with keyed struct literals, and their fields can no longer be assigned (see <a href="https://github.com/apache/iceberg-go/issues/2062">#2062</a>). Build them with <code>NewStructType</code>, <code>NewListType</code> and <code>NewMapType</code>, and to change one, build a new value. Read them through methods named after the old fields:</p>
+<ul>
+<li><code>StructType.FieldList</code> becomes <code>Fields()</code> (a copy), or <code>NumFields()</code> and <code>Field(i)</code> to read without copying.</li>
+<li><code>ListType.ElementID</code>, <code>Element</code> and <code>ElementRequired</code> become <code>ElementID()</code>, <code>Element()</code> and <code>ElementRequired()</code>.</li>
+<li><code>MapType.KeyID</code>, <code>KeyType</code>, <code>ValueID</code>, <code>ValueType</code> and <code>ValueRequired</code> become <code>KeyID()</code>, <code>KeyType()</code>, <code>ValueID()</code>, <code>ValueType()</code> and <code>ValueRequired()</code>.</li>
+<li><code>Schema.IdentifierFieldIDs</code> is unexported too and becomes <code>IdentifierFieldIDs()</code>, which returns a copy. Set the IDs with <code>NewSchemaWithIdentifiers</code>, which keeps its own copy of the slice it is given.</li>
+</ul>
+<p>Pointers to these types and <code>Schema</code> encode to the same JSON as before. Values of these types, such as the result of <code>Schema.AsStruct()</code>, now encode like pointers instead of a partial form without <code>&quot;type&quot;</code>.</p>
 </li>
 <li>
 <p><strong><code>io.StatIO.Stat</code> accepts a context.</strong> The method now takes a <code>context.Context</code> before the path, so custom <code>StatIO</code> implementations and callers must pass the operation context.</p>

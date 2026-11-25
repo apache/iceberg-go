@@ -233,16 +233,24 @@
   ~ under the License.
 -->
 <h1 id="cli"><a class="header" href="#cli">CLI</a></h1>
-<p>Run <code>go build ./cmd/iceberg</code> from the root of this repository to build the CLI executable, alternately you can run <code>go install github.com/apache/iceberg-go/cmd/iceberg</code> to install it to the <code>bin</code> directory of your <code>GOPATH</code>.</p>
-<p>The <code>iceberg</code> CLI usage is very similar to <a href="https://py.iceberg.apache.org/cli/">pyiceberg CLI</a>. <br />
-You can pass the catalog URI with the <code>--uri</code> argument.</p>
+<p>Install the latest released CLI:</p>
+<pre><code class="language-sh">go install github.com/apache/iceberg-go/cmd/iceberg@latest
+</code></pre>
+<p>This page follows <code>main</code>. To run the examples against that branch, use:</p>
+<pre><code class="language-sh">go install github.com/apache/iceberg-go/cmd/iceberg@main
+iceberg --version
+</code></pre>
+<p>Go installs the binary in <code>GOBIN</code> or, by default, in <code>$(go env GOPATH)/bin</code>.
+Add that directory to <code>PATH</code> to use the examples below. From a source
+checkout, <code>go build ./cmd/iceberg</code> builds a local binary. For v0.7.0, see
+<a href="https://github.com/apache/iceberg-go/blob/v0.7.0/website/src/cli.md">the CLI guide at that tag</a>.</p>
 <h2 id="connecting-to-a-catalog"><a class="header" href="#connecting-to-a-catalog">Connecting to a catalog</a></h2>
 <p>Start a local REST catalog (the default <code>--catalog</code> type):</p>
 <pre><code>docker pull apache/iceberg-rest-fixture:latest
 docker run -p 8181:8181 apache/iceberg-rest-fixture:latest
 </code></pre>
 <p>and run the <code>iceberg</code> CLI pointing to the REST API server:</p>
-<pre><code> ./iceberg --uri http://0.0.0.0:8181 list
+<pre><code>iceberg --uri http://localhost:8181 list
 ┌─────┐
 | IDs |
 | --- |
@@ -286,10 +294,10 @@ catalog:
 <p>All commands accept <code>--output text</code> (default, human-readable) or <code>--output json</code> (machine-readable, suitable for piping into <code>jq</code> or scripts).</p>
 <h2 id="catalog-and-namespace-commands"><a class="header" href="#catalog-and-namespace-commands">Catalog and namespace commands</a></h2>
 <p><strong>Create namespace</strong></p>
-<pre><code>./iceberg --uri http://0.0.0.0:8181 create namespace taxitrips
+<pre><code>iceberg --uri http://localhost:8181 create namespace taxitrips
 </code></pre>
 <p><strong>List namespaces</strong></p>
-<pre><code> ./iceberg --uri http://0.0.0.0:8181 list
+<pre><code>iceberg --uri http://localhost:8181 list
 ┌───────────┐
 | IDs       |
 | --------- |
@@ -299,7 +307,7 @@ catalog:
 <p><strong>Create table</strong></p>
 <p>Note: only the identity transform is supported for <code>--partition-spec</code> at this moment.</p>
 <pre><code class="language-shell"># Create a simple table with REST catalog and object store
-./iceberg create table default.table-1 \
+iceberg create table default.table-1 \
         --properties write.format.default=parquet \
         --partition-spec foo \
         --sort-order foo:desc:nulls-last \
@@ -309,7 +317,7 @@ catalog:
 Table default.table-1 created successfully
 
 # Describe the newly created table
-./iceberg describe --catalog rest --uri http://localhost:8181 default.table-1
+iceberg describe --catalog rest --uri http://localhost:8181 default.table-1
 Table format version │ 2
 Metadata location    │ s3://warehouse/default/table-1/metadata/00000-f0ccaadd-d988-482e-99da-3a37870288fe.metadata.json
 Table UUID           │ 33fa3fac-e638-4335-a085-343c6d9e7de5
@@ -335,6 +343,10 @@ key                             │ value
 write.format.default            │ parquet
 write.parquet.compression-codec │ zstd
 </code></pre>
+<p>Drop a table or namespace with <code>iceberg drop table</code> or
+<code>iceberg drop namespace</code>. Use <code>iceberg rename</code> to rename a table and
+<code>iceberg properties get|set|remove</code> to work with table or namespace
+properties. Each command accepts <code>--help</code>.</p>
 <h2 id="inspecting-tables"><a class="header" href="#inspecting-tables">Inspecting tables</a></h2>
 <h3 id="info--single-screen-summary"><a class="header" href="#info--single-screen-summary"><code>info</code> — single-screen summary</a></h3>
 <pre><code class="language-shell">iceberg info my_db.events
@@ -397,6 +409,28 @@ The catalog's snapshot loading mode still applies to other commands.</p>
 <pre><code class="language-shell">iceberg clean-orphan-files --dry-run my_db.events
 iceberg clean-orphan-files --older-than 5d my_db.events
 iceberg clean-orphan-files --location s3://old-warehouse/my_db/events my_db.events
+</code></pre>
+<h2 id="file-maintenance"><a class="header" href="#file-maintenance">File maintenance</a></h2>
+<h3 id="data-file-compaction"><a class="header" href="#data-file-compaction">Data-file compaction</a></h3>
+<p>Preview the groups that compaction would rewrite with <code>compact analyze</code>.
+Use <code>compact run</code> to write replacements. By default it bin-packs each group.
+Both commands accept <code>--target-file-size</code> for output files.</p>
+<pre><code class="language-sh">iceberg compact analyze --target-file-size 268435456 my_db.events
+iceberg compact run --target-file-size 268435456 my_db.events
+</code></pre>
+<p>The next example uses flags added after v0.7.0. Install the
+<a href="#cli"><code>@main</code> build</a> to try it. <code>--max-group-size</code> caps input bytes per group
+for either command. <code>compact run --sort</code> sorts each group by the table's
+default sort order.</p>
+<pre><code class="language-sh">iceberg compact run --sort --max-group-size 536870912 my_db.events
+</code></pre>
+<p>See <a href="./api.html#compaction-rewrite-data-files">compaction</a> for sort strategy
+tradeoffs and <code>iceberg compact run --help</code> for additional options.</p>
+<h3 id="manifest-rewrites"><a class="header" href="#manifest-rewrites">Manifest rewrites</a></h3>
+<p><code>rewrite-manifests</code> reorganizes the table's manifests. Use <code>--spec-id</code>
+to select a partition spec and <code>--target-manifest-size</code> to override the
+table's target size in bytes.</p>
+<pre><code class="language-sh">iceberg rewrite-manifests --spec-id 0 my_db.events
 </code></pre>
 <h2 id="rollback"><a class="header" href="#rollback">Rollback</a></h2>
 <p>Reset the current snapshot pointer to a previous snapshot. The target must be an ancestor of the current snapshot.</p>
@@ -467,6 +501,10 @@ override this setting; configure the REST server with <code>snapshot-loading-mod
   --snapshot-id 7234981023498 \
   --max-ref-age 90d \
   my_db.events monthly-backup-may
+</code></pre>
+<h3 id="delete-a-branch-or-tag"><a class="header" href="#delete-a-branch-or-tag">Delete a branch or tag</a></h3>
+<pre><code class="language-sh">iceberg branch delete my_db.events audit-2026-q2
+iceberg tag delete my_db.events monthly-backup-may
 </code></pre>
 <h2 id="automation"><a class="header" href="#automation">Automation</a></h2>
 <p>Two flags make these commands safe to run from cron jobs or CI:</p>

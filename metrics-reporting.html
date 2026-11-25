@@ -241,6 +241,9 @@ These metrics are otherwise invisible from outside the client; a reporter gives
 operators a standard way to collect them.</p>
 <p>A pluggable <a href="https://pkg.go.dev/github.com/apache/iceberg-go/metrics#Reporter"><code>metrics.Reporter</code></a>
 is the sink that receives those reports.</p>
+<p>The <code>skipped-data-files</code> and <code>skipped-delete-files</code> counters track file entries
+rejected by partition or metrics filters in manifests the planner reads.
+The skipped-manifest counters track pruning at the earlier manifest level.</p>
 <h2 id="opt-in-by-default"><a class="header" href="#opt-in-by-default">Opt-in by default</a></h2>
 <p>Reporting is <strong>strictly opt-in</strong>. With no reporter configured the instrumented
 code paths do no work, and the client emits no logs and no network traffic.</p>

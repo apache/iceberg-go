@@ -233,11 +233,15 @@
   ~ under the License.
 -->
 <h1 id="feature-status"><a class="header" href="#feature-status">Feature Status</a></h1>
-<p>This page tracks what Apache Iceberg Go currently supports. The matrix is kept in sync with the project <a href="https://github.com/apache/iceberg-go/blob/main/README.md"><code>README.md</code></a>; if you spot a discrepancy, file an issue.</p>
+<p>This page tracks Apache Iceberg Go on <code>main</code> and mirrors the support tables in
+the project <a href="https://github.com/apache/iceberg-go/blob/main/README.md">README</a>.
+For released behavior, see the feature matrix in the corresponding Git tag,
+such as <a href="https://github.com/apache/iceberg-go/blob/v0.7.0/website/src/feature-status.md">v0.7.0</a>.</p>
 <h2 id="spec-format-version-coverage"><a class="header" href="#spec-format-version-coverage">Spec format version coverage</a></h2>
 <p>Apache Iceberg Go reads and writes table format versions 1, 2, and 3. The maximum supported version is enforced at <a href="https://github.com/apache/iceberg-go/blob/main/table/metadata.go"><code>table/metadata.go</code></a> (<code>supportedTableFormatVersion = 3</code>). For active tracking, see issues <a href="https://github.com/apache/iceberg-go/issues/589">#589 (V3)</a> and <a href="https://github.com/apache/iceberg-go/issues/829">#829 (V2 completion)</a>.</p>
 <h3 id="v1"><a class="header" href="#v1">V1</a></h3>
-<p>All V1 features are supported. V1 is the format-version baseline.</p>
+<p>V1 tables support Parquet reads and writes and Avro reads. See
+<a href="#read--write-data">data file formats</a> for details.</p>
 <h3 id="v2"><a class="header" href="#v2">V2</a></h3>
 <div class="table-wrapper"><table><thead><tr><th>Feature</th><th>Status</th></tr></thead><tbody>
 <tr><td>Sequence numbers</td><td>Supported</td></tr>
@@ -246,7 +250,8 @@
 <tr><td>Equality deletes</td><td>Supported (read + write). Write via <code>Transaction.WriteEqualityDeletes</code>; row-level commits via <code>Transaction.NewRowDelta</code>; delete-only CDC via <code>Transaction.CommitEqualityDeletes</code></td></tr>
 <tr><td>Partition spec evolution</td><td>Supported</td></tr>
 <tr><td>Sort order enforcement on write</td><td>Supported (PR <a href="https://github.com/apache/iceberg-go/pull/1157">#1157</a>, closes <a href="https://github.com/apache/iceberg-go/issues/833">#833</a>)</td></tr>
-<tr><td><code>ReplaceDataFilesByPath</code> using <code>OpReplace</code></td><td>Pending (<a href="https://github.com/apache/iceberg-go/issues/841">#841</a>)</td></tr>
+<tr><td>Path-based replace snapshots</td><td><a href="./api.html#stage-externally-rewritten-parquet-files"><code>StageRewrittenDataFilesByPath</code></a> stages prewritten Parquet replacements for unpartitioned v1 and v2 tables. Source files must have no applicable deletes. The caller preserves the rows and physical row count and commits the transaction.</td></tr>
+<tr><td>Position-delete file compaction</td><td><a href="./api.html#delete-file-maintenance"><code>RewritePositionDeleteFiles</code></a> rewrites compatible v2 Parquet position deletes.</td></tr>
 </tbody></table>
 </div>
 <h3 id="v3"><a class="header" href="#v3">V3</a></h3>
@@ -254,20 +259,30 @@
 <tr><td>Nanosecond timestamps (<code>timestamp_ns</code>, <code>timestamptz_ns</code>)</td><td>Supported</td></tr>
 <tr><td>Default values (<code>initial-default</code>, <code>write-default</code>)</td><td>Supported</td></tr>
 <tr><td>Row lineage (<code>_row_id</code>, <code>_last_updated_sequence_number</code>)</td><td>Supported</td></tr>
-<tr><td>Encryption keys in metadata</td><td>Supported (metadata-level storage + <code>EncryptionManager</code> interface; file-level envelope encryption not yet implemented <a href="https://github.com/apache/iceberg-go/pull/1620">PR #1620 in review</a>)</td></tr>
+<tr><td>Encryption keys in metadata</td><td>Supported. See <a href="#file-encryption-puffin-and-statistics">file encryption</a> for file-level support.</td></tr>
 <tr><td>Variant type, non-shredded</td><td>Supported (PR <a href="https://github.com/apache/iceberg-go/pull/932">#932</a>; umbrella <a href="https://github.com/apache/iceberg-go/issues/929">#929</a>)</td></tr>
 <tr><td>Variant type, shredded reader / writer</td><td>Supported (reader <a href="https://github.com/apache/iceberg-go/pull/1238">#1238</a>, writer <a href="https://github.com/apache/iceberg-go/pull/1351">#1351</a>)</td></tr>
 <tr><td>Variant predicate pushdown / field extract</td><td>Supported (PR <a href="https://github.com/apache/iceberg-go/pull/1607">#1607</a>)</td></tr>
 <tr><td>Deletion vectors, read</td><td>Supported</td></tr>
 <tr><td>Deletion vectors, write (unpartitioned)</td><td>Supported</td></tr>
 <tr><td>Deletion vectors, write (partitioned)</td><td>Supported (PR <a href="https://github.com/apache/iceberg-go/pull/1151">#1151</a>)</td></tr>
+<tr><td>Convert equality deletes to deletion vectors</td><td><a href="./api.html#delete-file-maintenance">Supported</a> on v3 tables.</td></tr>
 <tr><td>Geometry / Geography types (schema)</td><td>Supported</td></tr>
 <tr><td>Geometry: statistics and pruning</td><td>Supported</td></tr>
 <tr><td>Geography: read, write, and schema</td><td>Supported (bounds/pruning intentionally omitted for geodesic safety)</td></tr>
 <tr><td>Geometry / Geography: nested-geo null counts</td><td>Supported (like other nested fields, no bounds are written)</td></tr>
 <tr><td>Multi-argument transforms</td><td>Infrastructure present; no concrete implementations exercised yet</td></tr>
 <tr><td>Statistics files (read / round-trip / register / remove)</td><td>Supported</td></tr>
-<tr><td>NDV (Theta-sketch) statistics computation</td><td>Roadmap (<a href="https://github.com/apache/iceberg-go/issues/1929">#1929</a>)</td></tr>
+</tbody></table>
+</div>
+<h2 id="file-encryption-puffin-and-statistics"><a class="header" href="#file-encryption-puffin-and-statistics">File encryption, Puffin, and statistics</a></h2>
+<div class="table-wrapper"><table><thead><tr><th style="text-align: left">Feature</th><th style="text-align: left">Status</th></tr></thead><tbody>
+<tr><td style="text-align: left">File envelope encryption</td><td style="text-align: left">Available through the explicit <a href="./configuration.html#file-encryption-and-key-management"><code>StandardEncryptionManager</code> API</a>. Callers handle encryption and decryption separately from table scans and writes.</td></tr>
+<tr><td style="text-align: left">AWS KMS key wrapping</td><td style="text-align: left">Available through the optional <a href="./configuration.html#file-encryption-and-key-management">AWS KMS provider</a>.</td></tr>
+<tr><td style="text-align: left">Puffin blob compression</td><td style="text-align: left">LZ4 and Zstandard reads and writes. Deletion vectors use uncompressed blobs.</td></tr>
+<tr><td style="text-align: left">Partition statistics</td><td style="text-align: left"><a href="./api.html#partition-statistics-v1-v3">Computation</a> for v1–v3 tables with a snapshot and at least one partition field in spec history.</td></tr>
+<tr><td style="text-align: left">Snapshot-wide distinct value counts</td><td style="text-align: left"><a href="./api.html#puffin-statistics"><code>Table.ComputeNDVs</code></a> estimates distinct counts and builds Theta sketches for supported top-level primitive columns.</td></tr>
+<tr><td style="text-align: left">Theta sketches</td><td style="text-align: left"><a href="./api.html#puffin-statistics">Helpers</a> to build, merge, and read distinct-value sketches.</td></tr>
 </tbody></table>
 </div>
 <h2 id="filesystem-support"><a class="header" href="#filesystem-support">FileSystem support</a></h2>
@@ -293,34 +308,44 @@
 </tbody></table>
 </div>
 <h2 id="catalog-support"><a class="header" href="#catalog-support">Catalog support</a></h2>
-<div class="table-wrapper"><table><thead><tr><th style="text-align: left">Operation</th><th style="text-align: center">REST</th><th style="text-align: center">Hive</th><th style="text-align: center">Glue</th><th style="text-align: center">SQL</th><th style="text-align: center">Hadoop</th></tr></thead><tbody>
-<tr><td style="text-align: left">Load Table</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td></tr>
-<tr><td style="text-align: left">List Tables</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td></tr>
-<tr><td style="text-align: left">Create Table</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td></tr>
-<tr><td style="text-align: left">Register Table</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center"></td><td style="text-align: center"></td></tr>
-<tr><td style="text-align: left">Update Current Snapshot</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td></tr>
-<tr><td style="text-align: left">Create New Snapshot</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td></tr>
-<tr><td style="text-align: left">Rename Table</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center"></td></tr>
-<tr><td style="text-align: left">Drop Table</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td></tr>
-<tr><td style="text-align: left">Alter Table</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td></tr>
-<tr><td style="text-align: left">Check Table Exists</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td></tr>
-<tr><td style="text-align: left">Set Table Properties</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td></tr>
-<tr><td style="text-align: left">List Namespaces</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td></tr>
-<tr><td style="text-align: left">Create Namespace</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td></tr>
-<tr><td style="text-align: left">Check Namespace Exists</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td></tr>
-<tr><td style="text-align: left">Drop Namespace</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td></tr>
-<tr><td style="text-align: left">Update Namespace Properties</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center"></td></tr>
-<tr><td style="text-align: left">Create View</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center"></td><td style="text-align: center">X</td><td style="text-align: center"></td></tr>
-<tr><td style="text-align: left">Load View</td><td style="text-align: center"></td><td style="text-align: center">X</td><td style="text-align: center"></td><td style="text-align: center">X</td><td style="text-align: center"></td></tr>
-<tr><td style="text-align: left">List View</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center"></td><td style="text-align: center">X</td><td style="text-align: center"></td></tr>
-<tr><td style="text-align: left">Drop View</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center"></td><td style="text-align: center">X</td><td style="text-align: center"></td></tr>
-<tr><td style="text-align: left">Rename View</td><td style="text-align: center">X</td><td style="text-align: center"></td><td style="text-align: center"></td><td style="text-align: center"></td><td style="text-align: center"></td></tr>
-<tr><td style="text-align: left">Check View Exists</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center"></td><td style="text-align: center">X</td><td style="text-align: center"></td></tr>
+<div class="table-wrapper"><table><thead><tr><th style="text-align: left">Operation</th><th style="text-align: center">REST</th><th style="text-align: center">Hive</th><th style="text-align: center">Glue</th><th style="text-align: center">SQL</th><th style="text-align: center">Hadoop</th><th style="text-align: center">DynamoDB</th></tr></thead><tbody>
+<tr><td style="text-align: left">Load Table</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td></tr>
+<tr><td style="text-align: left">List Tables</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td></tr>
+<tr><td style="text-align: left">Create Table</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td></tr>
+<tr><td style="text-align: left">Register Table</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center"></td><td style="text-align: center"></td><td style="text-align: center">X</td></tr>
+<tr><td style="text-align: left">Update Current Snapshot</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td></tr>
+<tr><td style="text-align: left">Create New Snapshot</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td></tr>
+<tr><td style="text-align: left">Rename Table</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center"></td><td style="text-align: center">X</td></tr>
+<tr><td style="text-align: left">Drop Table</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td></tr>
+<tr><td style="text-align: left">Alter Table</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td></tr>
+<tr><td style="text-align: left">Check Table Exists</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td></tr>
+<tr><td style="text-align: left">Set Table Properties</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td></tr>
+<tr><td style="text-align: left">List Namespaces</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td></tr>
+<tr><td style="text-align: left">Create Namespace</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td></tr>
+<tr><td style="text-align: left">Check Namespace Exists</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td></tr>
+<tr><td style="text-align: left">Drop Namespace</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td></tr>
+<tr><td style="text-align: left">Update Namespace Properties</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center"></td><td style="text-align: center">X</td></tr>
+<tr><td style="text-align: left">Create View</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center"></td><td style="text-align: center">X</td><td style="text-align: center"></td><td style="text-align: center"></td></tr>
+<tr><td style="text-align: left">Load View</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center"></td><td style="text-align: center">X</td><td style="text-align: center"></td><td style="text-align: center"></td></tr>
+<tr><td style="text-align: left">List View</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center"></td><td style="text-align: center">X</td><td style="text-align: center"></td><td style="text-align: center"></td></tr>
+<tr><td style="text-align: left">Drop View</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center"></td><td style="text-align: center">X</td><td style="text-align: center"></td><td style="text-align: center"></td></tr>
+<tr><td style="text-align: left">Rename View</td><td style="text-align: center">X</td><td style="text-align: center"></td><td style="text-align: center"></td><td style="text-align: center">X</td><td style="text-align: center"></td><td style="text-align: center"></td></tr>
+<tr><td style="text-align: left">Update View</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center"></td><td style="text-align: center">X</td><td style="text-align: center"></td><td style="text-align: center"></td></tr>
+<tr><td style="text-align: left">Check View Exists</td><td style="text-align: center">X</td><td style="text-align: center">X</td><td style="text-align: center"></td><td style="text-align: center">X</td><td style="text-align: center"></td><td style="text-align: center"></td></tr>
 </tbody></table>
 </div>
-<p>A Hadoop catalog is also available - see <a href="https://github.com/apache/iceberg-go/tree/main/catalog/hadoop"><code>catalog/hadoop</code></a>.</p>
+<p>REST operations depend on the server's available endpoints. SQL view operations
+require the V1 JDBC catalog schema. See the
+<a href="./configuration.html#dynamodb-catalogdynamodb">configuration guide</a> for DynamoDB setup.</p>
 <h2 id="read--write-data"><a class="header" href="#read--write-data">Read / write data</a></h2>
 <p>Data can be read as an Arrow <code>Table</code> or as a stream of Arrow record batches via <code>iter.Seq2</code>. See <a href="./api.html">API Reference</a>.</p>
+<div class="table-wrapper"><table><thead><tr><th style="text-align: left">Data file format</th><th style="text-align: center">Reads</th><th style="text-align: center">Writes</th></tr></thead><tbody>
+<tr><td style="text-align: left">Parquet</td><td style="text-align: center">X</td><td style="text-align: center">X</td></tr>
+<tr><td style="text-align: left">Avro</td><td style="text-align: center">X</td><td style="text-align: center"></td></tr>
+</tbody></table>
+</div>
+<p>Avro reads whole files, with projection after decoding. Nullable unions
+contain <code>null</code> and one value type.</p>
 <h3 id="supported-write-operations"><a class="header" href="#supported-write-operations">Supported write operations</a></h3>
 <p>As long as the FileSystem is supported and the Catalog supports altering the table:</p>
 <div class="table-wrapper"><table><thead><tr><th style="text-align: left">Operation</th><th style="text-align: center">Supported</th></tr></thead><tbody>
