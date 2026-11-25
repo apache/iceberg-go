@@ -63,6 +63,36 @@ func TestDecideDeadEqualityDeletesWithSpecs_Predicate(t *testing.T) {
 			expectsDead: false,
 		},
 		{
+			name: "float partition promoted to double, surviving D written before ⇒ alive",
+			survivors: []survivor{
+				{specID: 1, partition: map[int]any{1000: float32(1.1)}, seq: 3},
+			},
+			eqSpecID:    1,
+			eqPart:      map[int]any{1000: float64(float32(1.1))},
+			eqSeq:       5,
+			expectsDead: false,
+		},
+		{
+			name: "float partition promoted to double, different value ⇒ dead",
+			survivors: []survivor{
+				{specID: 1, partition: map[int]any{1000: float32(1.1)}, seq: 3},
+			},
+			eqSpecID:    1,
+			eqPart:      map[int]any{1000: 1.1},
+			eqSeq:       5,
+			expectsDead: true,
+		},
+		{
+			name: "float partition never promoted, surviving D written before ⇒ alive",
+			survivors: []survivor{
+				{specID: 1, partition: map[int]any{1000: float32(1.1)}, seq: 3},
+			},
+			eqSpecID:    1,
+			eqPart:      map[int]any{1000: float32(1.1)},
+			eqSeq:       5,
+			expectsDead: false,
+		},
+		{
 			name: "partition match, surviving D has higher seq ⇒ dead",
 			survivors: []survivor{
 				{specID: 1, partition: map[int]any{1000: "us"}, seq: 9},

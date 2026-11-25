@@ -69,12 +69,12 @@ func TestColumnPathSegmentsContainers(t *testing.T) {
 
 	schema := NewSchema(0,
 		NestedField{ID: 1, Name: "items", Type: &ListType{
-			ElementID: 2,
-			Element:   &StructType{FieldList: []NestedField{{ID: 3, Name: "pay.load", Type: VariantType{}}}},
+			elementID: 2,
+			element:   &StructType{fields: []NestedField{{ID: 3, Name: "pay.load", Type: VariantType{}}}},
 		}},
 		NestedField{ID: 4, Name: "attributes", Type: &MapType{
-			KeyID: 5, KeyType: PrimitiveTypes.String,
-			ValueID: 6, ValueType: &StructType{FieldList: []NestedField{{ID: 7, Name: "pay.load", Type: VariantType{}}}},
+			keyID: 5, keyType: PrimitiveTypes.String,
+			valueID: 6, valueType: &StructType{fields: []NestedField{{ID: 7, Name: "pay.load", Type: VariantType{}}}},
 		}},
 	)
 	for _, tt := range []struct {
@@ -121,7 +121,7 @@ func TestTranslateColumnNamesForScanNestedSourcePath(t *testing.T) {
 func columnPathTestSchema(names []string) *Schema {
 	field := NestedField{ID: len(names), Name: names[len(names)-1], Type: VariantType{}}
 	for i := len(names) - 2; i >= 0; i-- {
-		field = NestedField{ID: i + 1, Name: names[i], Type: &StructType{FieldList: []NestedField{field}}}
+		field = NestedField{ID: i + 1, Name: names[i], Type: &StructType{fields: []NestedField{field}}}
 	}
 
 	return NewSchema(0, field)

@@ -406,6 +406,44 @@ func TestPositionDeletePartitionedFanoutWriterRoutesPartitionsIndependently(t *t
 	assert.Equal(t, int64(1), byPart[2].Count(), "id=2 delete file must contain only the one row targeting pathB")
 }
 
+func TestPositionDeletePartitionedFanoutWriterReportsFailedUploadAfterWriterLeftFactory(t *testing.T) {
+	metadataBuilder := newPositionDeletePartitionedMetadata(t, 2)
+	latestMeta, err := metadataBuilder.Build()
+	require.NoError(t, err)
+
+	const path = "file://namespace/age_bucket=1/test.parquet"
+	pathToCtx := map[string]partitionContext{
+		path: {partitionData: map[int]any{iceberg.PartitionDataIDStart: 1}, specID: 0},
+	}
+	batch := mustLoadRecordBatchFromJSON(PositionalDeleteArrowSchema,
+		fmt.Sprintf(`[{"file_path": %q, "pos": 0}]`, path))
+	defer batch.Release()
+
+	fs := newFailingCloseFS()
+	writeUUID := uuid.New()
+	// A one byte target rolls to a new file, and so closes it, after the batch.
+	factory, err := newWriterFactory(t.TempDir(), recordWritingArgs{
+		fs:        fs,
+		sc:        PositionalDeleteArrowSchema,
+		writeUUID: &writeUUID,
+		counter:   internal.Counter(0),
+	}, metadataBuilder, iceberg.PositionalDeleteSchema, 1,
+		withContentType(iceberg.EntryContentPosDeletes),
+		withFactoryFileSchema(iceberg.PositionalDeleteSchema))
+	require.NoError(t, err)
+
+	itr := fs.batchThenWriterExit(factory, batch)
+	var writeErr error
+	for _, iterErr := range newPositionDeletePartitionedFanoutWriter(latestMeta, pathToCtx, itr, factory).Write(t.Context()) {
+		if iterErr != nil {
+			writeErr = iterErr
+		}
+	}
+
+	assert.Equal(t, int64(1), fs.created.Load())
+	assert.ErrorContains(t, writeErr, "upload failed")
+}
+
 func TestPositionDeletePartitionedFanoutWriterEarlyStopCancelsRecordProduction(t *testing.T) {
 	t.Parallel()
 

@@ -39,8 +39,11 @@ The script requires:
 - `gpg`
 - `shasum` or `sha512sum`
 - `tar`
+- Java and Python 3 for the RAT license check
+- `jq` if the script needs to download Go
 
-You do not need Go installed - if Go is not on the system, the latest Go is downloaded automatically and used only for verification.
+Use a Go toolchain that meets the requirement in the candidate's `go.mod`.
+If Go is unavailable, the script downloads a toolchain for verification.
 
 ## Import the Apache Iceberg KEYS
 
@@ -51,16 +54,18 @@ gpg --import KEYS
 
 ## Run the verification script
 
-The script takes the version and RC number as positional arguments:
+Pass the version and RC number. Use a disposable module cache because the
+script cleans it on exit. Run with `GITHUB_TOKEN` unset to keep it out of
+shell traces if the script downloads Go.
 
 ```sh
-dev/release/verify_rc.sh ${VERSION} ${RC}
+env -u GITHUB_TOKEN GOMODCACHE="$(mktemp -d)" dev/release/verify_rc.sh ${VERSION} ${RC}
 ```
 
 For example, to verify `0.6.0` RC1:
 
 ```sh
-dev/release/verify_rc.sh 0.6.0 1
+env -u GITHUB_TOKEN GOMODCACHE="$(mktemp -d)" dev/release/verify_rc.sh 0.6.0 1
 ```
 
 If the verification succeeds, the script prints:
@@ -77,9 +82,8 @@ RC looks good!
 |---|---|---|
 | `VERIFY_DEFAULT` | `1` | Master switch propagated to `VERIFY_DOWNLOAD` and `VERIFY_SIGN` if they are unset. |
 | `VERIFY_DOWNLOAD` | `${VERIFY_DEFAULT}` | Re-download artifacts when `1`; reuse the local copy when `0`. |
-| `VERIFY_SIGN` | `${VERIFY_DEFAULT}` | Re-run signature and checksum verification when `1`. |
+| `VERIFY_SIGN` | `${VERIFY_DEFAULT}` | Verify the signature when `1`. The script always checks the checksum. |
 | `VERIFY_FORCE_USE_GO_BINARY` | `0` | When `1`, ignore any system Go and use the script's auto-downloaded Go. |
-| `GITHUB_TOKEN` | unset | Optional - supplies authenticated requests when fetching the latest Go release, avoiding rate limits. |
 
 ## Manual verification fallback
 
@@ -97,8 +101,14 @@ gpg --verify apache-iceberg-go-${VERSION}.tar.gz.asc apache-iceberg-go-${VERSION
 # Verify the checksum (or sha512sum -c on systems without shasum)
 shasum -a 512 --check apache-iceberg-go-${VERSION}.tar.gz.sha512
 
-# Inspect the contents
-tar xf apache-iceberg-go-${VERSION}.tar.gz
+# Inspect the archive, check licenses, and run the unit tests
+archive="apache-iceberg-go-${VERSION}"
+tar xf "${archive}.tar.gz"
+(
+  cd "${archive}"
+  dev/release/run_rat.sh "../${archive}.tar.gz"
+  go test ./...
+)
 ```
 
-You should reply to the `[VOTE]` thread with `+1`, `+0`, or `-1` and a one-line description of what you verified (for example, "verified signatures, checksums, and `verify_rc.sh` passed on macOS arm64 with system Go 1.25.5").
+You should reply to the `[VOTE]` thread with `+1`, `+0`, or `-1` and a one-line description of what you verified (for example, "verified signatures, checksums, and `verify_rc.sh` passed on macOS arm64").

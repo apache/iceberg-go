@@ -813,6 +813,11 @@ func (b *MetadataBuilder) AddSchema(schema *iceberg.Schema) error {
 	if err := checkSchemaCompatibility(schema, b.formatVersion); err != nil {
 		return err
 	}
+	// The schema is stored with the caller's IDs, and reading metadata rejects
+	// duplicate IDs, including 0 and negatives, so reject them here too.
+	if err := validateUniqueFieldIDs(schema); err != nil {
+		return err
+	}
 
 	newSchemaID := b.reuseOrCreateNewSchemaID(schema)
 
@@ -2747,7 +2752,7 @@ func cloneSchema(schema *iceberg.Schema) *iceberg.Schema {
 
 	return iceberg.NewSchemaWithIdentifiers(
 		schema.ID,
-		slices.Clone(schema.IdentifierFieldIDs),
+		schema.IdentifierFieldIDs(),
 		schema.Fields()...,
 	)
 }

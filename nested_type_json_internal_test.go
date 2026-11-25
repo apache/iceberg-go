@@ -31,19 +31,19 @@ import (
 // field. It walks unexported fields too, so it keeps working after #2062.
 func TestNestedTypeJSONRoundTripsEveryField(t *testing.T) {
 	t.Run("StructType", func(t *testing.T) {
-		requireJSONRoundTripsEveryField(t, StructType{FieldList: []NestedField{
+		requireJSONRoundTripsEveryField(t, StructType{fields: []NestedField{
 			{ID: 1, Name: "a", Type: PrimitiveTypes.Int32, Required: true},
 		}})
 	})
 	t.Run("ListType", func(t *testing.T) {
 		requireJSONRoundTripsEveryField(t, ListType{
-			ElementID: 1, Element: PrimitiveTypes.String, ElementRequired: true,
+			elementID: 1, element: PrimitiveTypes.String, elementRequired: true,
 		})
 	})
 	t.Run("MapType", func(t *testing.T) {
 		requireJSONRoundTripsEveryField(t, MapType{
-			KeyID: 1, KeyType: PrimitiveTypes.String,
-			ValueID: 2, ValueType: PrimitiveTypes.Int32, ValueRequired: true,
+			keyID: 1, keyType: PrimitiveTypes.String,
+			valueID: 2, valueType: PrimitiveTypes.Int32, valueRequired: true,
 		})
 	})
 	t.Run("NestedField", func(t *testing.T) {

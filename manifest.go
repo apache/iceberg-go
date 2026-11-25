@@ -1732,7 +1732,7 @@ type partitionSummaryStats struct {
 }
 
 func newPartitionSummaryStats(spec PartitionSpec, schema *Schema) (*partitionSummaryStats, error) {
-	fields := spec.PartitionType(schema).FieldList
+	fields := spec.PartitionType(schema).fields
 	stats := make([]fieldStats, len(fields))
 	var err error
 	for i, field := range fields {

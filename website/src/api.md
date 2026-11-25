@@ -19,7 +19,7 @@
 
 # API
 
-The Go API surface for Apache Iceberg Go. New to the project? Walk through the [Getting Started](./getting-started.md) tutorial first - the recipes here assume you already have a catalog and a table.
+This reference follows the development branch of Apache Iceberg Go. New to the project? Walk through the [Getting Started](./getting-started.md) tutorial first - the recipes here assume you already have a catalog and a table.
 
 For configuration knobs (catalog options, FileIO credentials, table properties), see [Configuration](./configuration.md). For predicate construction details, see [Row Filter Syntax](./row-filter-syntax.md) and [Expression DSL](./expression-dsl.md).
 
@@ -40,12 +40,15 @@ import (
 
 cat, err := rest.NewCatalog(context.Background(), "rest", "http://localhost:8181",
     rest.WithOAuthToken("your-token"))
+if err != nil { panic(err) }
+defer cat.Close()
 ```
 
 #### SQL (SQLite, Postgres, MySQL, Oracle, MSSQL)
 
 ```go
 import (
+    "context"
     "database/sql"
 
     "github.com/apache/iceberg-go"
@@ -54,29 +57,38 @@ import (
 )
 
 db, err := sql.Open(sqliteshim.ShimName, "file:catalog.db")
-// handle err
+if err != nil { panic(err) }
+defer db.Close()
 cat, err := sqlcat.NewCatalog(context.Background(), "default", db, sqlcat.SQLite, iceberg.Properties{
     "warehouse": "file:///tmp/warehouse",
 })
+if err != nil { panic(err) }
+defer cat.Close()
 ```
 
 #### Glue
 
 ```go
 import (
+    "context"
+
     "github.com/apache/iceberg-go/catalog/glue"
     "github.com/aws/aws-sdk-go-v2/config"
 )
 
 awsCfg, err := config.LoadDefaultConfig(context.TODO())
-// handle err
-cat := glue.NewCatalog(glue.WithAWSConfig(awsCfg))
+if err != nil { panic(err) }
+cat, err := glue.NewCatalog(glue.WithAWSConfig(awsCfg))
+if err != nil { panic(err) }
+defer cat.Close()
 ```
 
 #### Hive
 
 ```go
 import (
+    "context"
+
     "github.com/apache/iceberg-go"
     "github.com/apache/iceberg-go/catalog/hive"
 )
@@ -84,18 +96,23 @@ import (
 cat, err := hive.NewCatalog(context.Background(), iceberg.Properties{},
     hive.WithURI("thrift://localhost:9083"),
     hive.WithWarehouse("s3://my-bucket/warehouse"))
+if err != nil { panic(err) }
+defer cat.Close()
 ```
 
 #### Hadoop
 
 ```go
 import (
+    "context"
+
     "github.com/apache/iceberg-go"
     "github.com/apache/iceberg-go/catalog/hadoop"
-    "context"
 )
 
 cat, err := hadoop.NewCatalog(context.Background(), "default", "file:///tmp/warehouse", iceberg.Properties{})
+if err != nil { panic(err) }
+defer cat.Close()
 ```
 
 #### Via the registry
@@ -106,6 +123,7 @@ cat, err := hadoop.NewCatalog(context.Background(), "default", "file:///tmp/ware
 import (
     "github.com/apache/iceberg-go"
     "github.com/apache/iceberg-go/catalog"
+    _ "github.com/apache/iceberg-go/catalog/rest"
 )
 
 cat, err := catalog.Load(ctx, "default", iceberg.Properties{
@@ -139,6 +157,9 @@ err = cat.DropNamespace(ctx, ns)
 
 `table.Identifier` is `[]string`; use `catalog.ToIdentifier("sales", "orders")` (or `catalog.ToIdentifier("sales.orders")`) to build one from string parts.
 
+Use `errors.Is(err, catalog.ErrNamespaceAlreadyExists)` to recognize an
+existing namespace when retrying creation.
+
 ### Tables
 
 #### Defining a schema
@@ -153,7 +174,7 @@ schema := iceberg.NewSchema(1,
 )
 ```
 
-For nested types use `&iceberg.StructType{...}`, `&iceberg.ListType{...}`, or `&iceberg.MapType{...}`. Use `NewSchemaWithIdentifiers(id, identifierIDs, fields...)` to mark identifier columns.
+For nested types use `iceberg.NewStructType(fields...)`, `iceberg.NewListType(elementID, element, required)`, or `iceberg.NewMapType(keyID, key, valueID, value, valueRequired)`. Their fields can't be assigned directly: read them through accessors, and to change one, build a new value. Use `NewSchemaWithIdentifiers(id, identifierIDs, fields...)` to mark identifier columns.
 
 #### Create
 
@@ -191,6 +212,18 @@ renamed, err := cat.RenameTable(ctx,
 
 `ListTables` returns an `iter.Seq2[table.Identifier, error]` that streams results.
 
+Use `catalog.As[catalog.RegisterableCatalog](cat)` to discover table
+registration support. `RegisterTable(ctx, ident, metadataLocation)`
+registers a table from an existing metadata file and returns the table.
+
+For a REST table with catalog-vended storage credentials, discover
+`catalog.RefreshableCredentialCatalog` with `catalog.As`. If the server
+supports the credentials endpoint, `RefreshTableCredentials(ctx, tbl)`
+returns the table to use for subsequent operations. When building a table
+yourself with `table.New`, pass `table.WithSavedConfig` so its file I/O
+properties are available to the refresh. REST-loaded tables and views also
+expose catalog-provided labels through `Labels()`.
+
 #### Inspecting metadata
 
 ```go
@@ -223,6 +256,10 @@ for mf, err := range tbl.AllManifests(ctx) {
 ## Reading data
 
 `(t Table) Scan(opts ...ScanOption) *Scan` returns a scan that you can resolve into Arrow data.
+
+Parquet and Avro data files are readable. Avro scan tasks must cover the
+whole file. The reader decodes the file before projecting columns, and
+supports nullable unions with `null` and one value type.
 
 ### Streaming record batches
 
@@ -271,6 +308,14 @@ scan := tbl.Scan(
 ```
 
 For the predicate vocabulary, see [Row Filter Syntax](./row-filter-syntax.md).
+
+### Dictionary-encoded columns
+
+```go
+scan := tbl.Scan(table.WithDictionaryColumns("region", "event.name"))
+```
+
+`WithDictionaryColumns` returns the named string and binary columns as Arrow dictionary arrays. Requested columns always have type `dictionary<int32, utf8>` or `dictionary<int32, binary>`, even with `arrow.use_large_types`. The dictionary can change from one batch to the next, so don't rely on dictionary identity across batches. Filtering on a requested column decodes the dictionary for each batch to evaluate the predicate, so a filtered scan may not be faster.
 
 ### Time travel
 
@@ -436,6 +481,11 @@ if err != nil { /* ... */ }
 newTbl, err := txn.Commit(ctx)
 ```
 
+For bucket-partitioned Parquet files, provide each file's partition tuple
+with `WithAddDataFilesByPathPartitionValues`. Key the values by file path
+and partition field ID. Supply every non-void partition field, and make
+sure the values describe every row in the file.
+
 `ReplaceDataFilesByPath(ctx, filesToDelete, filesToAdd, snapshotProps)` performs an
 **overwrite** of existing files. It is suitable when the logical table data
 changes. `ReplaceDataFiles(ctx, filesToDelete, dataFilesToAdd, snapshotProps, opts...)`
@@ -517,6 +567,12 @@ other conflicts can be retried under the normal commit retry policy.
 
 `Commit` retries a conflict (`ErrCommitFailed`) up to `commit.retry.num-retries` times, 4 by default. See [Automatic retry](./concurrent-writes.md#automatic-retry) for the `commit.retry.*` table properties.
 
+`txn.SetLocation(location)` stages a new table base location in the same
+storage scheme and authority, including the bucket or container where
+applicable. Existing files keep their paths. New writes use the staged base
+and honor explicit write-path properties. Commit the transaction to publish
+the change.
+
 ## Schema and partition evolution
 
 ### Schema evolution
@@ -580,6 +636,9 @@ Replacing the default sort order affects future writes; it does not rewrite exis
 
 The Go writers currently support only top-level sort columns. A nested-field order can be registered, as in Java, but a later append fails until the default order is replaced.
 
+Use `SortOrder.Satisfies(required)` to compare sort metadata using Iceberg's
+transform ordering rules.
+
 ## Snapshots and refs
 
 ### Inspecting
@@ -623,7 +682,10 @@ and [manifest specification](https://iceberg.apache.org/spec/#manifests).
 
 ### Branches and tags
 
-The CLI's `branch create` and `tag create` commands ([CLI](./cli.md)) are the most ergonomic surface today. Programmatically, ref creation goes through `Catalog.CommitTable` with a `SetSnapshotRef` update:
+To create a branch or tag at an existing snapshot, use `branch create` or
+`tag create` in the [CLI](./cli.md). In Go, call `Catalog.CommitTable` with
+`table.NewSetSnapshotRefUpdate` to choose the starting snapshot and any retention
+settings. This example uses the table's current snapshot:
 
 ```go
 import "github.com/apache/iceberg-go/table"
@@ -645,7 +707,20 @@ reqs := []table.Requirement{
 _, _, err := cat.CommitTable(ctx, tbl.Identifier(), reqs, []table.Update{update})
 ```
 
-Constants `table.MainBranch`, `table.BranchRef`, `table.TagRef` live in [`table/refs.go`](https://github.com/apache/iceberg-go/blob/main/table/refs.go). A higher-level builder is on the roadmap.
+To create a branch with its first append, target it with
+`tbl.NewTransactionOnBranch`. The append starts from `main` if the branch is
+missing and creates the branch on commit. An append to an existing branch
+builds on that branch's head:
+
+```go
+txn, err := tbl.NewTransactionOnBranch("audit")
+if err != nil { /* ... */ }
+if err := txn.AppendTable(ctx, arrowTbl, 1024, nil); err != nil { /* ... */ }
+updated, err := txn.Commit(ctx)
+```
+
+See [reading from a branch or tag](#reading-from-a-branch-or-tag) to scan
+the updated ref.
 
 ### Branch promotion and replacement
 
@@ -685,6 +760,10 @@ fast-forwards to fail. Load with `snapshot-loading-mode=all` instead.
 Replacing by snapshot ID can also fail if the requested historical snapshot
 was omitted. See [Concurrent Writes](./concurrent-writes.md).
 
+`tbl.RenameBranch(ctx, from, to)` renames a non-main branch to an unused
+name and preserves its snapshot and retention settings. Use
+`txn.RenameBranch(from, to)` to stage the rename alongside other updates.
+
 ### Expiration and rollback
 
 ```go
@@ -694,6 +773,9 @@ err := txn.ExpireSnapshots(/* options */)
 // Roll back to a previous snapshot
 err = txn.RollbackToSnapshot(targetSnapshotID)
 ```
+
+`txn.RollbackToTime(timestampMs)` selects the latest reachable ancestor
+strictly before the given Unix timestamp in milliseconds.
 
 Tune retention with the `history.expire.min-snapshots-to-keep`, `history.expire.max-snapshot-age-ms`, and `history.expire.max-ref-age-ms` table properties (see [Configuration](./configuration.md)).
 
@@ -769,6 +851,42 @@ The table must have a snapshot and at least one partition field in its spec
 history. Dropped partition source fields and changed transform result types are
 not supported. A concurrent change to the target branch, current schema, or
 partition layout rejects the commit. Statistics do not create a new snapshot.
+
+### Puffin statistics
+
+`puffin.Writer.AddBlob` accepts `BlobMetadataInput.CompressionCodec` with
+`CompressionCodecLZ4` or `CompressionCodecZstd`. `puffin.Reader.ReadBlob`
+decodes the stored codec. Write deletion-vector blobs with an empty codec.
+
+`tbl.ComputeNDVs(ctx, snapshotID, columns...)` scans the selected snapshot and
+returns estimated distinct counts and serialized Theta sketches keyed by
+Iceberg field ID. Pass `0` for the current snapshot. Omit the column names to
+analyze all supported top-level primitive columns in the snapshot schema.
+Geometry, geography, and unknown types are skipped by default. Explicit column
+names must refer to supported top-level primitive columns. The estimates
+exclude null values and empty strings and binary values.
+
+Use `table/stats.NewSketch` to build a sketch directly from serialized Iceberg
+single values, and `NewUnion` to merge compatible sketches. The serialized
+sketch is the payload for an `apache-datasketches-theta-v1` Puffin blob.
+
+After writing a Puffin statistics file, pass its snapshot ID, path, sizes,
+and blob metadata to `txn.SetStatistics`. Commit to publish the reference.
+`txn.RemoveStatistics(snapshotID)` stages removal of the reference.
+
+### Delete-file maintenance
+
+- `RewritePositionDeleteFiles` compacts compatible v2 Parquet position-delete
+  files from the current partition spec that have no deleted-row payload.
+- `ConvertEqualityDeletesToDeletionVectors` rewrites live equality deletes
+  on a v3 table as file-specific deletion vectors.
+- `PlanDanglingDeleteFiles` identifies whole delete files that apply to no
+  data file in the target snapshot. `RemoveDanglingDeleteFiles` removes their
+  references on v2 and v3. The physical files remain available to older
+  snapshots that reference them.
+
+The table-level methods operate on `main`. Use the transaction variants to
+target another branch or combine changes, then commit the transaction.
 
 ### Orphan file cleanup
 
@@ -907,6 +1025,10 @@ pass a filesystem factory from the registry. The IO-properties helpers
 keep filesystem configuration (`ioProps`) separate from persisted view
 properties (`metadataProps`). See
 [FileIO configuration](./configuration.md#file-system-credentials).
+
+Discover view updates with `catalog.As[catalog.UpdatableViewCatalog](cat)`.
+`catalog.RollbackView(ctx, cat, ident, versionID)` selects a retained version
+on a catalog that supports both loading and updating views.
 
 ## Iceberg ↔ Arrow types
 

@@ -431,8 +431,10 @@ func (t Table) Overwrite(ctx context.Context, rdr array.RecordReader, snapshotPr
 // On a v3 table, every data file the delete removes or rewrites takes its deletion vector with it.
 // A merge-on-read delete replaces the existing deletion vector of a file it deletes rows from.
 //
-// A commit that removes a deletion vector is not replayed: if another writer commits first,
-// it fails with ErrCommitFailed instead of refreshing and retrying, so reload the table and run the delete again.
+// A commit that removes a deletion vector, or that drops v2 position delete files because the first deletion
+// vector of a file replaces them, is not replayed: if another writer commits first, it fails with ErrCommitFailed
+// instead of refreshing and retrying. On a table upgraded from v2 the first delete after the upgrade can hit
+// this, so reload the table and run the delete again.
 //
 // The concurrency parameter controls the level of parallelism for manifest processing and file rewriting and
 // can be overridden using the WithOverwriteConcurrency option. Defaults to runtime.GOMAXPROCS(0).
@@ -1521,6 +1523,32 @@ func WithArrowBatchSize(n int) ScanOption {
 
 	return func(scan *Scan) {
 		scan.arrowBatchSize = n
+	}
+}
+
+// WithDictionaryColumns returns the named string and binary columns as Arrow
+// dictionary arrays. Names may be dotted paths to nested fields. They are
+// resolved when the scan reads, against the schema it reads with, honoring
+// [WithCaseSensitive].
+//
+// Requested columns always have type dictionary<int32, utf8> or
+// dictionary<int32, binary>, in the declared schema and in every batch, even
+// with the arrow.use_large_types option or when a data file stores the column
+// plain, as a large type, or as another dictionary type. Columns that are not
+// requested keep their usual types.
+//
+// The dictionary can differ from one batch to the next, including within a
+// file, so callers must not rely on dictionary identity across batches.
+//
+// Filtering on a requested column decodes the dictionary for each batch to
+// evaluate the predicate, so a filtered scan may not be faster.
+//
+// Reading fails if a name does not exist or names a column of another type. A
+// valid name that the scan does not project is ignored. Repeated calls replace
+// the earlier list.
+func WithDictionaryColumns(names ...string) ScanOption {
+	return func(scan *Scan) {
+		scan.dictionaryColumns = slices.Clone(names)
 	}
 }
 
