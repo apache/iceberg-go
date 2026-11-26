@@ -340,7 +340,7 @@
 <li><code>MapType.KeyID</code>, <code>KeyType</code>, <code>ValueID</code>, <code>ValueType</code> and <code>ValueRequired</code> become <code>KeyID()</code>, <code>KeyType()</code>, <code>ValueID()</code>, <code>ValueType()</code> and <code>ValueRequired()</code>.</li>
 <li><code>Schema.IdentifierFieldIDs</code> is unexported too and becomes <code>IdentifierFieldIDs()</code>, which returns a copy. Set the IDs with <code>NewSchemaWithIdentifiers</code>, which keeps its own copy of the slice it is given.</li>
 </ul>
-<p>Pointers to these types and <code>Schema</code> encode to the same JSON as before. Values of these types, such as the result of <code>Schema.AsStruct()</code>, now encode like pointers instead of a partial form without <code>&quot;type&quot;</code>.</p>
+<p>Pointers to these types and <code>Schema</code> encode to the same JSON as before. Values of these types, such as the result of <code>Schema.AsStruct()</code>, now encode like pointers instead of a partial form without <code>&quot;type&quot;</code>, in which list and map values also dropped their element, key and value types.</p>
 </li>
 <li>
 <p><strong><code>io.StatIO.Stat</code> accepts a context.</strong> The method now takes a <code>context.Context</code> before the path, so custom <code>StatIO</code> implementations and callers must pass the operation context.</p>
