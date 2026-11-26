@@ -115,6 +115,75 @@ func TestExecuteOrphanCleanupRejectsStalePlanWhenFileBecomesLive(t *testing.T) {
 	require.Empty(t, result.DeletedFiles)
 }
 
+func TestOrphanCleanupRejectsRefsOnlyHistoryAfterRefresh(t *testing.T) {
+	ctx := t.Context()
+	fs := iceio.NewMemFS()
+	const location = "mem://stale-plan/refs-only"
+	const metadataLocation = location + "/metadata/v1.metadata.json"
+	const orphanPath = location + "/data/orphan.parquet"
+	meta, err := table.NewMetadata(iceberg.NewSchema(0), iceberg.UnpartitionedSpec,
+		table.UnsortedSortOrder, location, nil)
+	require.NoError(t, err)
+	var fsCalls int
+	fsF := func(context.Context) (iceio.IO, error) {
+		fsCalls++
+
+		return fs, nil
+	}
+	catalog := &orphanCleanupTestCatalog{metadata: meta, location: metadataLocation, fsF: fsF}
+	tbl := table.New(table.Identifier{"db", "refs_only_refresh"}, meta, metadataLocation, fsF, catalog)
+	require.NoError(t, fs.WriteFile(ctx, orphanPath, []byte("orphan")))
+	plan, err := PlanOrphanFiles(ctx, tbl, WithCleanupFilesOlderThan(0))
+	require.NoError(t, err)
+	require.Equal(t, []string{orphanPath}, plan.Files())
+
+	for _, tc := range []struct {
+		name        string
+		savedPlan   bool
+		wantLoads   int
+		wantFSCalls int
+	}{
+		{name: "saved plan", savedPlan: true, wantLoads: 1},
+		{name: "before planning", wantLoads: 1},
+		{name: "after planning", wantLoads: 2, wantFSCalls: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			catalog.refsOnly = false
+			catalog.loadCalls = 0
+			fsCalls = 0
+			switchCatalogToRefs := func() error {
+				// The metadata location stays the same when only the load mode changes.
+				catalog.refsOnly = true
+
+				return nil
+			}
+			catalog.beforeLoad = switchCatalogToRefs
+			if tc.wantLoads == 2 {
+				catalog.beforeLoad = func() error {
+					catalog.beforeLoad = switchCatalogToRefs
+
+					return nil
+				}
+			}
+
+			var cleanupErr error
+			if tc.savedPlan {
+				_, cleanupErr = ExecuteOrphanCleanup(ctx, tbl, plan)
+			} else {
+				_, cleanupErr = DeleteOrphanFiles(ctx, tbl, WithCleanupFilesOlderThan(0))
+			}
+			require.ErrorIs(t, cleanupErr, table.ErrInvalidOperation)
+			require.ErrorContains(t, cleanupErr, "snapshot-loading-mode=refs")
+			require.Equal(t, tc.wantLoads, catalog.loadCalls)
+			require.Equal(t, tc.wantFSCalls, fsCalls, "only the after-planning refresh should follow filesystem access")
+			file, err := fs.Open(ctx, orphanPath)
+			require.NoError(t, err)
+			require.NoError(t, file.Close())
+			require.False(t, tbl.SnapshotHistoryLimitedToRefs())
+		})
+	}
+}
+
 func TestDeleteOrphanFilesRefreshesAroundPlanning(t *testing.T) {
 	for _, afterPlanning := range []bool{false, true} {
 		name := "peer commits before cleanup"
@@ -334,10 +403,13 @@ type orphanCleanupTestCatalog struct {
 	location   string
 	fsF        table.FSysF
 	nextFile   int
+	loadCalls  int
 	beforeLoad func() error
+	refsOnly   bool
 }
 
 func (c *orphanCleanupTestCatalog) LoadTable(_ context.Context, ident table.Identifier) (*table.Table, error) {
+	c.loadCalls++
 	if c.beforeLoad != nil {
 		beforeLoad := c.beforeLoad
 		c.beforeLoad = nil
@@ -346,7 +418,7 @@ func (c *orphanCleanupTestCatalog) LoadTable(_ context.Context, ident table.Iden
 		}
 	}
 
-	return table.New(ident, c.metadata, c.location, c.fsF, c), nil
+	return table.New(ident, c.metadata, c.location, c.fsF, c, table.WithSnapshotHistoryLimitedToRefs(c.refsOnly)), nil
 }
 
 func (c *orphanCleanupTestCatalog) CommitTable(
