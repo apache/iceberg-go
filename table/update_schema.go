@@ -402,6 +402,15 @@ func (u *UpdateSchema) addColumn(path []string, fieldType iceberg.Type, doc stri
 		}
 
 		parentID = parentField.ID
+
+		// Walk up from the parent so a deleted ancestor is caught too. For a
+		// list or map, parentID is the element or value struct, and its parent
+		// in u.parentID is the list or map column itself.
+		for id := parentID; id != TableRootID; id = u.findParentID(id) {
+			if u.isDeleted(id) {
+				return fmt.Errorf("cannot add to a column that will be deleted: %s", parentFullPath)
+			}
+		}
 	}
 
 	name := path[len(path)-1]
