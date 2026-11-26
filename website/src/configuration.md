@@ -515,11 +515,10 @@ fs, err := registry.LoadFS(ctx, props, "myfs://bucket/key")
 
 `io.NewRegistry()` copies schemes already registered globally (including blank-imported cloud backends) but keeps later registrations independent. `registry.Clone()` makes an isolated copy of another registry. `registry.Names()` lists the schemes registered in that instance. `registry.LoadFSFunc()` is the lazy factory equivalent. Global `io.LoadFS()` and `io.LoadFSFunc()` continue using the default registry.
 
-Pass `catalog.WithIORegistry(registry)` to `catalog.Load` or `(*catalog.Registry).Load`
-to select FileIO for a built-in catalog. For DynamoDB, use a catalog loader to
-supply a scoped FileIO registry. Glue, Hadoop, Hive, REST, and SQL also accept
-their own `WithIORegistry` option in `NewCatalog`. View metadata helpers accept
-`view.WithIORegistry(registry)`.
+For DynamoDB, pass `catalog.WithIORegistry(registry)` to `catalog.Load` or
+`(*catalog.Registry).Load` to select FileIO. Glue, Hadoop, Hive, REST, and SQL
+accept the same load option and also provide their own `WithIORegistry` option
+in `NewCatalog`. View metadata helpers accept `view.WithIORegistry(registry)`.
 
 Omitting the option or passing nil uses the global registry. An empty
 non-nil registry has no registered schemes. A custom factory must implement

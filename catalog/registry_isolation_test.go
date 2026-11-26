@@ -126,7 +126,7 @@ func TestRegistryLoadPassesIORegistryToWrappedRegistrar(t *testing.T) {
 	require.NoError(t, err)
 
 	scoped := &iceio.Registry{}
-	_, err = reg.Load(t.Context(), "test", props, catalog.WithIORegistry(scoped))
+	_, err = reg.Load(t.Context(), "test", props, nil, catalog.WithIORegistry(scoped), nil)
 	require.NoError(t, err)
 	require.Len(t, received, 2)
 	require.Nil(t, received[0])

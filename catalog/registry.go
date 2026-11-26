@@ -91,6 +91,10 @@ func (f RegistrarFunc) GetCatalog(ctx context.Context, catalogName string, props
 }
 
 // IORegistryRegistrar is a factory that supports catalog-scoped FileIO.
+// When Load receives a non-nil FileIO registry, it calls GetCatalogWithIORegistry
+// instead of GetCatalog. A wrapper that embeds only Registrar must also implement
+// GetCatalogWithIORegistry to support scoped loads. Otherwise Load returns an
+// error wrapping iceberg.ErrNotImplemented.
 type IORegistryRegistrar interface {
 	Registrar
 	GetCatalogWithIORegistry(ctx context.Context, name string, props iceberg.Properties, registry *iceio.Registry) (Catalog, error)
@@ -112,7 +116,7 @@ type loadOptions struct {
 	ioRegistry *iceio.Registry
 }
 
-// LoadOption configures a catalog created by Load.
+// LoadOption configures a catalog created by Load. Load ignores nil options.
 type LoadOption func(*loadOptions)
 
 // WithIORegistry selects the FileIO factories for this catalog and its tables.
@@ -266,7 +270,9 @@ func (r *Registry) Load(ctx context.Context, name string, props iceberg.Properti
 
 	var options loadOptions
 	for _, opt := range opts {
-		opt(&options)
+		if opt != nil {
+			opt(&options)
+		}
 	}
 	if options.ioRegistry != nil {
 		factory, ok := cat.(IORegistryRegistrar)
