@@ -118,13 +118,13 @@ func (c *compatibilityChecker) Struct(readStruct StructType, fieldErrors []func(
 	}
 
 	if c.checkOrdering {
-		ordinals := make(map[int]int, len(st.FieldList))
-		for i, f := range st.FieldList {
+		ordinals := make(map[int]int, len(st.fields))
+		for i, f := range st.fields {
 			ordinals[f.ID] = i
 		}
 
 		lastOrdinal, lastName := -1, ""
-		for _, readField := range readStruct.FieldList {
+		for _, readField := range readStruct.fields {
 			ordinal, ok := ordinals[readField.ID]
 			if !ok {
 				continue
@@ -155,7 +155,7 @@ func (c *compatibilityChecker) Field(readField NestedField, fieldErrors func() [
 		writeField NestedField
 		found      bool
 	)
-	for _, f := range st.FieldList {
+	for _, f := range st.fields {
 		if f.ID == readField.ID {
 			writeField, found = f, true
 
@@ -198,11 +198,11 @@ func (c *compatibilityChecker) List(readList ListType, elementErrors func() []st
 	}
 
 	var errs []string
-	if readList.ElementRequired && !list.ElementRequired {
+	if readList.elementRequired && !list.elementRequired {
 		errs = append(errs, ": elements should be required, but are optional")
 	}
 
-	c.current, c.inContainer = list.Element, true
+	c.current, c.inContainer = list.element, true
 	defer func() { c.current = list }()
 
 	return append(errs, elementErrors()...)
@@ -216,14 +216,14 @@ func (c *compatibilityChecker) Map(readMap MapType, keyErrors, valueErrors func(
 	defer func() { c.current = m }()
 
 	var errs []string
-	if readMap.ValueRequired && !m.ValueRequired {
+	if readMap.valueRequired && !m.valueRequired {
 		errs = append(errs, ": values should be required, but are optional")
 	}
 
-	c.current, c.inContainer = m.KeyType, true
+	c.current, c.inContainer = m.keyType, true
 	errs = append(errs, keyErrors()...)
 
-	c.current, c.inContainer = m.ValueType, true
+	c.current, c.inContainer = m.valueType, true
 
 	return append(errs, valueErrors()...)
 }

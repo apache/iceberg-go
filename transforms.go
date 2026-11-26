@@ -1200,7 +1200,8 @@ func (YearTransform) Apply(value Optional[Literal]) (out Optional[Literal]) {
 func (YearTransform) ToHumanString(_ Type, val any) string {
 	switch v := val.(type) {
 	case int32:
-		return strconv.Itoa(int(v) + epochTM.Year())
+		// %04d matches Java's TransformUtil.humanYear and PyIceberg's to_human_year.
+		return fmt.Sprintf("%04d", int(v)+epochTM.Year())
 	default:
 		return "null"
 	}

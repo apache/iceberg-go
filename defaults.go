@@ -120,39 +120,39 @@ func normalizeTypeDefaults(typ Type) (Type, bool) {
 		if typ == nil {
 			return nil, false
 		}
-		fields, ok := normalizeDefaults(typ.FieldList)
+		fields, ok := normalizeDefaults(typ.fields)
 		if !ok {
 			return nil, false
 		}
 
-		return &StructType{FieldList: fields}, true
+		return &StructType{fields: fields}, true
 	case *ListType:
 		if typ == nil {
 			return nil, false
 		}
-		elem, ok := normalizeTypeDefaults(typ.Element)
+		elem, ok := normalizeTypeDefaults(typ.element)
 		if !ok {
 			return nil, false
 		}
 		cloned := *typ
-		cloned.Element = elem
+		cloned.element = elem
 
 		return &cloned, true
 	case *MapType:
 		if typ == nil {
 			return nil, false
 		}
-		key, keyOK := normalizeTypeDefaults(typ.KeyType)
-		value, valueOK := normalizeTypeDefaults(typ.ValueType)
+		key, keyOK := normalizeTypeDefaults(typ.keyType)
+		value, valueOK := normalizeTypeDefaults(typ.valueType)
 		if !keyOK && !valueOK {
 			return nil, false
 		}
 		cloned := *typ
 		if keyOK {
-			cloned.KeyType = key
+			cloned.keyType = key
 		}
 		if valueOK {
-			cloned.ValueType = value
+			cloned.valueType = value
 		}
 
 		return &cloned, true

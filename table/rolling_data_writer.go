@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"iter"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -93,6 +94,11 @@ type writerFactory struct {
 	countMu            sync.Mutex
 	partitionIDCounter atomic.Int64
 	mu                 sync.Mutex
+
+	// created holds every writer getOrCreateRollingDataWriter made, guarded by
+	// mu. A writer whose stream fails leaves writers, but closeAll and
+	// abortAll still join it and only closeAll reads its error.
+	created []*RollingDataWriter
 }
 
 type writerFactoryOption func(*writerFactory) error
@@ -405,6 +411,7 @@ func (w *writerFactory) getOrCreateRollingDataWriter(ctx context.Context, partit
 
 	writer := w.newRollingDataWriter(ctx, partition, partitionValues, outputDataFilesCh, spec)
 	w.writers.Store(key, writer)
+	w.created = append(w.created, writer)
 
 	return writer, nil
 }
@@ -837,15 +844,9 @@ func (w *writerFactory) abortAll() {
 	}
 }
 
-func (w *writerFactory) writerList() (writers []*RollingDataWriter) {
-	w.writers.Range(func(key, value any) bool {
-		writer, ok := value.(*RollingDataWriter)
-		if ok {
-			writers = append(writers, writer)
-		}
+func (w *writerFactory) writerList() []*RollingDataWriter {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 
-		return true
-	})
-
-	return
+	return slices.Clone(w.created)
 }

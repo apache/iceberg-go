@@ -129,7 +129,7 @@ func SchemaWithRowLineageColumns(s *Schema, rowID, lastUpdatedSeq bool) *Schema 
 		fields = append(fields, LastUpdatedSequenceNumber())
 	}
 
-	return NewSchemaWithIdentifiers(s.ID, s.IdentifierFieldIDs, fields...)
+	return NewSchemaWithIdentifiers(s.ID, s.identifierFieldIDs, fields...)
 }
 
 // SchemaWithRowID returns a new schema with only the _row_id metadata column

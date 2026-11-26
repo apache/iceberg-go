@@ -236,11 +236,12 @@ func (t *typeIFace) UnmarshalJSON(b []byte) error {
 				}
 
 				if matches[1] != "" {
-					geom, err := GeometryTypeOf(strings.TrimSpace(matches[1]))
-					if err != nil {
+					crs := strings.TrimSpace(matches[1])
+					if _, err := GeometryTypeOf(crs); err != nil {
 						return err
 					}
-					t.Type = geom
+					// keep an explicit default CRS so it is written back as read
+					t.Type = GeometryType{crs: crs}
 				} else {
 					t.Type = GeometryType{}
 				}
@@ -260,9 +261,17 @@ func (t *typeIFace) UnmarshalJSON(b []byte) error {
 					algorithm = strings.TrimSpace(matches[2])
 				}
 
-				geog, err := GeographyTypeOf(crs, algorithm)
-				if err != nil {
+				if _, err := GeographyTypeOf(crs, algorithm); err != nil {
 					return err
+				}
+
+				// keep an explicit default CRS or algorithm so it is written back as read
+				var geog GeographyType
+				if matches[1] != "" {
+					geog.crs = crs
+				}
+				if matches[2] != "" {
+					geog.algorithm = strings.ToLower(algorithm)
 				}
 				t.Type = geog
 			default:
@@ -363,6 +372,12 @@ func defaultValueToJSON(typ Type, value any) any {
 	if encoded, ok := hexDefault(typ, value); ok {
 		return encoded
 	}
+	// Decimal has no JSON encoding of its own, and its decimal128 value has no
+	// exported fields, so it would be written as {"Val":{},"Scale":2} and lose
+	// the value. Write the spec's single-value form, a string such as "14.20".
+	if d, ok := value.(Decimal); ok {
+		return d.String()
+	}
 
 	return value
 }
@@ -458,15 +473,17 @@ func (n *NestedField) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
+// StructType is a struct type. Build one with NewStructType and read its
+// fields with NumFields, Field or Fields.
 type StructType struct {
-	FieldList []NestedField `json:"fields"`
+	fields []NestedField
 }
 
 // NewStructType returns a struct type with the given fields. The fields are
 // copied, so later changes to a slice passed with fields... do not affect the
 // returned type.
 func NewStructType(fields ...NestedField) *StructType {
-	return &StructType{FieldList: slices.Clone(fields)}
+	return &StructType{fields: slices.Clone(fields)}
 }
 
 func (s *StructType) Equals(other Type) bool {
@@ -475,28 +492,30 @@ func (s *StructType) Equals(other Type) bool {
 		return false
 	}
 
-	return slices.EqualFunc(s.FieldList, st.FieldList, func(a, b NestedField) bool {
+	return slices.EqualFunc(s.fields, st.fields, func(a, b NestedField) bool {
 		return a.Equals(b)
 	})
 }
 
 // NumFields returns the number of fields in the struct.
-func (s *StructType) NumFields() int { return len(s.FieldList) }
+func (s *StructType) NumFields() int { return len(s.fields) }
 
 // Field returns the i-th field of the struct. It panics if i is out of range.
-func (s *StructType) Field(i int) NestedField { return s.FieldList[i] }
+func (s *StructType) Field(i int) NestedField { return s.fields[i] }
 
 // Fields returns a copy of the struct's fields. Changing the returned slice
 // does not change the struct. Use NumFields and Field to read the fields
 // without copying them.
-func (s *StructType) Fields() []NestedField { return slices.Clone(s.FieldList) }
+func (s *StructType) Fields() []NestedField { return slices.Clone(s.fields) }
 
 // The JSON methods of the nested types name every serialized field instead of
 // encoding through an alias of the type, so the wire format does not depend on
 // which Go fields are exported.
 
-func (s *StructType) MarshalJSON() ([]byte, error) {
-	fields := s.FieldList
+// MarshalJSON has a value receiver on purpose: [Schema.AsStruct] returns a
+// StructType value, which must not encode as {}.
+func (s StructType) MarshalJSON() ([]byte, error) {
+	fields := s.fields
 	if fields == nil {
 		fields = []NestedField{}
 	}
@@ -518,7 +537,7 @@ func (s *StructType) UnmarshalJSON(b []byte) error {
 		return fmt.Errorf("%w: struct is missing required 'fields' array in JSON", ErrInvalidSchema)
 	}
 
-	s.FieldList = *aux.Fields
+	s.fields = *aux.Fields
 
 	return nil
 }
@@ -527,7 +546,7 @@ func (*StructType) Type() string { return "struct" }
 func (s *StructType) String() string {
 	var b strings.Builder
 	b.WriteString("struct<")
-	for i, f := range s.FieldList {
+	for i, f := range s.fields {
 		if i != 0 {
 			b.WriteString(", ")
 		}
@@ -550,27 +569,39 @@ func (s *StructType) String() string {
 	return b.String()
 }
 
+// ListType is a list type. Build one with NewListType.
 type ListType struct {
-	ElementID       int  `json:"element-id"`
-	Element         Type `json:"-"`
-	ElementRequired bool `json:"element-required"`
+	elementID       int
+	element         Type
+	elementRequired bool
 }
 
 // NewListType returns a list type whose element field has the given ID, type
 // and required flag.
 func NewListType(elementID int, element Type, required bool) *ListType {
-	return &ListType{ElementID: elementID, Element: element, ElementRequired: required}
+	return &ListType{elementID: elementID, element: element, elementRequired: required}
 }
 
-func (l *ListType) MarshalJSON() ([]byte, error) {
+// ElementID returns the field ID of the list's element.
+func (l *ListType) ElementID() int { return l.elementID }
+
+// Element returns the type of the list's element.
+func (l *ListType) Element() Type { return l.element }
+
+// ElementRequired reports whether the list's elements are required.
+func (l *ListType) ElementRequired() bool { return l.elementRequired }
+
+// MarshalJSON has a value receiver on purpose: a ListType value, such as one
+// held in a map, must not encode as {}.
+func (l ListType) MarshalJSON() ([]byte, error) {
 	return json.Marshal(struct {
 		Type            string     `json:"type"`
 		ElementID       int        `json:"element-id"`
 		ElementRequired bool       `json:"element-required"`
 		Element         *typeIFace `json:"element"`
 	}{
-		Type: l.Type(), ElementID: l.ElementID, ElementRequired: l.ElementRequired,
-		Element: &typeIFace{l.Element},
+		Type: l.Type(), ElementID: l.elementID, ElementRequired: l.elementRequired,
+		Element: &typeIFace{l.element},
 	})
 }
 
@@ -580,9 +611,9 @@ func (l *ListType) Equals(other Type) bool {
 		return false
 	}
 
-	return l.ElementID == rhs.ElementID &&
-		l.Element.Equals(rhs.Element) &&
-		l.ElementRequired == rhs.ElementRequired
+	return l.elementID == rhs.elementID &&
+		l.element.Equals(rhs.element) &&
+		l.elementRequired == rhs.elementRequired
 }
 
 func (l *ListType) Fields() []NestedField {
@@ -591,15 +622,15 @@ func (l *ListType) Fields() []NestedField {
 
 func (l *ListType) ElementField() NestedField {
 	return NestedField{
-		ID:       l.ElementID,
+		ID:       l.elementID,
 		Name:     "element",
-		Type:     l.Element,
-		Required: l.ElementRequired,
+		Type:     l.element,
+		Required: l.elementRequired,
 	}
 }
 
 func (*ListType) Type() string     { return "list" }
-func (l *ListType) String() string { return fmt.Sprintf("list<%s>", l.Element) }
+func (l *ListType) String() string { return fmt.Sprintf("list<%s>", l.element) }
 
 func (l *ListType) UnmarshalJSON(b []byte) error {
 	aux := struct {
@@ -621,31 +652,49 @@ func (l *ListType) UnmarshalJSON(b []byte) error {
 		return fmt.Errorf("%w: field is missing required 'element-required' key in JSON", ErrInvalidSchema)
 	}
 
-	l.ElementID = *aux.ID
-	l.Element = aux.Elem.Type
-	l.ElementRequired = *aux.Req
+	l.elementID = *aux.ID
+	l.element = aux.Elem.Type
+	l.elementRequired = *aux.Req
 
 	return nil
 }
 
+// MapType is a map type. Build one with NewMapType.
 type MapType struct {
-	KeyID         int  `json:"key-id"`
-	KeyType       Type `json:"-"`
-	ValueID       int  `json:"value-id"`
-	ValueType     Type `json:"-"`
-	ValueRequired bool `json:"value-required"`
+	keyID         int
+	keyType       Type
+	valueID       int
+	valueType     Type
+	valueRequired bool
 }
 
 // NewMapType returns a map type with the given key and value fields. Map keys
 // are always required.
 func NewMapType(keyID int, key Type, valueID int, value Type, valueRequired bool) *MapType {
 	return &MapType{
-		KeyID: keyID, KeyType: key,
-		ValueID: valueID, ValueType: value, ValueRequired: valueRequired,
+		keyID: keyID, keyType: key,
+		valueID: valueID, valueType: value, valueRequired: valueRequired,
 	}
 }
 
-func (m *MapType) MarshalJSON() ([]byte, error) {
+// KeyID returns the field ID of the map's key.
+func (m *MapType) KeyID() int { return m.keyID }
+
+// KeyType returns the type of the map's key.
+func (m *MapType) KeyType() Type { return m.keyType }
+
+// ValueID returns the field ID of the map's value.
+func (m *MapType) ValueID() int { return m.valueID }
+
+// ValueType returns the type of the map's value.
+func (m *MapType) ValueType() Type { return m.valueType }
+
+// ValueRequired reports whether the map's values are required.
+func (m *MapType) ValueRequired() bool { return m.valueRequired }
+
+// MarshalJSON has a value receiver on purpose: a MapType value, such as one
+// held in a map, must not encode as {}.
+func (m MapType) MarshalJSON() ([]byte, error) {
 	return json.Marshal(struct {
 		Type          string     `json:"type"`
 		KeyID         int        `json:"key-id"`
@@ -654,9 +703,9 @@ func (m *MapType) MarshalJSON() ([]byte, error) {
 		KeyType       *typeIFace `json:"key"`
 		ValueType     *typeIFace `json:"value"`
 	}{
-		Type: m.Type(), KeyID: m.KeyID, ValueID: m.ValueID, ValueRequired: m.ValueRequired,
-		KeyType:   &typeIFace{m.KeyType},
-		ValueType: &typeIFace{m.ValueType},
+		Type: m.Type(), KeyID: m.keyID, ValueID: m.valueID, ValueRequired: m.valueRequired,
+		KeyType:   &typeIFace{m.keyType},
+		ValueType: &typeIFace{m.valueType},
 	})
 }
 
@@ -666,11 +715,11 @@ func (m *MapType) Equals(other Type) bool {
 		return false
 	}
 
-	return m.KeyID == rhs.KeyID &&
-		m.KeyType.Equals(rhs.KeyType) &&
-		m.ValueID == rhs.ValueID &&
-		m.ValueType.Equals(rhs.ValueType) &&
-		m.ValueRequired == rhs.ValueRequired
+	return m.keyID == rhs.keyID &&
+		m.keyType.Equals(rhs.keyType) &&
+		m.valueID == rhs.valueID &&
+		m.valueType.Equals(rhs.valueType) &&
+		m.valueRequired == rhs.valueRequired
 }
 
 func (m *MapType) Fields() []NestedField {
@@ -680,8 +729,8 @@ func (m *MapType) Fields() []NestedField {
 func (m *MapType) KeyField() NestedField {
 	return NestedField{
 		Name:     "key",
-		ID:       m.KeyID,
-		Type:     m.KeyType,
+		ID:       m.keyID,
+		Type:     m.keyType,
 		Required: true,
 	}
 }
@@ -689,15 +738,15 @@ func (m *MapType) KeyField() NestedField {
 func (m *MapType) ValueField() NestedField {
 	return NestedField{
 		Name:     "value",
-		ID:       m.ValueID,
-		Type:     m.ValueType,
-		Required: m.ValueRequired,
+		ID:       m.valueID,
+		Type:     m.valueType,
+		Required: m.valueRequired,
 	}
 }
 
 func (*MapType) Type() string { return "map" }
 func (m *MapType) String() string {
-	return fmt.Sprintf("map<%s, %s>", m.KeyType, m.ValueType)
+	return fmt.Sprintf("map<%s, %s>", m.keyType, m.valueType)
 }
 
 func (m *MapType) UnmarshalJSON(b []byte) error {
@@ -729,9 +778,9 @@ func (m *MapType) UnmarshalJSON(b []byte) error {
 		return fmt.Errorf("%w: field is missing required 'value-required' key in JSON", ErrInvalidSchema)
 	}
 
-	m.KeyID, m.KeyType = *aux.KeyID, aux.Key.Type
-	m.ValueID, m.ValueType = *aux.ValueID, aux.Value.Type
-	m.ValueRequired = *aux.ValueReq
+	m.keyID, m.keyType = *aux.KeyID, aux.Key.Type
+	m.valueID, m.valueType = *aux.ValueID, aux.Value.Type
+	m.valueRequired = *aux.ValueReq
 
 	return nil
 }
@@ -1116,6 +1165,8 @@ func (VariantType) String() string { return "variant" }
 // same value.
 const DefaultGeoCRS = "OGC:CRS84"
 
+// GeometryType is the geometry type. The CRS may be held explicitly even when
+// it is the default, so compare values through CRS() rather than the field.
 type GeometryType struct {
 	crs string
 }
@@ -1146,7 +1197,7 @@ func (g GeometryType) Equals(other Type) bool {
 		return false
 	}
 
-	return g.crs == rhs.crs
+	return g.CRS() == rhs.CRS()
 }
 
 func (GeometryType) primitive() {}
@@ -1175,6 +1226,9 @@ func toGeoArrowEdgeInterpolation(s string) (geoarrow.EdgeInterpolation, error) {
 	}
 }
 
+// GeographyType is the geography type. The CRS and algorithm may be held
+// explicitly even when they are the defaults, so compare values through CRS()
+// and Algorithm() rather than the fields.
 type GeographyType struct {
 	crs       string
 	algorithm string
@@ -1227,7 +1281,7 @@ func (g GeographyType) Equals(other Type) bool {
 		return false
 	}
 
-	return g.crs == rhs.crs && g.algorithm == rhs.algorithm
+	return g.CRS() == rhs.CRS() && g.Algorithm() == rhs.Algorithm()
 }
 
 func (GeographyType) primitive() {}
