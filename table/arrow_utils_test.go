@@ -2327,6 +2327,68 @@ func TestToRequestedSchemaInitialDefaultJSONRoundTrip(t *testing.T) {
 				}
 			},
 		},
+		// The spec's JSON single-value form for temporal defaults, as written by
+		// Java and other implementations.
+		{
+			name:      "date as ISO string",
+			fieldJSON: `{"id":2,"name":"dt","type":"date","required":false,"initial-default":"1973-05-19"}`,
+			check: func(t *testing.T, col arrow.Array) {
+				arr := col.(*array.Date32)
+				for i := range arr.Len() {
+					assert.Equal(t, arrow.Date32(1234), arr.Value(i), "row %d", i)
+				}
+			},
+		},
+		{
+			name:      "time as ISO string",
+			fieldJSON: `{"id":2,"name":"t","type":"time","required":false,"initial-default":"00:00:05"}`,
+			check: func(t *testing.T, col arrow.Array) {
+				arr := col.(*array.Time64)
+				for i := range arr.Len() {
+					assert.Equal(t, arrow.Time64(5000000), arr.Value(i), "row %d", i)
+				}
+			},
+		},
+		{
+			name:      "timestamp as ISO string",
+			fieldJSON: `{"id":2,"name":"ts","type":"timestamp","required":false,"initial-default":"2023-11-14T22:13:20.000001"}`,
+			check: func(t *testing.T, col arrow.Array) {
+				arr := col.(*array.Timestamp)
+				for i := range arr.Len() {
+					assert.Equal(t, arrow.Timestamp(1700000000000001), arr.Value(i), "row %d", i)
+				}
+			},
+		},
+		{
+			name:      "timestamptz as ISO string",
+			fieldJSON: `{"id":2,"name":"ts","type":"timestamptz","required":false,"initial-default":"2023-11-14T22:13:20.000001+00:00"}`,
+			check: func(t *testing.T, col arrow.Array) {
+				arr := col.(*array.Timestamp)
+				for i := range arr.Len() {
+					assert.Equal(t, arrow.Timestamp(1700000000000001), arr.Value(i), "row %d", i)
+				}
+			},
+		},
+		{
+			name:      "timestamp_ns as ISO string",
+			fieldJSON: `{"id":2,"name":"ts","type":"timestamp_ns","required":false,"initial-default":"2023-11-14T22:13:20.000000001"}`,
+			check: func(t *testing.T, col arrow.Array) {
+				arr := col.(*array.Timestamp)
+				for i := range arr.Len() {
+					assert.Equal(t, arrow.Timestamp(1700000000000000001), arr.Value(i), "row %d", i)
+				}
+			},
+		},
+		{
+			name:      "timestamptz_ns as ISO string",
+			fieldJSON: `{"id":2,"name":"ts","type":"timestamptz_ns","required":false,"initial-default":"2023-11-14T22:13:20.000000001+00:00"}`,
+			check: func(t *testing.T, col arrow.Array) {
+				arr := col.(*array.Timestamp)
+				for i := range arr.Len() {
+					assert.Equal(t, arrow.Timestamp(1700000000000000001), arr.Value(i), "row %d", i)
+				}
+			},
+		},
 		{
 			name:      "uuid as string",
 			fieldJSON: `{"id":2,"name":"uid","type":"uuid","required":false,"initial-default":"f79c3e09-677c-4bbd-a479-512f87f77acf"}`,

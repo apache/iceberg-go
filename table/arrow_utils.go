@@ -948,6 +948,21 @@ func numericDefault[T ~int32 | ~int64 | ~float32 | ~float64](v any) T {
 
 // defaultToScalar converts an Iceberg default value to an Arrow scalar.
 func defaultToScalar(v any, t iceberg.Type, dt arrow.DataType) scalar.Scalar {
+	// Metadata JSON holds date, time and timestamp defaults as ISO-8601
+	// strings, the spec's single-value form. Older iceberg-go versions wrote
+	// numbers, which the cases below still accept.
+	if s, ok := v.(string); ok {
+		switch t.(type) {
+		case iceberg.DateType, iceberg.TimeType, iceberg.TimestampType, iceberg.TimestampTzType,
+			iceberg.TimestampNsType, iceberg.TimestampTzNsType:
+			lit, err := iceberg.NewLiteral(s).To(t)
+			if err != nil {
+				panic(fmt.Errorf("default (iceberg type %s): cannot parse string %q: %w", t, s, err))
+			}
+			v = lit.Any()
+		}
+	}
+
 	switch typ := t.(type) {
 	case iceberg.Float32Type:
 		s, err := scalar.MakeScalarParam(numericDefault[float32](v), dt)

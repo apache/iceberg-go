@@ -3279,3 +3279,79 @@ func TestAddColumnDecimalDefaultSurvivesMetadataRoundTrip(t *testing.T) {
 	require.False(t, prices.IsNull(0))
 	assert.Equal(t, "14.20", prices.Value(0).ToString(2))
 }
+
+// Date and timestamp defaults added by AddColumn must survive the metadata
+// JSON round trip. They are written as the spec's ISO-8601 strings, which
+// Java requires, and must still be read, and filtered on, after a reload.
+func TestAddColumnTemporalDefaultsSurviveMetadataRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	dir := filepath.ToSlash(t.TempDir())
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true})
+	meta, err := NewMetadata(schema, iceberg.UnpartitionedSpec, UnsortedSortOrder, dir,
+		iceberg.Properties{PropertyFormatVersion: "3"})
+	require.NoError(t, err)
+	fsF := func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil }
+	tbl := New(Identifier{"default", "temporal_default"}, meta, dir+"/metadata/00000.json", fsF,
+		&countingCatalog{metadata: meta})
+
+	// A file written before the date and timestamp columns exist.
+	arrSchema := arrow.NewSchema([]arrow.Field{{Name: "id", Type: arrow.PrimitiveTypes.Int32}}, nil)
+	ids := array.NewInt32Builder(memory.DefaultAllocator)
+	defer ids.Release()
+	ids.AppendValues([]int32{1}, nil)
+	idArr := ids.NewArray()
+	defer idArr.Release()
+	rec := array.NewRecordBatch(arrSchema, []arrow.Array{idArr}, 1)
+	defer rec.Release()
+	arrTbl := array.NewTableFromRecords(arrSchema, []arrow.RecordBatch{rec})
+	defer arrTbl.Release()
+	path := dir + "/data/before.parquet"
+	fo, err := iceio.LocalFS{}.Create(ctx, path)
+	require.NoError(t, err)
+	require.NoError(t, pqarrow.WriteTable(arrTbl, fo, arrTbl.NumRows(), nil, pqarrow.DefaultWriterProps()))
+
+	txn := tbl.NewTransaction()
+	require.NoError(t, txn.AddDataFilesByPath(ctx, []string{path}, nil, false))
+	tbl, err = txn.Commit(ctx)
+	require.NoError(t, err)
+
+	day, err := iceberg.NewLiteral("2017-11-16").To(iceberg.PrimitiveTypes.Date)
+	require.NoError(t, err)
+	ts, err := iceberg.NewLiteral("2017-11-16T22:31:08.123456").To(iceberg.PrimitiveTypes.Timestamp)
+	require.NoError(t, err)
+	txn = tbl.NewTransaction()
+	require.NoError(t, txn.UpdateSchema(true, false).
+		AddColumn([]string{"day"}, iceberg.PrimitiveTypes.Date, "", false, day).
+		AddColumn([]string{"ts"}, iceberg.PrimitiveTypes.Timestamp, "", false, ts).
+		Commit())
+	tbl, err = txn.Commit(ctx)
+	require.NoError(t, err)
+
+	// Reload the table from its metadata JSON, as a catalog would.
+	metaJSON, err := json.Marshal(tbl.Metadata())
+	require.NoError(t, err)
+	reloaded, err := ParseMetadataBytes(metaJSON)
+	require.NoError(t, err)
+	dayField, ok := reloaded.CurrentSchema().FindFieldByName("day")
+	require.True(t, ok)
+	assert.Equal(t, "2017-11-16", dayField.InitialDefault)
+	assert.Equal(t, "2017-11-16", dayField.WriteDefault)
+	tsField, ok := reloaded.CurrentSchema().FindFieldByName("ts")
+	require.True(t, ok)
+	assert.Equal(t, "2017-11-16T22:31:08.123456", tsField.InitialDefault)
+	assert.Equal(t, "2017-11-16T22:31:08.123456", tsField.WriteDefault)
+
+	tbl = New(Identifier{"default", "temporal_default"}, reloaded, dir+"/metadata/00002.json", fsF,
+		&countingCatalog{metadata: reloaded})
+	result, err := tbl.Scan(WithRowFilter(iceberg.EqualTo(iceberg.Reference("day"), day.(iceberg.DateLiteral).Value()))).
+		ToArrowTable(ctx)
+	require.NoError(t, err)
+	defer result.Release()
+
+	require.EqualValues(t, 1, result.NumRows())
+	days := result.Column(result.Schema().FieldIndices("day")[0]).Data().Chunk(0).(*array.Date32)
+	assert.Equal(t, arrow.Date32(day.(iceberg.DateLiteral).Value()), days.Value(0))
+	stamps := result.Column(result.Schema().FieldIndices("ts")[0]).Data().Chunk(0).(*array.Timestamp)
+	assert.Equal(t, arrow.Timestamp(ts.(iceberg.TimestampLiteral).Value()), stamps.Value(0))
+}

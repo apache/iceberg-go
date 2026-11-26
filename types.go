@@ -378,8 +378,59 @@ func defaultValueToJSON(typ Type, value any) any {
 	if d, ok := value.(Decimal); ok {
 		return d.String()
 	}
+	if s, ok := temporalDefaultString(typ, value); ok {
+		return s
+	}
 
 	return value
+}
+
+// temporalDefaultString returns the spec's JSON single-value form of a date,
+// time or timestamp default: an ISO-8601 string such as "2017-11-16" or
+// "2017-11-16T22:31:08.123456+00:00", which Java's SingleValueParser requires.
+// It accepts the typed value that AddColumn stores, and the float64 that a
+// numeric default written by older iceberg-go versions decodes to, so those
+// are written as strings from now on. It reports false for any other value.
+func temporalDefaultString(typ Type, value any) (string, bool) {
+	switch typ.(type) {
+	case DateType:
+		if v, ok := temporalDefaultValue[Date](value); ok {
+			return v.ToTime().Format("2006-01-02"), true
+		}
+	case TimeType:
+		if v, ok := temporalDefaultValue[Time](value); ok {
+			return v.ToTime().Format("15:04:05.000000"), true
+		}
+	case TimestampType:
+		if v, ok := temporalDefaultValue[Timestamp](value); ok {
+			return v.ToTime().Format("2006-01-02T15:04:05.000000"), true
+		}
+	case TimestampTzType:
+		if v, ok := temporalDefaultValue[Timestamp](value); ok {
+			return v.ToTime().Format("2006-01-02T15:04:05.000000+00:00"), true
+		}
+	case TimestampNsType:
+		if v, ok := temporalDefaultValue[TimestampNano](value); ok {
+			return v.ToTime().Format("2006-01-02T15:04:05.000000000"), true
+		}
+	case TimestampTzNsType:
+		if v, ok := temporalDefaultValue[TimestampNano](value); ok {
+			return v.ToTime().Format("2006-01-02T15:04:05.000000000+00:00"), true
+		}
+	}
+
+	return "", false
+}
+
+func temporalDefaultValue[T Date | Time | Timestamp | TimestampNano](value any) (T, bool) {
+	switch v := value.(type) {
+	case T:
+		return v, true
+	case float64:
+		return T(v), true
+	}
+
+	return 0, false
 }
 
 // decodeNestedFieldDefault preserves long values without converting them to float64.
