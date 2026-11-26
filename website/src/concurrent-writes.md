@@ -43,8 +43,10 @@ state. A failed validation surfaces as one of:
 - `table.ErrDuplicateDataFiles` — terminal for the requested paths. A
   `RowDelta` rejects repeated paths during staging and checks whether a
   concurrent commit added any of its paths that are still live on retry.
-  A retry collision also matches `ErrTransactionUnusable`. Use distinct
-  paths in a new operation.
+  `AddDataFiles` and `AddDataFilesByPath` make the same retry check unless
+  the duplicate check is disabled (`WithoutDuplicateCheck` or
+  `ignoreDuplicates`). A retry collision also matches
+  `ErrTransactionUnusable`. Use distinct paths in a new operation.
 - `table.ErrTransactionUnusable` — this transaction can't be committed again.
   If the error also matches `ErrCommitFailed`, retry in a new transaction from a
   reloaded table.

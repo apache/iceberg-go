@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"runtime"
 	"slices"
 	"strconv"
@@ -1672,6 +1673,8 @@ func WithoutAutoNameMapping() WriteOption {
 // table. For tables with many manifests this scan can be expensive because
 // each manifest must be read from storage. Use this option when the caller
 // can guarantee that the files being added are not already in the table.
+// It also disables the commit-time check against files that concurrent
+// commits added.
 func WithoutDuplicateCheck() WriteOption {
 	return func(cfg *dataFileCfg) {
 		cfg.skipDuplicateCheck = true
@@ -1718,6 +1721,10 @@ func (t *Transaction) ensureNameMapping() error {
 // disable this behavior, for example when working with catalogs that reject
 // the name mapping property.
 //
+// Unless [WithoutDuplicateCheck] is passed, it fails if a file path is already
+// in the table, and the commit fails with ErrDuplicateDataFiles if a
+// concurrent commit added one of the same paths first.
+//
 // Callers are responsible for ensuring each DataFile is valid and consistent with the table.
 // Supplying incorrect DataFile metadata can produce an invalid snapshot and break reads.
 func (t *Transaction) AddDataFiles(ctx context.Context, dataFiles []iceberg.DataFile, snapshotProps iceberg.Properties, opts ...WriteOption) error {
@@ -1761,6 +1768,7 @@ func (t *Transaction) AddDataFiles(ctx context.Context, dataFiles []iceberg.Data
 		return err
 	}
 
+	var checkedManifests map[string]struct{}
 	if !cfg.skipDuplicateCheck {
 		if s := t.planningSnapshot(meta); s != nil {
 			referenced := make([]string, 0)
@@ -1777,10 +1785,17 @@ func (t *Transaction) AddDataFiles(ctx context.Context, dataFiles []iceberg.Data
 			if len(referenced) > 0 {
 				return fmt.Errorf("cannot add files that are already referenced by table, files: %v", referenced)
 			}
+			if checkedManifests, err = manifestPaths(ctx, fs, s); err != nil {
+				return err
+			}
 		}
 	}
 
 	appendFiles := t.appendSnapshotProducer(meta, wfs, snapshotProps)
+	if !cfg.skipDuplicateCheck {
+		appendFiles.duplicateCheckPaths = maps.Clone(setToAdd)
+		appendFiles.checkedManifests = checkedManifests
+	}
 	for _, df := range dataFiles {
 		appendFiles.appendDataFile(df)
 	}
@@ -2423,6 +2438,10 @@ func WithAddDataFilesByPathPartitionValues(values map[string]map[int]any) AddDat
 // Unlike AddDataFiles, it opens each file to read its schema and statistics.
 // Use WithAddDataFilesByPathPartitionValues for partition transforms whose
 // values cannot be inferred from column statistics (for example, bucket[N]).
+//
+// Unless ignoreDuplicates is set, it fails if a path is already in the table,
+// and the commit fails with ErrDuplicateDataFiles if a concurrent commit
+// added one of the same paths first.
 func (t *Transaction) AddDataFilesByPath(ctx context.Context, filePaths []string, snapshotProps iceberg.Properties, ignoreDuplicates bool, opts ...AddDataFilesByPathOption) error {
 	meta, err := t.txnMeta()
 	if err != nil {
@@ -2461,6 +2480,7 @@ func (t *Transaction) AddDataFilesByPath(ctx context.Context, filePaths []string
 		return err
 	}
 
+	var checkedManifests map[string]struct{}
 	if !ignoreDuplicates {
 		if s := t.planningSnapshot(meta); s != nil {
 			referenced := make([]string, 0)
@@ -2475,6 +2495,9 @@ func (t *Transaction) AddDataFilesByPath(ctx context.Context, filePaths []string
 			}
 			if len(referenced) > 0 {
 				return fmt.Errorf("cannot add files that are already referenced by table, files: %v", referenced)
+			}
+			if checkedManifests, err = manifestPaths(ctx, fs, s); err != nil {
+				return err
 			}
 		}
 	}
@@ -2496,6 +2519,10 @@ func (t *Transaction) AddDataFilesByPath(ctx context.Context, filePaths []string
 		return err
 	}
 	updater := t.appendSnapshotProducer(meta, wfs, snapshotProps)
+	if !ignoreDuplicates {
+		updater.duplicateCheckPaths = maps.Clone(set)
+		updater.checkedManifests = checkedManifests
+	}
 
 	dataFiles, err := filesToDataFiles(ctx, fs, meta, filePaths, addFilesOp.concurrency, partitionValues)
 	if err != nil {
