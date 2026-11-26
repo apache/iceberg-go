@@ -264,6 +264,9 @@
 <p><strong>Orphan cleanup now rejects <code>gc.enabled=false</code>.</strong> <code>DeleteOrphanFiles</code>, <code>PlanOrphanFiles</code>, <code>ExecuteOrphanCleanup</code>, and dry runs now return an error before filesystem access. The <code>iceberg clean-orphan-files</code> command is also affected.</p>
 </li>
 <li>
+<p><strong>Orphan cleanup requires complete snapshot history.</strong> <code>DeleteOrphanFiles</code>, <code>PlanOrphanFiles</code>, <code>ExecuteOrphanCleanup</code>, dry runs, and <code>iceberg clean-orphan-files</code> now reject tables loaded with REST <code>snapshot-loading-mode=refs</code>, returning an error wrapping <code>table.ErrInvalidOperation</code>. Configure the REST catalog with <code>snapshot-loading-mode=all</code> (or omit it) and reload the table; a server override that forces <code>refs</code> prevents cleanup through that catalog. <code>maintenance.PurgeFiles</code> is unaffected.</p>
+</li>
+<li>
 <p><strong>Partition specs reject source types a transform cannot handle.</strong> Creating or updating a spec with an incompatible source, such as <code>day(string)</code>, now fails. Writes to existing incompatible specs return <code>ErrInvalidTransform</code> instead of writing null partition values.</p>
 </li>
 <li>

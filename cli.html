@@ -410,6 +410,10 @@ The catalog's snapshot loading mode still applies to other commands.</p>
 iceberg clean-orphan-files --older-than 5d my_db.events
 iceberg clean-orphan-files --location s3://old-warehouse/my_db/events my_db.events
 </code></pre>
+<p>Orphan cleanup, including <code>--dry-run</code>, requires complete snapshot history and
+<code>gc.enabled=true</code>. The CLI uses the REST server's snapshot-loading settings.
+If the server uses <code>snapshot-loading-mode=refs</code>, configure it to use
+<code>snapshot-loading-mode=all</code> before running cleanup.</p>
 <h2 id="file-maintenance"><a class="header" href="#file-maintenance">File maintenance</a></h2>
 <h3 id="data-file-compaction"><a class="header" href="#data-file-compaction">Data-file compaction</a></h3>
 <p>Preview the groups that compaction would rewrite with <code>compact analyze</code>.

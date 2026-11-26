@@ -1242,6 +1242,10 @@ The catalog's snapshot loading mode still applies to other commands.</p>
 iceberg clean-orphan-files --older-than 5d my_db.events
 iceberg clean-orphan-files --location s3://old-warehouse/my_db/events my_db.events
 </code></pre>
+<p>Orphan cleanup, including <code>--dry-run</code>, requires complete snapshot history and
+<code>gc.enabled=true</code>. The CLI uses the REST server's snapshot-loading settings.
+If the server uses <code>snapshot-loading-mode=refs</code>, configure it to use
+<code>snapshot-loading-mode=all</code> before running cleanup.</p>
 <h2 id="file-maintenance"><a class="header" href="#file-maintenance">File maintenance</a></h2>
 <h3 id="data-file-compaction"><a class="header" href="#data-file-compaction">Data-file compaction</a></h3>
 <p>Preview the groups that compaction would rewrite with <code>compact analyze</code>.
@@ -2073,6 +2077,25 @@ if err != nil { /* ... */ }
 fmt.Printf(&quot;removed %d files\n&quot;, len(result.DeletedFiles))
 </code></pre>
 <p>Also see <code>maintenance.WithCleanupLocation</code>, <code>maintenance.WithCleanupDeleteFunc</code>, <code>maintenance.WithPrefixMismatchMode</code>, <code>maintenance.WithEqualSchemes</code>, and <code>maintenance.WithEqualAuthorities</code> in <code>table/maintenance/orphan_cleanup.go</code>.</p>
+<p>Use <code>maintenance.PlanOrphanFiles</code> to inspect candidates before passing the
+plan to <code>maintenance.ExecuteOrphanCleanup</code>. Execution deletes exactly the
+planned files without rescanning. <code>maintenance.DeleteOrphanFiles</code> combines
+planning and deletion and also supports dry runs. The default minimum file
+age is 72 hours.</p>
+<p><strong>Safety:</strong> All three orphan-cleanup entry points, including dry runs, reject
+<code>gc.enabled=false</code> and tables loaded by REST with
+<code>snapshot-loading-mode=refs</code>. Refs-only metadata can omit snapshots whose
+files are still live. Both checks run before filesystem access. A refs-only
+error matches <code>table.ErrInvalidOperation</code> through <code>errors.Is</code>.</p>
+<p>Create the REST catalog with <code>snapshot-loading-mode=all</code> (or omit the
+property), for example using <code>rest.WithAdditionalProps</code>, then reload the
+table before cleanup. A one-time <code>LoadTableWithFullSnapshotHistory</code> load is
+enough for planning and dry runs. Deletion refreshes the table using the
+catalog's configured mode, so its regular loads must also return full
+history. A server override that forces <code>refs</code> prevents deletion.
+<code>maintenance.PurgeFiles</code>, used when dropping a table, is not subject to
+this restriction; best-effort purge may miss files outside the table
+location that were omitted from refs-only metadata.</p>
 <h3 id="compaction-rewrite-data-files"><a class="header" href="#compaction-rewrite-data-files">Compaction (rewrite data files)</a></h3>
 <pre><code class="language-go">import &quot;github.com/apache/iceberg-go/table&quot;
 
@@ -3316,6 +3339,9 @@ make integration-external-rest
 </li>
 <li>
 <p><strong>Orphan cleanup now rejects <code>gc.enabled=false</code>.</strong> <code>DeleteOrphanFiles</code>, <code>PlanOrphanFiles</code>, <code>ExecuteOrphanCleanup</code>, and dry runs now return an error before filesystem access. The <code>iceberg clean-orphan-files</code> command is also affected.</p>
+</li>
+<li>
+<p><strong>Orphan cleanup requires complete snapshot history.</strong> <code>DeleteOrphanFiles</code>, <code>PlanOrphanFiles</code>, <code>ExecuteOrphanCleanup</code>, dry runs, and <code>iceberg clean-orphan-files</code> now reject tables loaded with REST <code>snapshot-loading-mode=refs</code>, returning an error wrapping <code>table.ErrInvalidOperation</code>. Configure the REST catalog with <code>snapshot-loading-mode=all</code> (or omit it) and reload the table; a server override that forces <code>refs</code> prevents cleanup through that catalog. <code>maintenance.PurgeFiles</code> is unaffected.</p>
 </li>
 <li>
 <p><strong>Partition specs reject source types a transform cannot handle.</strong> Creating or updating a spec with an incompatible source, such as <code>day(string)</code>, now fails. Writes to existing incompatible specs return <code>ErrInvalidTransform</code> instead of writing null partition values.</p>

@@ -916,6 +916,25 @@ if err != nil { /* ... */ }
 fmt.Printf(&quot;removed %d files\n&quot;, len(result.DeletedFiles))
 </code></pre>
 <p>Also see <code>maintenance.WithCleanupLocation</code>, <code>maintenance.WithCleanupDeleteFunc</code>, <code>maintenance.WithPrefixMismatchMode</code>, <code>maintenance.WithEqualSchemes</code>, and <code>maintenance.WithEqualAuthorities</code> in <code>table/maintenance/orphan_cleanup.go</code>.</p>
+<p>Use <code>maintenance.PlanOrphanFiles</code> to inspect candidates before passing the
+plan to <code>maintenance.ExecuteOrphanCleanup</code>. Execution deletes exactly the
+planned files without rescanning. <code>maintenance.DeleteOrphanFiles</code> combines
+planning and deletion and also supports dry runs. The default minimum file
+age is 72 hours.</p>
+<p><strong>Safety:</strong> All three orphan-cleanup entry points, including dry runs, reject
+<code>gc.enabled=false</code> and tables loaded by REST with
+<code>snapshot-loading-mode=refs</code>. Refs-only metadata can omit snapshots whose
+files are still live. Both checks run before filesystem access. A refs-only
+error matches <code>table.ErrInvalidOperation</code> through <code>errors.Is</code>.</p>
+<p>Create the REST catalog with <code>snapshot-loading-mode=all</code> (or omit the
+property), for example using <code>rest.WithAdditionalProps</code>, then reload the
+table before cleanup. A one-time <code>LoadTableWithFullSnapshotHistory</code> load is
+enough for planning and dry runs. Deletion refreshes the table using the
+catalog's configured mode, so its regular loads must also return full
+history. A server override that forces <code>refs</code> prevents deletion.
+<code>maintenance.PurgeFiles</code>, used when dropping a table, is not subject to
+this restriction; best-effort purge may miss files outside the table
+location that were omitted from refs-only metadata.</p>
 <h3 id="compaction-rewrite-data-files"><a class="header" href="#compaction-rewrite-data-files">Compaction (rewrite data files)</a></h3>
 <pre><code class="language-go">import &quot;github.com/apache/iceberg-go/table&quot;
 
