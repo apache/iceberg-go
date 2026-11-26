@@ -127,7 +127,7 @@ func testDecimalRowGroup(t *testing.T, meta *metadata.FileMetaData, field iceber
 	expr, err := iceberg.BindExpr(schema, pred, true)
 	require.NoError(t, err)
 	eval := &inclusiveMetricsEval{expr: expr}
-	keep, err := eval.TestRowGroup(meta.RowGroup(0), []int{0})
+	keep, err := eval.TestRowGroup(meta, 0, []int{0})
 	require.NoError(t, err)
 
 	return keep
@@ -299,7 +299,7 @@ func TestInclusiveMetricsEvalRealParquetDecimalRowGroup(t *testing.T) {
 		expr, err := iceberg.BindExpr(schema, pred, true)
 		require.NoError(t, err)
 		eval := &inclusiveMetricsEval{expr: expr}
-		result, err := eval.TestRowGroup(meta.RowGroup(0), []int{0})
+		result, err := eval.TestRowGroup(meta, 0, []int{0})
 		require.NoError(t, err)
 
 		return result
@@ -363,7 +363,7 @@ func TestInclusiveMetricsEvalRowGroupValueCountIncludesNulls(t *testing.T) {
 		expr, err := iceberg.BindExpr(schema, pred, true)
 		require.NoError(t, err)
 		eval := &inclusiveMetricsEval{expr: expr}
-		result, err := eval.TestRowGroup(meta.RowGroup(0), []int{0})
+		result, err := eval.TestRowGroup(meta, 0, []int{0})
 		require.NoError(t, err)
 
 		return result
@@ -391,7 +391,7 @@ func TestInclusiveMetricsEvalRowGroupMetricsLifecycle(t *testing.T) {
 	require.NoError(t, err)
 	eval := &inclusiveMetricsEval{expr: expr}
 
-	firstKeep, err := eval.TestRowGroup(withoutStats.RowGroup(0), []int{0, 1})
+	firstKeep, err := eval.TestRowGroup(withoutStats, 0, []int{0, 1})
 	require.NoError(t, err)
 	assert.True(t, firstKeep)
 	assert.NotNil(t, eval.valueCounts)
@@ -400,7 +400,7 @@ func TestInclusiveMetricsEvalRowGroupMetricsLifecycle(t *testing.T) {
 	assert.Nil(t, eval.upperBounds)
 	assert.True(t, eval.mayContainNull(1), "a missing null count must be treated as unknown")
 
-	keep, err := eval.TestRowGroup(withStats.RowGroup(0), []int{0, 1})
+	keep, err := eval.TestRowGroup(withStats, 0, []int{0, 1})
 	require.NoError(t, err)
 	assert.True(t, keep)
 	assert.Len(t, eval.valueCounts, 2)
@@ -408,7 +408,7 @@ func TestInclusiveMetricsEvalRowGroupMetricsLifecycle(t *testing.T) {
 	assert.Len(t, eval.lowerBounds, 2)
 	assert.Len(t, eval.upperBounds, 2)
 
-	keep, err = eval.TestRowGroup(withoutStats.RowGroup(0), []int{0, 1})
+	keep, err = eval.TestRowGroup(withoutStats, 0, []int{0, 1})
 	require.NoError(t, err)
 	assert.Equal(t, firstKeep, keep)
 	assert.True(t, eval.mayContainNull(1), "a missing null count must be treated as unknown")
@@ -494,7 +494,7 @@ func TestInclusiveMetricsEvalMillisTimestampRowGroup(t *testing.T) {
 				expr, err := iceberg.BindExpr(schema, pred, true)
 				require.NoError(t, err)
 				eval := &inclusiveMetricsEval{expr: expr}
-				result, err := eval.TestRowGroup(meta.RowGroup(0), []int{0})
+				result, err := eval.TestRowGroup(meta, 0, []int{0})
 				require.NoError(t, err)
 
 				return result
@@ -529,7 +529,7 @@ func TestInclusiveMetricsEvalMillisTimestampOverflowKeepsRowGroup(t *testing.T) 
 		iceberg.GreaterThanEqual(iceberg.Reference("ts"), iceberg.Timestamp(5_000_000_000_000_000_000)), true)
 	require.NoError(t, err)
 	eval := &inclusiveMetricsEval{expr: expr}
-	keep, err := eval.TestRowGroup(meta.RowGroup(0), []int{0})
+	keep, err := eval.TestRowGroup(meta, 0, []int{0})
 	require.NoError(t, err)
 	assert.True(t, keep)
 }
@@ -562,7 +562,7 @@ func TestInclusiveMetricsEvalMillisTimestampNonMicrosTypeOmitsBounds(t *testing.
 				expr, err := iceberg.BindExpr(schema, pred, true)
 				require.NoError(t, err)
 				eval := &inclusiveMetricsEval{expr: expr}
-				result, err := eval.TestRowGroup(meta.RowGroup(0), []int{0})
+				result, err := eval.TestRowGroup(meta, 0, []int{0})
 				require.NoError(t, err)
 
 				return result

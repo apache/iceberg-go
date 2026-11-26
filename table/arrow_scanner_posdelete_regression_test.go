@@ -459,11 +459,11 @@ func TestPositionDeleteRowGroupTesterUsesFilePathStats(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, tester)
 
-	use, err := tester.StatsFn(reader.MetaData().RowGroup(0), []int{0, 1})
+	use, err := tester.StatsFn(reader.MetaData(), 0, []int{0, 1})
 	require.NoError(t, err)
 	assert.False(t, use)
 
-	use, err = tester.StatsFn(reader.MetaData().RowGroup(1), []int{0, 1})
+	use, err = tester.StatsFn(reader.MetaData(), 1, []int{0, 1})
 	require.NoError(t, err)
 	assert.True(t, use)
 }
@@ -647,7 +647,7 @@ func TestPositionDeleteRowGroupTesterUsesFilePathBloomFilters(t *testing.T) {
 				tester.BloomPreds = nil
 			}
 			for i := range fileMetadata.RowGroups {
-				use, err := tester.StatsFn(fileMetadata.RowGroup(i), []int{0, 1})
+				use, err := tester.StatsFn(fileMetadata, i, []int{0, 1})
 				require.NoError(t, err)
 				require.True(t, use, "statistics must not prune either row group")
 			}

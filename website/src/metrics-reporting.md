@@ -29,6 +29,10 @@ operators a standard way to collect them.
 A pluggable [`metrics.Reporter`](https://pkg.go.dev/github.com/apache/iceberg-go/metrics#Reporter)
 is the sink that receives those reports.
 
+The `skipped-data-files` and `skipped-delete-files` counters track file entries
+rejected by partition or metrics filters in manifests the planner reads.
+The skipped-manifest counters track pruning at the earlier manifest level.
+
 ## Opt-in by default
 
 Reporting is **strictly opt-in**. With no reporter configured the instrumented

@@ -54,7 +54,7 @@ func TestCompiledFileFilterPlanKeepsEmptyStatsFieldIDsForAlwaysFalse(t *testing.
 
 	eval := plan.statsEvaluator()
 	require.NotNil(t, eval)
-	keep, err := eval(buildRowGroupMetricsMetadata(t, 1, 1, true).RowGroup(0), nil)
+	keep, err := eval(buildRowGroupMetricsMetadata(t, 1, 1, true), 0, nil)
 	require.NoError(t, err)
 	assert.False(t, keep)
 }

@@ -70,7 +70,7 @@ func benchmarkHighestNestedSchema(depth int) *Schema {
 		field = NestedField{
 			ID:   i + 1,
 			Name: fmt.Sprintf("level_%d", i),
-			Type: &StructType{FieldList: []NestedField{field}},
+			Type: &StructType{fields: []NestedField{field}},
 		}
 	}
 
@@ -85,12 +85,12 @@ func benchmarkHighestMixedSchema(groups int) *Schema {
 			ID:   nextID,
 			Name: fmt.Sprintf("field_%d", i),
 			Type: &MapType{
-				KeyID:   nextID + 1,
-				KeyType: PrimitiveTypes.String,
-				ValueID: nextID + 2,
-				ValueType: &ListType{
-					ElementID: nextID + 3,
-					Element: &StructType{FieldList: []NestedField{{
+				keyID:   nextID + 1,
+				keyType: PrimitiveTypes.String,
+				valueID: nextID + 2,
+				valueType: &ListType{
+					elementID: nextID + 3,
+					element: &StructType{fields: []NestedField{{
 						ID:   nextID + 4,
 						Name: "value",
 						Type: PrimitiveTypes.Int64,

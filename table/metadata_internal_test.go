@@ -2718,8 +2718,8 @@ func TestParseSchemaIdentifierFields(t *testing.T) {
 	schemas := meta.Schemas()
 	require.Len(t, schemas, 2)
 
-	require.Empty(t, schemas[0].IdentifierFieldIDs)
-	require.Equal(t, []int{1, 2}, schemas[1].IdentifierFieldIDs)
+	require.Empty(t, schemas[0].IdentifierFieldIDs())
+	require.Equal(t, []int{1, 2}, schemas[1].IdentifierFieldIDs())
 }
 
 func TestInvalidSnapshotLogOrder(t *testing.T) {

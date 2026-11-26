@@ -35,7 +35,7 @@ func TestValidateIdentifierFields(t *testing.T) {
 		{"root", []int{1}, []NestedField{requiredID}, ""},
 		{"nested required struct", []int{2}, []NestedField{{
 			ID: 1, Name: "outer", Required: true,
-			Type: &StructType{FieldList: []NestedField{{
+			Type: &StructType{fields: []NestedField{{
 				ID: 2, Name: "id", Type: PrimitiveTypes.Int64, Required: true,
 			}}},
 		}}, ""},
@@ -59,23 +59,23 @@ func TestValidateIdentifierFields(t *testing.T) {
 			ID: 1, Name: "id", Type: &Int64Type{}, Required: true,
 		}}, ""},
 		{"struct", []int{1}, []NestedField{{
-			ID: 1, Name: "id", Type: &StructType{FieldList: nil}, Required: true,
+			ID: 1, Name: "id", Type: &StructType{fields: nil}, Required: true,
 		}}, "must be primitive"},
 		{"optional struct parent", []int{2}, []NestedField{{
 			ID: 1, Name: "outer",
-			Type: &StructType{FieldList: []NestedField{{
+			Type: &StructType{fields: []NestedField{{
 				ID: 2, Name: "id", Type: PrimitiveTypes.Int64, Required: true,
 			}}},
 		}}, "optional field"},
 		{"list element", []int{2}, []NestedField{{
 			ID: 1, Name: "items", Required: true,
-			Type: &ListType{ElementID: 2, Element: PrimitiveTypes.Int64, ElementRequired: true},
+			Type: &ListType{elementID: 2, element: PrimitiveTypes.Int64, elementRequired: true},
 		}}, "cannot be nested"},
 		{"map value", []int{3}, []NestedField{{
 			ID: 1, Name: "tags", Required: true,
 			Type: &MapType{
-				KeyID: 2, KeyType: PrimitiveTypes.String,
-				ValueID: 3, ValueType: PrimitiveTypes.Int64, ValueRequired: true,
+				keyID: 2, keyType: PrimitiveTypes.String,
+				valueID: 3, valueType: PrimitiveTypes.Int64, valueRequired: true,
 			},
 		}}, "cannot be nested"},
 		{"duplicate identifier", []int{1, 1}, []NestedField{requiredID}, "duplicate identifier"},
@@ -100,10 +100,10 @@ func TestValidateIdentifierFields(t *testing.T) {
 			switch {
 			case tc.error == "":
 				require.NoError(t, err)
-				require.Equal(t, tc.ids, read.IdentifierFieldIDs)
+				require.Equal(t, tc.ids, read.identifierFieldIDs)
 			case tc.name == "duplicate identifier":
 				require.NoError(t, err)
-				require.Equal(t, []int{1}, read.IdentifierFieldIDs)
+				require.Equal(t, []int{1}, read.identifierFieldIDs)
 			default:
 				require.ErrorIs(t, err, ErrInvalidSchema)
 				require.ErrorContains(t, err, tc.error)
@@ -124,13 +124,13 @@ func TestUnmarshalSchemaDeduplicatesIdentifierIDs(t *testing.T) {
 		]
 	}`), &schema)
 	require.NoError(t, err)
-	require.Equal(t, []int{2, 1}, schema.IdentifierFieldIDs)
+	require.Equal(t, []int{2, 1}, schema.identifierFieldIDs)
 
 	data, err := json.Marshal(&schema)
 	require.NoError(t, err)
 	var roundTrip Schema
 	require.NoError(t, json.Unmarshal(data, &roundTrip))
-	require.Equal(t, []int{2, 1}, roundTrip.IdentifierFieldIDs)
+	require.Equal(t, []int{2, 1}, roundTrip.identifierFieldIDs)
 	require.True(t, schema.Equals(&roundTrip))
 }
 
@@ -147,5 +147,5 @@ func TestUnmarshalSchemaRejectsInvalidIdentifierAndKeepsOldState(t *testing.T) {
 	require.ErrorIs(t, err, ErrInvalidSchema)
 	require.Equal(t, 7, schema.ID)
 	require.Equal(t, "original", schema.Field(0).Name)
-	require.Empty(t, schema.IdentifierFieldIDs)
+	require.Empty(t, schema.identifierFieldIDs)
 }

@@ -82,17 +82,17 @@ func appendRemoteProjectedTypeIDs(ids *[]int, typ iceberg.Type, fieldID int, inc
 			appendRemoteProjectedFieldIDs(ids, field)
 		}
 	case *iceberg.ListType:
-		if remoteProjectedLeaf(typ.Element) {
-			*ids = append(*ids, typ.ElementID)
+		if remoteProjectedLeaf(typ.Element()) {
+			*ids = append(*ids, typ.ElementID())
 		} else {
-			appendRemoteProjectedTypeIDs(ids, typ.Element, typ.ElementID, false)
+			appendRemoteProjectedTypeIDs(ids, typ.Element(), typ.ElementID(), false)
 		}
 	case *iceberg.MapType:
-		if remoteProjectedLeaf(typ.ValueType) {
-			*ids = append(*ids, typ.KeyID, typ.ValueID)
+		if remoteProjectedLeaf(typ.ValueType()) {
+			*ids = append(*ids, typ.KeyID(), typ.ValueID())
 		} else {
-			appendRemoteProjectedTypeIDs(ids, typ.ValueType, typ.ValueID, false)
-			appendRemoteProjectedTypeIDs(ids, typ.KeyType, typ.KeyID, false)
+			appendRemoteProjectedTypeIDs(ids, typ.ValueType(), typ.ValueID(), false)
+			appendRemoteProjectedTypeIDs(ids, typ.KeyType(), typ.KeyID(), false)
 		}
 	default:
 		if includeFieldID {

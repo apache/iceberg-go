@@ -79,7 +79,7 @@ func BenchmarkParquetRowGroupStatsFilterColumns(b *testing.B) {
 					for b.Loop() {
 						matched := 0
 						for rowGroup := range meta.NumRowGroups() {
-							keep, err := eval(meta.RowGroup(rowGroup), test.cols)
+							keep, err := eval(meta, rowGroup, test.cols)
 							if err != nil {
 								b.Fatal(err)
 							}

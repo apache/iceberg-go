@@ -1399,6 +1399,8 @@ func (a *arrowProjectionVisitor) List(listType iceberg.ListType, listArr arrow.A
 	case arrow.LARGE_LIST:
 		outType = arrow.LargeListOfField(elemField)
 	case arrow.LIST_VIEW:
+		outType = arrow.ListViewOfField(elemField)
+	case arrow.LARGE_LIST_VIEW:
 		outType = arrow.LargeListViewOfField(elemField)
 	}
 
@@ -2204,11 +2206,6 @@ func fileToDataFile(ctx context.Context, fileIO iceio.IO, filePath string, curre
 		if hasBucket || !field.Transform.PreservesOrder() {
 			panic(fmt.Errorf("%w: cannot infer partition field %q (id %d) with transform %s; supply WithFilePartitionValues",
 				iceberg.ErrInvalidArgument, field.Name, field.FieldID, field.Transform))
-		}
-
-		partitionVal := statistics.PartitionValue(field, currentSchema)
-		if partitionVal != nil {
-			partitionValues[field.FieldID] = partitionVal
 		}
 	}
 

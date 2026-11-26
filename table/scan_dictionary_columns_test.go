@@ -40,10 +40,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-var (
-	dictUTF8   = &arrow.DictionaryType{IndexType: arrow.PrimitiveTypes.Int32, ValueType: arrow.BinaryTypes.String}
-	dictBinary = &arrow.DictionaryType{IndexType: arrow.PrimitiveTypes.Int32, ValueType: arrow.BinaryTypes.Binary}
-)
+var dictUTF8 = &arrow.DictionaryType{IndexType: arrow.PrimitiveTypes.Int32, ValueType: arrow.BinaryTypes.String}
 
 func newDictionaryColumnsTable(t *testing.T, schema *iceberg.Schema, props iceberg.Properties) *table.Table {
 	t.Helper()
@@ -189,13 +186,13 @@ func TestWithDictionaryColumnsReturnsDictionaries(t *testing.T) {
 	// parents of the requested nested leaves.
 	tx := tbl.NewTransaction()
 	require.NoError(t, tx.UpdateSchema(true, false).
-		AddColumn([]string{"st"}, &iceberg.StructType{FieldList: []iceberg.NestedField{
-			{ID: 1, Name: "x", Type: iceberg.PrimitiveTypes.String},
-		}}, "", false, nil).
-		AddColumn([]string{"l"}, &iceberg.ListType{ElementID: 1, Element: iceberg.PrimitiveTypes.String}, "", false, nil).
-		AddColumn([]string{"m"}, &iceberg.MapType{
-			KeyID: 1, KeyType: iceberg.PrimitiveTypes.String, ValueID: 2, ValueType: iceberg.PrimitiveTypes.String,
-		}, "", false, nil).
+		AddColumn([]string{"st"}, iceberg.NewStructType(
+			iceberg.NestedField{ID: 1, Name: "x", Type: iceberg.PrimitiveTypes.String},
+		), "", false, nil).
+		AddColumn([]string{"l"}, iceberg.NewListType(1, iceberg.PrimitiveTypes.String, false), "", false, nil).
+		AddColumn([]string{"m"}, iceberg.NewMapType(
+			1, iceberg.PrimitiveTypes.String, 2, iceberg.PrimitiveTypes.String, false,
+		), "", false, nil).
 		Commit())
 	tbl, err := tx.Commit(t.Context())
 	require.NoError(t, err)
@@ -316,13 +313,13 @@ func TestWithDictionaryColumnsReadsParquetDictionaries(t *testing.T) {
 		schema := iceberg.NewSchema(0,
 			iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
 			iceberg.NestedField{ID: 2, Name: "s", Type: iceberg.PrimitiveTypes.String},
-			iceberg.NestedField{ID: 3, Name: "st", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
-				{ID: 5, Name: "x", Type: iceberg.PrimitiveTypes.String},
-			}}},
-			iceberg.NestedField{ID: 4, Name: "l", Type: &iceberg.ListType{ElementID: 6, Element: iceberg.PrimitiveTypes.String}},
-			iceberg.NestedField{ID: 7, Name: "m", Type: &iceberg.MapType{
-				KeyID: 8, KeyType: iceberg.PrimitiveTypes.String, ValueID: 9, ValueType: iceberg.PrimitiveTypes.String,
-			}},
+			iceberg.NestedField{ID: 3, Name: "st", Type: iceberg.NewStructType(
+				iceberg.NestedField{ID: 5, Name: "x", Type: iceberg.PrimitiveTypes.String},
+			)},
+			iceberg.NestedField{ID: 4, Name: "l", Type: iceberg.NewListType(6, iceberg.PrimitiveTypes.String, false)},
+			iceberg.NestedField{ID: 7, Name: "m", Type: iceberg.NewMapType(
+				8, iceberg.PrimitiveTypes.String, 9, iceberg.PrimitiveTypes.String, false,
+			)},
 		)
 		tbl := newDictionaryColumnsTable(t, schema, iceberg.Properties{
 			table.ParquetRowGroupLimitKey: "2",
@@ -444,9 +441,9 @@ func TestWithDictionaryColumnsValidation(t *testing.T) {
 }
 
 func TestWithDictionaryColumnsDeletes(t *testing.T) {
-	st := iceberg.NestedField{ID: 4, Name: "st", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
-		{ID: 5, Name: "x", Type: iceberg.PrimitiveTypes.String},
-	}}}
+	st := iceberg.NestedField{ID: 4, Name: "st", Type: iceberg.NewStructType(
+		iceberg.NestedField{ID: 5, Name: "x", Type: iceberg.PrimitiveTypes.String},
+	)}
 	s := iceberg.NestedField{ID: 2, Name: "s", Type: iceberg.PrimitiveTypes.String}
 	b := iceberg.NestedField{ID: 3, Name: "b", Type: iceberg.PrimitiveTypes.Binary}
 	schema := iceberg.NewSchema(0,
@@ -570,9 +567,9 @@ func TestWithDictionaryColumnsRowFilters(t *testing.T) {
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
 		iceberg.NestedField{ID: 2, Name: "s", Type: iceberg.PrimitiveTypes.String},
 		iceberg.NestedField{ID: 3, Name: "b", Type: iceberg.PrimitiveTypes.Binary},
-		iceberg.NestedField{ID: 4, Name: "st", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
-			{ID: 5, Name: "x", Type: iceberg.PrimitiveTypes.String},
-		}}},
+		iceberg.NestedField{ID: 4, Name: "st", Type: iceberg.NewStructType(
+			iceberg.NestedField{ID: 5, Name: "x", Type: iceberg.PrimitiveTypes.String},
+		)},
 	)
 	tbl := newDictionaryColumnsTable(t, schema, nil)
 	// b holds base64 in JSON: eA== x, eQ== y.

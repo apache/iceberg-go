@@ -166,13 +166,13 @@ func decodedTypeOf(typ iceberg.Type) map[string]any {
 		return map[string]any{"type": "struct", "fields": fields}
 	case *iceberg.ListType:
 		return map[string]any{
-			"type": "list", "element-id": typ.ElementID,
-			"element-required": typ.ElementRequired, "element": decodedTypeOf(typ.Element),
+			"type": "list", "element-id": typ.ElementID(),
+			"element-required": typ.ElementRequired(), "element": decodedTypeOf(typ.Element()),
 		}
 	case *iceberg.MapType:
 		return map[string]any{
-			"type": "map", "key-id": typ.KeyID, "key": decodedTypeOf(typ.KeyType),
-			"value-id": typ.ValueID, "value-required": typ.ValueRequired, "value": decodedTypeOf(typ.ValueType),
+			"type": "map", "key-id": typ.KeyID(), "key": decodedTypeOf(typ.KeyType()),
+			"value-id": typ.ValueID(), "value-required": typ.ValueRequired(), "value": decodedTypeOf(typ.ValueType()),
 		}
 	default:
 		return map[string]any{"type": typ.Type()}

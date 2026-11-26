@@ -936,7 +936,7 @@ func newInclusiveMetricsEvaluator(s *iceberg.Schema, expr iceberg.BooleanExpress
 
 func newParquetRowGroupStatsEvaluator(fileSchema *iceberg.Schema, expr iceberg.BooleanExpression,
 	includeEmptyFiles bool,
-) (func(*metadata.RowGroupMetaData, []int) (bool, error), error) {
+) (internal.ParquetRowGroupStatsFn, error) {
 	rewritten, err := iceberg.RewriteNotExpr(expr)
 	if err != nil {
 		return nil, err
@@ -947,7 +947,7 @@ func newParquetRowGroupStatsEvaluator(fileSchema *iceberg.Schema, expr iceberg.B
 
 func newParquetRowGroupStatsEvaluatorFromRewritten(
 	expr iceberg.BooleanExpression, includeEmptyFiles bool,
-) func(*metadata.RowGroupMetaData, []int) (bool, error) {
+) internal.ParquetRowGroupStatsFn {
 	return (&inclusiveMetricsEval{
 		includeEmptyFiles: includeEmptyFiles,
 		expr:              expr,
@@ -1038,7 +1038,8 @@ func parquetStatsBounds(stats metadata.TypedStatistics, fieldType iceberg.Type) 
 	return lower, upper, true
 }
 
-func (m *inclusiveMetricsEval) TestRowGroup(rgmeta *metadata.RowGroupMetaData, colIndices []int) (bool, error) {
+func (m *inclusiveMetricsEval) TestRowGroup(meta *metadata.FileMetaData, rowGroup int, colIndices []int) (bool, error) {
+	rgmeta := meta.RowGroup(rowGroup)
 	if !m.includeEmptyFiles && rgmeta.NumRows() == 0 {
 		return rowsCannotMatch, nil
 	}
@@ -1082,22 +1083,25 @@ func (m *inclusiveMetricsEval) TestRowGroup(rgmeta *metadata.RowGroupMetaData, c
 
 		fieldID := int(stats.Descr().SchemaNode().FieldID())
 		m.valueCounts[fieldID] = colMeta.NumValues()
-		if stats.HasNullCount() {
+		hasNullCount, hasBounds := internal.ParquetColumnStatsPresence(meta, rowGroup, c)
+		if hasNullCount {
 			m.nullCounts[fieldID] = stats.NullCount()
 		}
-		var fieldType iceberg.Type
-		if internal.IsTimestampMillis(stats.Descr()) {
-			fieldType = m.fieldType(fieldID)
-		}
-		if lower, upper, ok := parquetStatsBounds(stats, fieldType); ok {
-			if m.lowerBounds == nil {
-				// Lower and upper bounds are always allocated together.
-				m.lowerBounds = make(map[int][]byte, len(colIndices))
-				m.upperBounds = make(map[int][]byte, len(colIndices))
+		if hasBounds && stats.HasMinMax() {
+			var fieldType iceberg.Type
+			if internal.IsTimestampMillis(stats.Descr()) {
+				fieldType = m.fieldType(fieldID)
 			}
+			if lower, upper, ok := parquetStatsBounds(stats, fieldType); ok {
+				if m.lowerBounds == nil {
+					// Lower and upper bounds are always allocated together.
+					m.lowerBounds = make(map[int][]byte, len(colIndices))
+					m.upperBounds = make(map[int][]byte, len(colIndices))
+				}
 
-			m.lowerBounds[fieldID] = lower
-			m.upperBounds[fieldID] = upper
+				m.lowerBounds[fieldID] = lower
+				m.upperBounds[fieldID] = upper
+			}
 		}
 	}
 

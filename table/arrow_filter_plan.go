@@ -26,7 +26,6 @@ import (
 	"sync"
 
 	"github.com/apache/arrow-go/v18/arrow/compute/exprs"
-	"github.com/apache/arrow-go/v18/parquet/metadata"
 	"github.com/apache/iceberg-go"
 	iceinternal "github.com/apache/iceberg-go/internal"
 	tblutils "github.com/apache/iceberg-go/table/internal"
@@ -63,7 +62,7 @@ func (p *compiledFileFilterPlan) recordProcessor(ctx context.Context) recProcess
 	return filterRecords(ctx, p.recordFilter)
 }
 
-func (p *compiledFileFilterPlan) statsEvaluator() func(*metadata.RowGroupMetaData, []int) (bool, error) {
+func (p *compiledFileFilterPlan) statsEvaluator() tblutils.ParquetRowGroupStatsFn {
 	// Passing an AlwaysTrue evaluator still allocates fresh metric maps for
 	// every row group. A nil evaluator has the same keep-all semantics and lets
 	// the Parquet reader take its no-pruning path.
@@ -222,27 +221,27 @@ func writePhysicalTypeKey(builder *strings.Builder, typ iceberg.Type) {
 			panic(physicalSchemaKeyPanic("nil list type"))
 		}
 		builder.WriteByte('l')
-		writePhysicalInt(builder, t.ElementID)
-		if t.ElementRequired {
+		writePhysicalInt(builder, t.ElementID())
+		if t.ElementRequired() {
 			builder.WriteByte('1')
 		} else {
 			builder.WriteByte('0')
 		}
-		writePhysicalTypeKey(builder, t.Element)
+		writePhysicalTypeKey(builder, t.Element())
 	case *iceberg.MapType:
 		if t == nil {
 			panic(physicalSchemaKeyPanic("nil map type"))
 		}
 		builder.WriteByte('m')
-		writePhysicalInt(builder, t.KeyID)
-		writePhysicalTypeKey(builder, t.KeyType)
-		writePhysicalInt(builder, t.ValueID)
-		if t.ValueRequired {
+		writePhysicalInt(builder, t.KeyID())
+		writePhysicalTypeKey(builder, t.KeyType())
+		writePhysicalInt(builder, t.ValueID())
+		if t.ValueRequired() {
 			builder.WriteByte('1')
 		} else {
 			builder.WriteByte('0')
 		}
-		writePhysicalTypeKey(builder, t.ValueType)
+		writePhysicalTypeKey(builder, t.ValueType())
 	case iceberg.BooleanType:
 		builder.WriteByte('b')
 	case iceberg.Int32Type:

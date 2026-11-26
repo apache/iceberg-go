@@ -54,7 +54,7 @@ func TestParquetRowGroupStatsUseRequestedFieldIDs(t *testing.T) {
 
 			var calls [][]int
 			tester := &internal.ParquetRowGroupTester{
-				StatsFn: func(_ *metadata.RowGroupMetaData, cols []int) (bool, error) {
+				StatsFn: func(_ *metadata.FileMetaData, _ int, cols []int) (bool, error) {
 					calls = append(calls, append([]int{}, cols...))
 
 					return true, nil
@@ -83,10 +83,10 @@ func TestParquetRowGroupStatsPruneUsingUnprojectedColumn(t *testing.T) {
 	tester := &internal.ParquetRowGroupTester{
 		StatsFieldIDs: []int{2},
 		Survivors:     &survivors,
-		StatsFn: func(rg *metadata.RowGroupMetaData, cols []int) (bool, error) {
+		StatsFn: func(meta *metadata.FileMetaData, rg int, cols []int) (bool, error) {
 			calls++
 			require.Equal(t, []int{1}, cols, "stats must use the filter column, independent of projection")
-			column, err := rg.ColumnChunk(cols[0])
+			column, err := meta.RowGroup(rg).ColumnChunk(cols[0])
 			require.NoError(t, err)
 			stats, err := column.Statistics()
 			require.NoError(t, err)
@@ -142,7 +142,7 @@ func TestParquetRowGroupStatsUseNestedFieldIDs(t *testing.T) {
 
 	var calls [][]int
 	tester := &internal.ParquetRowGroupTester{
-		StatsFn: func(_ *metadata.RowGroupMetaData, cols []int) (bool, error) {
+		StatsFn: func(_ *metadata.FileMetaData, _ int, cols []int) (bool, error) {
 			calls = append(calls, append([]int{}, cols...))
 
 			return true, nil
@@ -175,7 +175,7 @@ func TestParquetRowGroupStatsShareMappingWithBloomAndDictionaryPruning(t *testin
 
 			var calls [][]int
 			tester := &internal.ParquetRowGroupTester{
-				StatsFn: func(_ *metadata.RowGroupMetaData, cols []int) (bool, error) {
+				StatsFn: func(_ *metadata.FileMetaData, _ int, cols []int) (bool, error) {
 					calls = append(calls, append([]int{}, cols...))
 
 					return true, nil
