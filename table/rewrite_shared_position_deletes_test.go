@@ -365,7 +365,7 @@ func TestRewriteFilesRejectsParentChangeDuringManifestWrite(t *testing.T) {
 
 func TestRewriteStagesAgainstCompatibleMetadata(t *testing.T) {
 	for _, mode := range []string{"builder", "ReplaceFiles", "conversion", "atomic"} {
-		for _, edit := range []string{"property", "location"} {
+		for _, edit := range []string{"property", "location", "metadata path"} {
 			t.Run(mode+"/"+edit, func(t *testing.T) {
 				ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 				defer cancel()
@@ -457,14 +457,17 @@ func TestRewriteStagesAgainstCompatibleMetadata(t *testing.T) {
 				}
 
 				newLocation := tbl.Location() + "/relocated"
+				newMetadataPath := tbl.Location() + "/relocated-metadata"
 				editDone := make(chan error, 1)
 				go func() {
-					if edit == "property" {
+					switch edit {
+					case "property":
 						editDone <- tx.SetProperties(iceberg.Properties{"owner": "compaction"})
-
-						return
+					case "location":
+						editDone <- tx.SetLocation(newLocation)
+					case "metadata path":
+						editDone <- tx.SetProperties(iceberg.Properties{table.WriteMetadataPathKey: newMetadataPath})
 					}
-					editDone <- tx.SetLocation(newLocation)
 				}()
 				select {
 				case err := <-editDone:
@@ -496,7 +499,11 @@ func TestRewriteStagesAgainstCompatibleMetadata(t *testing.T) {
 					require.Equal(t, "compaction", committed.Properties()["owner"])
 					require.NotEqual(t, parent, committed.CurrentSnapshot().SnapshotID)
 				} else {
-					require.Equal(t, newLocation, committed.Location())
+					if edit == "location" {
+						require.Equal(t, newLocation, committed.Location())
+					} else {
+						require.Equal(t, newMetadataPath, committed.Properties()[table.WriteMetadataPathKey])
+					}
 					require.Equal(t, parent, committed.CurrentSnapshot().SnapshotID)
 				}
 				require.ElementsMatch(t, wantIDs, scanIDs(t, committed))
