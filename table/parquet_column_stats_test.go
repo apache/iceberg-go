@@ -196,7 +196,7 @@ func TestParquetColumnStatisticsWriterPaths(t *testing.T) {
 					bound, err := iceberg.BindExpr(schema, pred, true)
 					require.NoError(t, err)
 					rowEval := &inclusiveMetricsEval{expr: bound}
-					mayMatch, err = rowEval.TestRowGroup(rowGroup, []int{tc.index})
+					mayMatch, err = rowEval.TestRowGroup(meta, 0, []int{tc.index})
 					require.NoError(t, err)
 					assert.Equal(t, tc.keep, mayMatch, "row group %s", tc.column)
 				}
@@ -352,7 +352,7 @@ func TestParquetColumnStatisticsAcrossRowGroups(t *testing.T) {
 					require.NoError(t, err)
 					assert.Equal(t, expected, statsSet, "row group %d, column %s", group, path)
 				}
-				mayMatch, err := rowEval.TestRowGroup(rowGroup, []int{0})
+				mayMatch, err := rowEval.TestRowGroup(meta, group, []int{0})
 				require.NoError(t, err)
 				assert.True(t, mayMatch, "row group %d must not be pruned without id stats", group)
 			}
