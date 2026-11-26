@@ -64,6 +64,13 @@ func writePartialMetricsParquet[T int32 | string](t *testing.T, schema *iceberg.
 	}
 	require.NoError(t, writer.Close())
 	data := buf.Bytes()
+	path := filepath.Join(t.TempDir(), "input.parquet")
+	if omit == "" {
+		require.NoError(t, os.WriteFile(path, data, 0o600))
+
+		return path
+	}
+
 	reader, err := file.NewParquetReader(bytes.NewReader(data))
 	require.NoError(t, err)
 	footer := reader.MetaData()
@@ -121,7 +128,6 @@ func writePartialMetricsParquet[T int32 | string](t *testing.T, schema *iceberg.
 	fileData := append(bytes.Clone(data[:len(data)-8-footerSize]), encodedFooter...)
 	fileData = binary.LittleEndian.AppendUint32(fileData, uint32(len(encodedFooter)))
 	fileData = append(fileData, "PAR1"...)
-	path := filepath.Join(t.TempDir(), "input.parquet")
 	require.NoError(t, os.WriteFile(path, fileData, 0o600))
 
 	return path
@@ -259,6 +265,33 @@ func TestMissingParquetStatisticsPartitionInference(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestEmptyParquetRowGroupsPartitionInference(t *testing.T) {
+	value := int32(7)
+	schema := iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "amount", Type: iceberg.PrimitiveTypes.Int32})
+	spec := iceberg.NewPartitionSpecID(0, iceberg.PartitionField{SourceIDs: []int{1}, FieldID: 1000, Name: "amount", Transform: iceberg.IdentityTransform{}})
+	path := writePartialMetricsParquet(t, schema, [][]*int32{nil, {&value}, nil}, "")
+
+	reader, err := file.OpenParquetFile(path, false)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, reader.Close()) })
+	groups := reader.MetaData().RowGroups
+	require.Len(t, groups, 3)
+	for _, i := range []int{0, 2} {
+		require.Zero(t, groups[i].NumRows)
+		require.Zero(t, groups[i].Columns[0].MetaData.NumValues)
+		require.Nil(t, groups[i].Columns[0].MetaData.Statistics)
+	}
+
+	dataFile, err := table.FileToDataFile(t.Context(), iceio.LocalFS{}, path, schema, spec, 0, nil)
+	require.NoError(t, err)
+	assert.Equal(t, value, dataFile.Partition()[1000])
+	assert.Equal(t, map[int]int64{1: 1}, dataFile.ValueCounts())
+	assert.Equal(t, map[int]int64{1: 0}, dataFile.NullValueCounts())
+	bound := binary.LittleEndian.AppendUint32(nil, uint32(value))
+	assert.Equal(t, bound, dataFile.LowerBoundValues()[1])
+	assert.Equal(t, bound, dataFile.UpperBoundValues()[1])
 }
 
 func TestImportedParquetStringBounds(t *testing.T) {

@@ -1998,6 +1998,10 @@ func (p parquetFormat) DataFileStatsFromMeta(meta Metadata, statsCols map[int]St
 			// This deliberately diverges from Java, which drops value_counts for a column once any row group lacks stats.
 			colSizes[fieldID] += colChunk.TotalCompressedSize()
 			valueCounts[fieldID] += colChunk.NumValues()
+			// An empty row group contributes no nulls or bounds.
+			if rowGroup.NumRows() == 0 && colChunk.NumValues() == 0 {
+				continue
+			}
 			if _, invalid := invalidateCol[fieldID]; invalid {
 				continue
 			}
