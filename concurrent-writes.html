@@ -255,8 +255,10 @@ also matches <code>ErrTransactionUnusable</code>.</li>
 <li><code>table.ErrDuplicateDataFiles</code> — terminal for the requested paths. A
 <code>RowDelta</code> rejects repeated paths during staging and checks whether a
 concurrent commit added any of its paths that are still live on retry.
-A retry collision also matches <code>ErrTransactionUnusable</code>. Use distinct
-paths in a new operation.</li>
+<code>AddDataFiles</code> and <code>AddDataFilesByPath</code> make the same retry check unless
+the duplicate check is disabled (<code>WithoutDuplicateCheck</code> or
+<code>ignoreDuplicates</code>). A retry collision also matches
+<code>ErrTransactionUnusable</code>. Use distinct paths in a new operation.</li>
 <li><code>table.ErrTransactionUnusable</code> — this transaction can't be committed again.
 If the error also matches <code>ErrCommitFailed</code>, retry in a new transaction from a
 reloaded table.</li>

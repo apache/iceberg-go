@@ -2578,8 +2578,10 @@ also matches <code>ErrTransactionUnusable</code>.</li>
 <li><code>table.ErrDuplicateDataFiles</code> — terminal for the requested paths. A
 <code>RowDelta</code> rejects repeated paths during staging and checks whether a
 concurrent commit added any of its paths that are still live on retry.
-A retry collision also matches <code>ErrTransactionUnusable</code>. Use distinct
-paths in a new operation.</li>
+<code>AddDataFiles</code> and <code>AddDataFilesByPath</code> make the same retry check unless
+the duplicate check is disabled (<code>WithoutDuplicateCheck</code> or
+<code>ignoreDuplicates</code>). A retry collision also matches
+<code>ErrTransactionUnusable</code>. Use distinct paths in a new operation.</li>
 <li><code>table.ErrTransactionUnusable</code> — this transaction can't be committed again.
 If the error also matches <code>ErrCommitFailed</code>, retry in a new transaction from a
 reloaded table.</li>
@@ -3325,6 +3327,9 @@ make integration-external-rest
 <p>Per-release notes (highlights, breaking changes, contributors) are published on the <a href="https://github.com/apache/iceberg-go/releases">GitHub Releases page</a>. Iceberg Go does not maintain a curated <code>CHANGELOG.md</code> in the repository; the GitHub Releases page is the canonical source.</p>
 <h3 id="unreleased-compatibility-notes"><a class="header" href="#unreleased-compatibility-notes">Unreleased compatibility notes</a></h3>
 <ul>
+<li>
+<p><strong><code>AddDataFiles</code> and <code>AddDataFilesByPath</code> no longer add a file twice on retry.</strong> When a commit retry finds that a concurrent commit already added one of the same paths, the commit now fails with <code>table.ErrDuplicateDataFiles</code>, which also matches <code>table.ErrTransactionUnusable</code>. Previously, the retry added the file a second time and scans returned its rows twice. With <code>WithoutDuplicateCheck</code> or <code>ignoreDuplicates=true</code>, the retry still adds the file again, as before.</p>
+</li>
 <li>
 <p><strong>gocloud types are no longer exposed by <code>blobfs</code> and <code>gcs</code>.</strong> <code>blobfs.New</code> now returns the <code>blobfs.FileIO</code> interface, which lists the iceberg-go io interfaces and <code>io.Closer</code>, instead of a struct that embeds <code>*blob.Bucket</code>. <code>FileIO.NewWriter</code>, <code>blobfs.Writer</code> and <code>gcs.ParseGCSConfig</code> are removed; use <code>Create</code>, or configure GCS through properties. To migrate, replace <code>*blobfs.FileIO</code> with <code>blobfs.FileIO</code> in fields, signatures and <code>var _ X = (*blobfs.FileIO)(nil)</code> assertions, and assert <code>Sys()</code> results to <code>blobfs.FileIO</code> instead of <code>*blobfs.FileIO</code>.</p>
 </li>
