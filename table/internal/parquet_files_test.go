@@ -2099,7 +2099,7 @@ func TestAdaptiveParquetBloomFilterSizing(t *testing.T) {
 	_, strictSize := writeSizedBloomParquet(t, strictProps, 5000, rows)
 	assert.Less(t, looseSize, strictSize, "lower FPP needs more bits for the same NDV")
 
-	alwaysKeep := func(_ *metadata.RowGroupMetaData, _ []int) (bool, error) { return true, nil }
+	alwaysKeep := func(_ *metadata.FileMetaData, _ int, _ []int) (bool, error) { return true, nil }
 	for _, tc := range []struct {
 		name string
 		data []byte
@@ -2375,7 +2375,7 @@ func TestBloomFilterRowGroupPruning(t *testing.T) {
 	data := buildBloomTestParquet(t, rgSize)
 
 	// Stats function that always keeps the row group (isolates bloom logic).
-	alwaysKeep := func(_ *metadata.RowGroupMetaData, _ []int) (bool, error) {
+	alwaysKeep := func(_ *metadata.FileMetaData, _ int, _ []int) (bool, error) {
 		return true, nil
 	}
 
@@ -2578,7 +2578,7 @@ func TestDictionaryRowGroupPruning(t *testing.T) {
 	}
 
 	data := buildDictionaryTestParquet(t, rg0, rg1)
-	alwaysKeep := func(_ *metadata.RowGroupMetaData, _ []int) (bool, error) {
+	alwaysKeep := func(_ *metadata.FileMetaData, _ int, _ []int) (bool, error) {
 		return true, nil
 	}
 
@@ -2642,7 +2642,7 @@ func TestDictionaryRowGroupPruning(t *testing.T) {
 func TestDictionaryRowGroupPruningMultiColumnAnd(t *testing.T) {
 	const rgSize = 1024
 
-	alwaysKeep := func(_ *metadata.RowGroupMetaData, _ []int) (bool, error) {
+	alwaysKeep := func(_ *metadata.FileMetaData, _ int, _ []int) (bool, error) {
 		return true, nil
 	}
 	repeatedIDs := func(first, second int32) []int32 {
@@ -2747,7 +2747,7 @@ func TestDictionaryRowGroupPruningChecksTailAfterMatchingPrefix(t *testing.T) {
 
 	var survivors []internal.RowGroupSpan
 	tester := &internal.ParquetRowGroupTester{
-		StatsFn: func(_ *metadata.RowGroupMetaData, _ []int) (bool, error) {
+		StatsFn: func(_ *metadata.FileMetaData, _ int, _ []int) (bool, error) {
 			return true, nil
 		},
 		DictionaryPreds: []internal.RowGroupDictionaryPred{
@@ -2782,7 +2782,7 @@ func TestDictionaryRowGroupPruningFallbackUsesMainReader(t *testing.T) {
 	defer rdr.Close()
 
 	tester := &internal.ParquetRowGroupTester{
-		StatsFn: func(_ *metadata.RowGroupMetaData, _ []int) (bool, error) {
+		StatsFn: func(_ *metadata.FileMetaData, _ int, _ []int) (bool, error) {
 			return true, nil
 		},
 		DictionaryPreds: []internal.RowGroupDictionaryPred{
@@ -2813,7 +2813,7 @@ func TestDictionaryRowGroupPruningClosesTemporaryReaderWithoutClosingSource(t *t
 	rdr := internal.WrapParquetFileReaderWithDictionarySource(arrRdr, source)
 
 	tester := &internal.ParquetRowGroupTester{
-		StatsFn: func(_ *metadata.RowGroupMetaData, _ []int) (bool, error) {
+		StatsFn: func(_ *metadata.FileMetaData, _ int, _ []int) (bool, error) {
 			return true, nil
 		},
 		DictionaryPreds: []internal.RowGroupDictionaryPred{
@@ -2850,7 +2850,7 @@ func BenchmarkDictionaryRowGroupPruning(b *testing.B) {
 	}
 
 	data := buildDictionaryTestParquet(b, rowGroups...)
-	alwaysKeep := func(_ *metadata.RowGroupMetaData, _ []int) (bool, error) {
+	alwaysKeep := func(_ *metadata.FileMetaData, _ int, _ []int) (bool, error) {
 		return true, nil
 	}
 	cols := []int{0}
@@ -2983,7 +2983,7 @@ func TestDictionaryRowGroupPruningKeepsFallbackColumns(t *testing.T) {
 		DictionaryPreds: []internal.RowGroupDictionaryPred{
 			{FieldID: 1, PhysBytes: [][]byte{[]byte("plain-only-target")}},
 		},
-		StatsFn: func(_ *metadata.RowGroupMetaData, _ []int) (bool, error) {
+		StatsFn: func(_ *metadata.FileMetaData, _ int, _ []int) (bool, error) {
 			return true, nil
 		},
 	}
@@ -3006,7 +3006,7 @@ func TestParquetRowGroupRangeSelection(t *testing.T) {
 	offsets := []int64{meta.RowGroup(0).FileOffset(), meta.RowGroup(1).FileOffset()}
 	require.Less(t, offsets[0], offsets[1])
 
-	alwaysKeep := func(_ *metadata.RowGroupMetaData, _ []int) (bool, error) {
+	alwaysKeep := func(_ *metadata.FileMetaData, _ int, _ []int) (bool, error) {
 		return true, nil
 	}
 
@@ -3102,7 +3102,7 @@ func TestParquetRowGroupRangeSelectionRejectsInvalidRanges(t *testing.T) {
 	fileSize := int64(len(data))
 	require.NoError(t, pqReader.Close())
 
-	alwaysKeep := func(_ *metadata.RowGroupMetaData, _ []int) (bool, error) {
+	alwaysKeep := func(_ *metadata.FileMetaData, _ int, _ []int) (bool, error) {
 		return true, nil
 	}
 	tests := []struct {
@@ -3139,7 +3139,7 @@ func TestParquetRowGroupRangeSelectionRejectsInvalidRanges(t *testing.T) {
 
 func TestParquetRowGroupRangeSelectionUsesPlanningOffsets(t *testing.T) {
 	const rgSize = 100
-	alwaysKeep := func(_ *metadata.RowGroupMetaData, _ []int) (bool, error) {
+	alwaysKeep := func(_ *metadata.FileMetaData, _ int, _ []int) (bool, error) {
 		return true, nil
 	}
 
@@ -3248,7 +3248,7 @@ func TestParquetRowGroupRangeSelectionFallsBackToFirstColumnOffset(t *testing.T)
 	defer rdr.Close()
 
 	tester := &internal.ParquetRowGroupTester{
-		StatsFn:  func(_ *metadata.RowGroupMetaData, _ []int) (bool, error) { return true, nil },
+		StatsFn:  func(_ *metadata.FileMetaData, _ int, _ []int) (bool, error) { return true, nil },
 		RangeSet: true,
 		Start:    offsets[1],
 		Length:   int64(len(data)) - offsets[1],

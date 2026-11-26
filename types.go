@@ -513,7 +513,8 @@ func (s *StructType) Fields() []NestedField { return slices.Clone(s.fields) }
 // which Go fields are exported.
 
 // MarshalJSON has a value receiver on purpose: [Schema.AsStruct] returns a
-// StructType value, which must not encode as {}.
+// StructType value, which must not encode as {}. The other methods keep
+// pointer receivers, so only *StructType implements Type.
 func (s StructType) MarshalJSON() ([]byte, error) {
 	fields := s.fields
 	if fields == nil {
@@ -592,7 +593,8 @@ func (l *ListType) Element() Type { return l.element }
 func (l *ListType) ElementRequired() bool { return l.elementRequired }
 
 // MarshalJSON has a value receiver on purpose: a ListType value, such as one
-// held in a map, must not encode as {}.
+// held in a map, must not encode as {}. The other methods keep pointer
+// receivers, so only *ListType implements Type.
 func (l ListType) MarshalJSON() ([]byte, error) {
 	return json.Marshal(struct {
 		Type            string     `json:"type"`
@@ -693,7 +695,8 @@ func (m *MapType) ValueType() Type { return m.valueType }
 func (m *MapType) ValueRequired() bool { return m.valueRequired }
 
 // MarshalJSON has a value receiver on purpose: a MapType value, such as one
-// held in a map, must not encode as {}.
+// held in a map, must not encode as {}. The other methods keep pointer
+// receivers, so only *MapType implements Type.
 func (m MapType) MarshalJSON() ([]byte, error) {
 	return json.Marshal(struct {
 		Type          string     `json:"type"`
