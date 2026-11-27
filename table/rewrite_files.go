@@ -280,8 +280,8 @@ func (r *RewriteFiles) ApplyResult(gr CompactionGroupResult) *RewriteFiles {
 // Commit stages the rewrite snapshot on the underlying transaction.
 // The catalog commit happens once, later, at [Transaction.Commit] time.
 //
-// To validate position-delete removal candidates, Commit reads manifests across
-// the staging snapshot and may also read partition-scoped position-delete files.
+// To check position-delete removal candidates, Commit reads delete manifests in
+// the staging snapshot and also reads data manifests for partition-scoped candidates.
 //
 // Commit is single-shot: any second call returns an error regardless
 // of whether the first call succeeded, and neither re-stages the
@@ -290,9 +290,6 @@ func (r *RewriteFiles) ApplyResult(gr CompactionGroupResult) *RewriteFiles {
 // [RewriteFiles.DeleteFile] had an unsupported content type, if the
 // builder has no file changes, or if the underlying
 // [Transaction.ReplaceFiles] call fails.
-//
-// Position-delete candidates can require reading manifests across the current
-// snapshot and opening delete files to check which data files they affect.
 func (r *RewriteFiles) Commit(ctx context.Context) error {
 	if r.committed {
 		return fmt.Errorf("%w: RewriteFiles.Commit already called on this builder", ErrInvalidOperation)
