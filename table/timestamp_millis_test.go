@@ -22,6 +22,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -31,6 +32,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/arrow-go/v18/parquet"
 	"github.com/apache/arrow-go/v18/parquet/file"
+	"github.com/apache/arrow-go/v18/parquet/metadata"
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	parquetschema "github.com/apache/arrow-go/v18/parquet/schema"
 	"github.com/apache/iceberg-go"
@@ -282,7 +284,7 @@ func TestScanTimestampMillisRowFiltersAndProjection(t *testing.T) {
 		for _, pc := range propCases {
 			t.Run(tc.name+"/"+pc.name, func(t *testing.T) {
 				alloc := memory.NewCheckedAllocator(memory.DefaultAllocator)
-				if tc.unit != arrow.Microsecond || !pc.hasBloom {
+				if !pc.hasBloom {
 					// arrow-go's bloom filter reader allocates its bitset from the
 					// reader allocator with no Release method.
 					defer alloc.AssertSize(t, 0)
@@ -693,4 +695,406 @@ func TestScanTimestampMillisWithDictionaryColumns(t *testing.T) {
 	assert.Equal(t, []int64{2, 3}, ids)
 	assert.Equal(t, []string{"b", "a"}, labels)
 	assert.Equal(t, []int64{t1.UnixMicro(), t2.UnixMicro()}, vals)
+}
+
+type byteRange struct {
+	start, end int64
+}
+
+type rangeTrackingFile struct {
+	iceio.File
+	fs *rangeTrackingFS
+}
+
+func (f rangeTrackingFile) ReadAt(p []byte, off int64) (int, error) {
+	if len(p) > 0 {
+		f.fs.record(off, off+int64(len(p)))
+	}
+
+	return f.File.ReadAt(p, off)
+}
+
+type rangeTrackingFS struct {
+	iceio.LocalFS
+	path   string
+	mu     sync.Mutex
+	ranges []byteRange
+}
+
+func (f *rangeTrackingFS) Open(ctx context.Context, location string) (iceio.File, error) {
+	input, err := f.LocalFS.Open(ctx, location)
+	if err == nil && location == f.path {
+		return rangeTrackingFile{File: input, fs: f}, nil
+	}
+
+	return input, err
+}
+
+func (f *rangeTrackingFS) record(start, end int64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.ranges = append(f.ranges, byteRange{start: start, end: end})
+}
+
+func (f *rangeTrackingFS) reset() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.ranges = f.ranges[:0]
+}
+
+func (f *rangeTrackingFS) readRange(r byteRange) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, seen := range f.ranges {
+		if seen.start < r.end && r.start < seen.end {
+			return true
+		}
+	}
+
+	return false
+}
+
+func columnChunkByteRange(cc *metadata.ColumnChunkMetaData) byteRange {
+	start := cc.DataPageOffset()
+	if cc.HasDictionaryPage() {
+		start = min(start, cc.DictionaryPageOffset())
+	}
+
+	return byteRange{start: start, end: start + cc.TotalCompressedSize()}
+}
+
+func TestScanTimestampMillisRowGroupPruning(t *testing.T) {
+	const (
+		negMilli  = int64(-1_500)
+		rg0Milli  = int64(1_700_000_000_000)
+		rg1Milli  = rg0Milli + 5_000
+		missMilli = rg1Milli + 5_000
+	)
+
+	fieldIDMeta := func(id string) arrow.Metadata {
+		return arrow.MetadataFrom(map[string]string{"PARQUET:field_id": id})
+	}
+
+	writeMultiRG := func(t *testing.T, alloc memory.Allocator, path string, sc *arrow.Schema, recs []arrow.RecordBatch, props *parquet.WriterProperties) {
+		t.Helper()
+		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+		f, err := os.Create(path)
+		require.NoError(t, err)
+		tbl := array.NewTableFromRecords(sc, recs)
+		defer tbl.Release()
+		require.NoError(t, pqarrow.WriteTable(tbl, f, recs[0].NumRows(), props,
+			pqarrow.NewArrowWriterProperties(pqarrow.WithAllocator(alloc))))
+	}
+
+	inspectFooter := func(t *testing.T, path string, hasBloom bool) (rg0ID, rg1ID, rg0TS, rg1TS byteRange) {
+		t.Helper()
+		f, err := os.Open(path)
+		require.NoError(t, err)
+		pqRdr, err := file.NewParquetReader(f)
+		require.NoError(t, err)
+		defer func() { require.NoError(t, pqRdr.Close()) }()
+
+		meta := pqRdr.MetaData()
+		require.Equal(t, 2, meta.NumRowGroups())
+
+		idRanges := make([]byteRange, 2)
+		tsRanges := make([]byteRange, 2)
+		for rg := range 2 {
+			idCC, err := meta.RowGroup(rg).ColumnChunk(0)
+			require.NoError(t, err)
+			idRanges[rg] = columnChunkByteRange(idCC)
+
+			tsCC, err := meta.RowGroup(rg).ColumnChunk(1)
+			require.NoError(t, err)
+			tsRanges[rg] = columnChunkByteRange(tsCC)
+
+			statsSet, err := tsCC.StatsSet()
+			require.NoError(t, err)
+			require.False(t, statsSet, "row group %d should have no stats", rg)
+			if hasBloom {
+				require.Greater(t, tsCC.BloomFilterOffset(), int64(0), "row group %d missing bloom filter", rg)
+			} else {
+				require.True(t, tsCC.HasDictionaryPage(), "row group %d missing dictionary page", rg)
+				encStats := tsCC.EncodingStats()
+				require.NotEmpty(t, encStats, "row group %d missing encoding stats", rg)
+				for _, stat := range encStats {
+					if stat.PageType == file.PageTypeDataPage || stat.PageType == file.PageTypeDataPageV2 {
+						require.Contains(t, []parquet.Encoding{parquet.Encodings.RLEDict, parquet.Encodings.PlainDict},
+							stat.Encoding, "row group %d fell back from dictionary", rg)
+					}
+				}
+			}
+		}
+
+		return idRanges[0], idRanges[1], tsRanges[0], tsRanges[1]
+	}
+
+	wrapTrackingTable := func(tbl *table.Table, dataPath string) (*table.Table, *rangeTrackingFS) {
+		tracker := &rangeTrackingFS{path: filepath.ToSlash(dataPath)}
+		fsF := func(context.Context) (iceio.IO, error) { return tracker, nil }
+
+		return table.New(
+			tbl.Identifier(),
+			tbl.Metadata(),
+			tbl.MetadataLocation(),
+			fsF,
+			&rowDeltaCatalog{metadata: tbl.Metadata()},
+		), tracker
+	}
+
+	indexCases := []struct {
+		name     string
+		hasBloom bool
+		props    func(colPath string) *parquet.WriterProperties
+	}{
+		{
+			name: "dictionary only",
+			props: func(colPath string) *parquet.WriterProperties {
+				return parquet.NewWriterProperties(
+					parquet.WithStats(false),
+					parquet.WithDictionaryDefault(true),
+					parquet.WithDictionaryCostFallbackFor(colPath, false),
+				)
+			},
+		},
+		{
+			name:     "bloom only",
+			hasBloom: true,
+			props: func(colPath string) *parquet.WriterProperties {
+				return parquet.NewWriterProperties(
+					parquet.WithStats(false),
+					parquet.WithDictionaryDefault(false),
+					parquet.WithBloomFilterEnabledFor(colPath, true),
+				)
+			},
+		},
+	}
+
+	assertPruningCases := func(
+		t *testing.T,
+		ref iceberg.UnboundTerm,
+		scanIDs func(iceberg.BooleanExpression) []int64,
+		tracker *rangeTrackingFS,
+		rg0ID, rg1ID, rg0TS, rg1TS byteRange,
+	) {
+		t.Helper()
+
+		check := func(name string, filter iceberg.BooleanExpression, wantIDs []int64, wantRG0ID, wantRG1ID bool) {
+			t.Helper()
+			tracker.reset()
+			got := scanIDs(filter)
+			if len(wantIDs) == 0 {
+				assert.Empty(t, got, name)
+			} else {
+				assert.Equal(t, wantIDs, got, name)
+			}
+			assert.Equal(t, wantRG0ID, tracker.readRange(rg0ID), "%s: RG0 id chunk read mismatch", name)
+			assert.Equal(t, wantRG1ID, tracker.readRange(rg1ID), "%s: RG1 id chunk read mismatch", name)
+		}
+
+		check("EqualTo negative RG0", iceberg.EqualTo(ref, iceberg.Timestamp(negMilli*1000)), []int64{1}, true, false)
+		check("EqualTo positive RG1", iceberg.EqualTo(ref, iceberg.Timestamp(rg1Milli*1000)), []int64{3}, false, true)
+		check("EqualTo absent divisible", iceberg.EqualTo(ref, iceberg.Timestamp(missMilli*1000)), nil, false, false)
+
+		tracker.reset()
+		assert.Empty(t, scanIDs(iceberg.EqualTo(ref, iceberg.Timestamp(rg0Milli*1000+500))), "EqualTo sub-ms")
+		assert.False(t, tracker.readRange(rg0ID), "EqualTo sub-ms should not read RG0 id chunk")
+		assert.False(t, tracker.readRange(rg1ID), "EqualTo sub-ms should not read RG1 id chunk")
+		assert.False(t, tracker.readRange(rg0TS), "EqualTo sub-ms should not read RG0 ts chunk")
+		assert.False(t, tracker.readRange(rg1TS), "EqualTo sub-ms should not read RG1 ts chunk")
+
+		check("In mixed sub-ms and RG0", iceberg.IsIn(ref,
+			iceberg.Timestamp(rg0Milli*1000+500),
+			iceberg.Timestamp(rg0Milli*1000),
+		), []int64{2}, true, false)
+		check("In mixed sub-ms and absent", iceberg.IsIn(ref,
+			iceberg.Timestamp(rg0Milli*1000+500),
+			iceberg.Timestamp(missMilli*1000),
+		), nil, false, false)
+		check("In all sub-ms", iceberg.IsIn(ref,
+			iceberg.Timestamp(rg0Milli*1000+1),
+			iceberg.Timestamp(-500),
+		), nil, false, false)
+		check("NOT(NotEqualTo) RG1", iceberg.NewNot(iceberg.NotEqualTo(ref, iceberg.Timestamp(rg1Milli*1000))), []int64{3}, false, true)
+		check("NOT(NotIn) mixed sub-ms and RG0", iceberg.NewNot(iceberg.NotIn(ref,
+			iceberg.Timestamp(rg0Milli*1000+500),
+			iceberg.Timestamp(rg0Milli*1000),
+		)), []int64{2}, true, false)
+	}
+
+	for _, ic := range indexCases {
+		t.Run("top-level/"+ic.name, func(t *testing.T) {
+			alloc := memory.NewCheckedAllocator(memory.DefaultAllocator)
+			if !ic.hasBloom {
+				defer alloc.AssertSize(t, 0)
+			}
+			ctx := compute.WithAllocator(t.Context(), alloc)
+
+			iceSchema := iceberg.NewSchema(0,
+				iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+				iceberg.NestedField{ID: 2, Name: "ts", Type: iceberg.PrimitiveTypes.TimestampTz, Required: false},
+			)
+			tbl := newTimestampMillisTestTable(t, iceSchema, iceberg.UnpartitionedSpec)
+
+			arrowSc := arrow.NewSchema([]arrow.Field{
+				{Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: false, Metadata: fieldIDMeta("1")},
+				{Name: "ts", Type: &arrow.TimestampType{Unit: arrow.Millisecond, TimeZone: "UTC"}, Nullable: true, Metadata: fieldIDMeta("2")},
+			}, nil)
+
+			buildBatch := func(ids, ts []int64, nullLast bool) arrow.RecordBatch {
+				rb := array.NewRecordBuilder(alloc, arrowSc)
+				defer rb.Release()
+				rb.Field(0).(*array.Int64Builder).AppendValues(ids, nil)
+				tsB := rb.Field(1).(*array.TimestampBuilder)
+				for i, v := range ts {
+					if nullLast && i == len(ts)-1 {
+						tsB.AppendNull()
+					} else {
+						tsB.Append(arrow.Timestamp(v))
+					}
+				}
+
+				return rb.NewRecordBatch()
+			}
+
+			rec0 := buildBatch([]int64{1, 2, 5}, []int64{negMilli, rg0Milli, 0}, true)
+			rec1 := buildBatch([]int64{3, 4, 6}, []int64{rg1Milli, rg1Milli + 1, rg1Milli + 2}, false)
+			defer rec0.Release()
+			defer rec1.Release()
+
+			dataPath := filepath.Join(tbl.Location(), "data", "multi-rg.parquet")
+			writeMultiRG(t, alloc, dataPath, arrowSc, []arrow.RecordBatch{rec0, rec1}, ic.props("ts"))
+			rg0ID, rg1ID, rg0TS, rg1TS := inspectFooter(t, dataPath, ic.hasBloom)
+
+			tx := tbl.NewTransaction()
+			require.NoError(t, tx.AddDataFilesByPath(ctx, []string{filepath.ToSlash(dataPath)}, nil, false))
+			tbl, err := tx.Commit(ctx)
+			require.NoError(t, err)
+			tbl, tracker := wrapTrackingTable(tbl, dataPath)
+
+			scanIDs := func(filter iceberg.BooleanExpression) []int64 {
+				_, itr, err := tbl.Scan(
+					table.WithSelectedFields("id", "ts"),
+					table.WithRowFilter(filter),
+				).ToArrowRecords(ctx)
+				require.NoError(t, err)
+
+				var ids []int64
+				for batch, err := range itr {
+					require.NoError(t, err)
+					idCol := batch.Column(0).(*array.Int64)
+					for i := range int(batch.NumRows()) {
+						ids = append(ids, idCol.Value(i))
+					}
+					batch.Release()
+				}
+
+				return ids
+			}
+
+			ref := iceberg.Reference("ts")
+			assertPruningCases(t, ref, scanIDs, tracker, rg0ID, rg1ID, rg0TS, rg1TS)
+			assert.Equal(t, []int64{5}, scanIDs(iceberg.NewOr(
+				iceberg.EqualTo(ref, iceberg.Timestamp(rg0Milli*1000+500)),
+				iceberg.IsNull(ref),
+			)), "OR with sub-ms and IsNull must not prune NULL row")
+		})
+
+		t.Run("nested struct/"+ic.name, func(t *testing.T) {
+			alloc := memory.NewCheckedAllocator(memory.DefaultAllocator)
+			if !ic.hasBloom {
+				defer alloc.AssertSize(t, 0)
+			}
+			ctx := compute.WithAllocator(t.Context(), alloc)
+
+			iceSchema := iceberg.NewSchema(0,
+				iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+				iceberg.NestedField{
+					ID:       2,
+					Name:     "s",
+					Required: true,
+					Type: iceberg.NewStructType(
+						iceberg.NestedField{ID: 3, Name: "ts", Type: iceberg.PrimitiveTypes.Timestamp, Required: false},
+					),
+				},
+			)
+			tbl := newTimestampMillisTestTable(t, iceSchema, iceberg.UnpartitionedSpec)
+
+			arrowSc := arrow.NewSchema([]arrow.Field{
+				{Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: false, Metadata: fieldIDMeta("1")},
+				{
+					Name: "s",
+					Type: arrow.StructOf(
+						arrow.Field{
+							Name:     "ts",
+							Type:     &arrow.TimestampType{Unit: arrow.Millisecond},
+							Nullable: true,
+							Metadata: fieldIDMeta("3"),
+						},
+					),
+					Nullable: false,
+					Metadata: fieldIDMeta("2"),
+				},
+			}, nil)
+
+			buildBatch := func(ids, ts []int64, nullLast bool) arrow.RecordBatch {
+				rb := array.NewRecordBuilder(alloc, arrowSc)
+				defer rb.Release()
+				rb.Field(0).(*array.Int64Builder).AppendValues(ids, nil)
+				sb := rb.Field(1).(*array.StructBuilder)
+				for i, v := range ts {
+					sb.Append(true)
+					if nullLast && i == len(ts)-1 {
+						sb.FieldBuilder(0).(*array.TimestampBuilder).AppendNull()
+					} else {
+						sb.FieldBuilder(0).(*array.TimestampBuilder).Append(arrow.Timestamp(v))
+					}
+				}
+
+				return rb.NewRecordBatch()
+			}
+
+			rec0 := buildBatch([]int64{1, 2, 5}, []int64{negMilli, rg0Milli, 0}, true)
+			rec1 := buildBatch([]int64{3, 4, 6}, []int64{rg1Milli, rg1Milli + 1, rg1Milli + 2}, false)
+			defer rec0.Release()
+			defer rec1.Release()
+
+			dataPath := filepath.Join(tbl.Location(), "data", "nested-multi-rg.parquet")
+			writeMultiRG(t, alloc, dataPath, arrowSc, []arrow.RecordBatch{rec0, rec1}, ic.props("s.ts"))
+			rg0ID, rg1ID, rg0TS, rg1TS := inspectFooter(t, dataPath, ic.hasBloom)
+
+			tx := tbl.NewTransaction()
+			require.NoError(t, tx.AddDataFilesByPath(ctx, []string{filepath.ToSlash(dataPath)}, nil, false))
+			tbl, err := tx.Commit(ctx)
+			require.NoError(t, err)
+			tbl, tracker := wrapTrackingTable(tbl, dataPath)
+
+			scanIDs := func(filter iceberg.BooleanExpression) []int64 {
+				_, itr, err := tbl.Scan(
+					table.WithSelectedFields("id", "s"),
+					table.WithRowFilter(filter),
+				).ToArrowRecords(ctx)
+				require.NoError(t, err)
+
+				var ids []int64
+				for batch, err := range itr {
+					require.NoError(t, err)
+					idCol := batch.Column(0).(*array.Int64)
+					for i := range int(batch.NumRows()) {
+						ids = append(ids, idCol.Value(i))
+					}
+					batch.Release()
+				}
+
+				return ids
+			}
+
+			ref := iceberg.Reference("s.ts")
+			assertPruningCases(t, ref, scanIDs, tracker, rg0ID, rg1ID, rg0TS, rg1TS)
+			assert.Equal(t, []int64{5}, scanIDs(iceberg.NewOr(
+				iceberg.EqualTo(ref, iceberg.Timestamp(rg0Milli*1000+500)),
+				iceberg.IsNull(ref),
+			)), "OR with sub-ms and IsNull must not prune NULL row")
+		})
+	}
 }

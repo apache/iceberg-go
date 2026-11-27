@@ -1862,6 +1862,15 @@ func TimestampMillisAsMicros(stats metadata.TypedStatistics) metadata.TypedStati
 	return &wrappedMillisTimestampStats{i64}
 }
 
+func isTimestampMicrosType(fieldType iceberg.Type) bool {
+	switch fieldType.(type) {
+	case iceberg.TimestampType, iceberg.TimestampTzType:
+		return true
+	default:
+		return false
+	}
+}
+
 // TimestampMillisStatsForType scales TIMESTAMP(MILLIS) statistics to
 // microseconds for Iceberg timestamp and timestamptz fields and drops
 // min/max bounds for any other Iceberg field type. Non-millisecond
@@ -1870,12 +1879,11 @@ func TimestampMillisStatsForType(stats metadata.TypedStatistics, fieldType icebe
 	if !IsTimestampMillis(stats.Descr()) {
 		return stats
 	}
-	switch fieldType.(type) {
-	case iceberg.TimestampType, iceberg.TimestampTzType:
+	if isTimestampMicrosType(fieldType) {
 		return TimestampMillisAsMicros(stats)
-	default:
-		return statsWithoutMinMax{stats}
 	}
+
+	return statsWithoutMinMax{stats}
 }
 
 type wrappedMillisTimestampStats struct {
@@ -2380,7 +2388,10 @@ type ParquetFileSource struct {
 // bloom-filterable predicate on one field. A row group can be skipped when
 // NONE of the bytes appear in the column's bloom filter.
 type RowGroupBloomPred struct {
-	FieldID   int
+	FieldID int
+	// FieldType gates TIMESTAMP(MILLIS) literal conversion; nil conservatively
+	// skips pruning on TIMESTAMP(MILLIS) columns.
+	FieldType iceberg.Type
 	PhysBytes [][]byte // one entry for EqualTo; one per value for In
 }
 
@@ -2390,7 +2401,10 @@ type RowGroupBloomPred struct {
 // mirrors RowGroupBloomPred because both predicates use the same physical
 // literal encoding.
 type RowGroupDictionaryPred struct {
-	FieldID   int
+	FieldID int
+	// FieldType gates TIMESTAMP(MILLIS) literal conversion; nil conservatively
+	// skips pruning on TIMESTAMP(MILLIS) columns.
+	FieldType iceberg.Type
 	PhysBytes [][]byte // one entry for EqualTo; one per value for In
 }
 
@@ -2643,120 +2657,135 @@ func (w wrapPqArrowReader) GetRecords(ctx context.Context, cols []int, tester an
 			len(rowGroupTester.BloomPreds) > 0 || len(rowGroupTester.DictionaryPreds) > 0 {
 			fieldIDToColIdx = buildFieldIDToColIdx(fileMeta)
 		}
-		// Dictionary and bloom predicates carry the Iceberg literal's physical
-		// bytes, which for a millisecond timestamp column are microseconds and
-		// would never match the stored values.
-		predColIdx := fieldIDToColIdx
-		if len(rowGroupTester.BloomPreds) > 0 || len(rowGroupTester.DictionaryPreds) > 0 {
-			predColIdx = withoutTimestampMillis(fileMeta, fieldIDToColIdx)
-		}
-		statsCols := cols
-		if rowGroupTester.StatsFn != nil && rowGroupTester.StatsFieldIDs != nil {
-			statsCols = make([]int, 0, len(rowGroupTester.StatsFieldIDs))
-			for _, fieldID := range rowGroupTester.StatsFieldIDs {
-				if colIdx, ok := fieldIDToColIdx[fieldID]; ok {
-					statsCols = append(statsCols, colIdx)
-				}
-			}
-		}
-		var dictionaryPredsByColumn map[int][]int
-		if len(rowGroupTester.DictionaryPreds) > 0 {
-			dictionaryPredsByColumn = groupRowGroupDictionaryPredicates(
-				predColIdx, rowGroupTester.DictionaryPreds)
-			if len(dictionaryPredsByColumn) > 0 && w.dictionarySource != nil {
-				// Dictionary inspection is an optional optimisation. If the
-				// section-read reader cannot be created, use the main reader and
-				// keep the existing conservative behaviour.
-				dictionaryReader, _ = newParquetDictionaryReader(
-					w.dictionarySource, fileMeta, w.mem, w.dictionaryReadProps)
-				if dictionaryReader != nil {
-					// The temporary reader owns only its buffers. Its source is
-					// wrapped so this cannot close the main reader's input.
-					defer dictionaryReader.Close()
-				}
-			}
-			if len(dictionaryPredsByColumn) > 0 && dictionaryReader == nil {
-				dictionaryReader = w.ParquetReader()
-			}
-		}
-		if len(rowGroupTester.BloomPreds) > 0 {
-			bfReader = w.ParquetReader().GetBloomFilterReader()
+		dictPreds, dictUnsatisfiable := adaptTimestampMillisDictionaryPreds(
+			fileMeta, fieldIDToColIdx, rowGroupTester.DictionaryPreds)
+		var (
+			bloomPreds         []RowGroupBloomPred
+			bloomUnsatisfiable bool
+		)
+		if !dictUnsatisfiable {
+			bloomPreds, bloomUnsatisfiable = adaptTimestampMillisBloomPreds(
+				fileMeta, fieldIDToColIdx, rowGroupTester.BloomPreds)
 		}
 
-		if rowGroupTester.Survivors != nil {
-			*rowGroupTester.Survivors = (*rowGroupTester.Survivors)[:0]
-		}
-
-		rangeStart := rowGroupTester.Start
-		rangeEnd := rangeStart + rowGroupTester.Length
-		rgList = make([]int, 0)
-		var firstRowPos int64
-		for rg := range numRg {
-			pos := firstRowPos
-			var (
-				rgMeta  *metadata.RowGroupMetaData
-				numRows int64
-				offset  int64
-			)
-			if len(w.rowGroupInfos) == numRg {
-				info := w.rowGroupInfos[rg]
-				numRows = info.numRows
-				offset = info.splitOffset
-			} else {
-				rgMeta = fileMeta.RowGroup(rg)
-				numRows = rgMeta.NumRows()
-			}
-			firstRowPos += numRows
-
-			use := true
-			if rangeSet {
-				if planningOffsets != nil {
-					offset = planningOffsets[rg]
-				} else if len(w.rowGroupInfos) != numRg {
-					offset = parquetRowGroupSplitOffset(rgMeta)
-				}
-				use = offset >= rangeStart && offset < rangeEnd
-			}
-			if use && rowGroupTester.StatsFn != nil {
-				var err error
-				use, err = rowGroupTester.StatsFn(fileMeta, rg, statsCols)
-				if err != nil {
-					return nil, err
-				}
-			}
-
-			if use && len(dictionaryPredsByColumn) > 0 {
-				if rgMeta == nil {
-					rgMeta = fileMeta.RowGroup(rg)
-				}
-				use = checkRowGroupDictionaries(
-					dictionaryReader, fileMeta, rgMeta, rg,
-					dictionaryPredsByColumn, rowGroupTester.DictionaryPreds)
-			}
-
-			if use && bfReader != nil {
-				var err error
-				use, err = checkRowGroupBloomFilters(bfReader, rg, predColIdx, rowGroupTester.BloomPreds)
-				if err != nil {
-					return nil, err
-				}
-			}
-
-			if !use {
-				continue
-			}
-
-			rgList = append(rgList, rg)
+		if dictUnsatisfiable || bloomUnsatisfiable {
 			if rowGroupTester.Survivors != nil {
-				*rowGroupTester.Survivors = append(*rowGroupTester.Survivors,
-					RowGroupSpan{FirstRowPos: pos, NumRows: numRows})
+				if numRg == 0 {
+					*rowGroupTester.Survivors = nil
+				} else {
+					*rowGroupTester.Survivors = (*rowGroupTester.Survivors)[:0]
+				}
 			}
-		}
+			rgList = make([]int, 0)
+		} else {
+			statsCols := cols
+			if rowGroupTester.StatsFn != nil && rowGroupTester.StatsFieldIDs != nil {
+				statsCols = make([]int, 0, len(rowGroupTester.StatsFieldIDs))
+				for _, fieldID := range rowGroupTester.StatsFieldIDs {
+					if colIdx, ok := fieldIDToColIdx[fieldID]; ok {
+						statsCols = append(statsCols, colIdx)
+					}
+				}
+			}
+			var dictionaryPredsByColumn map[int][]int
+			if len(dictPreds) > 0 {
+				dictionaryPredsByColumn = groupRowGroupDictionaryPredicates(
+					fieldIDToColIdx, dictPreds)
+				if len(dictionaryPredsByColumn) > 0 && w.dictionarySource != nil {
+					// Dictionary inspection is an optional optimisation. If the
+					// section-read reader cannot be created, use the main reader and
+					// keep the existing conservative behaviour.
+					dictionaryReader, _ = newParquetDictionaryReader(
+						w.dictionarySource, fileMeta, w.mem, w.dictionaryReadProps)
+					if dictionaryReader != nil {
+						// The temporary reader owns only its buffers. Its source is
+						// wrapped so this cannot close the main reader's input.
+						defer dictionaryReader.Close()
+					}
+				}
+				if len(dictionaryPredsByColumn) > 0 && dictionaryReader == nil {
+					dictionaryReader = w.ParquetReader()
+				}
+			}
+			if len(bloomPreds) > 0 {
+				bfReader = w.ParquetReader().GetBloomFilterReader()
+			}
 
-		// No group was skipped: emitted rows are contiguous from zero, so drop
-		// the spans and let position cursors take their contiguous fast path.
-		if rowGroupTester.Survivors != nil && len(rgList) == numRg {
-			*rowGroupTester.Survivors = nil
+			if rowGroupTester.Survivors != nil {
+				*rowGroupTester.Survivors = (*rowGroupTester.Survivors)[:0]
+			}
+
+			rangeStart := rowGroupTester.Start
+			rangeEnd := rangeStart + rowGroupTester.Length
+			rgList = make([]int, 0)
+			var firstRowPos int64
+			for rg := range numRg {
+				pos := firstRowPos
+				var (
+					rgMeta  *metadata.RowGroupMetaData
+					numRows int64
+					offset  int64
+				)
+				if len(w.rowGroupInfos) == numRg {
+					info := w.rowGroupInfos[rg]
+					numRows = info.numRows
+					offset = info.splitOffset
+				} else {
+					rgMeta = fileMeta.RowGroup(rg)
+					numRows = rgMeta.NumRows()
+				}
+				firstRowPos += numRows
+
+				use := true
+				if rangeSet {
+					if planningOffsets != nil {
+						offset = planningOffsets[rg]
+					} else if len(w.rowGroupInfos) != numRg {
+						offset = parquetRowGroupSplitOffset(rgMeta)
+					}
+					use = offset >= rangeStart && offset < rangeEnd
+				}
+				if use && rowGroupTester.StatsFn != nil {
+					var err error
+					use, err = rowGroupTester.StatsFn(fileMeta, rg, statsCols)
+					if err != nil {
+						return nil, err
+					}
+				}
+
+				if use && len(dictionaryPredsByColumn) > 0 {
+					if rgMeta == nil {
+						rgMeta = fileMeta.RowGroup(rg)
+					}
+					use = checkRowGroupDictionaries(
+						dictionaryReader, fileMeta, rgMeta, rg,
+						dictionaryPredsByColumn, dictPreds)
+				}
+
+				if use && bfReader != nil {
+					var err error
+					use, err = checkRowGroupBloomFilters(bfReader, rg, fieldIDToColIdx, bloomPreds)
+					if err != nil {
+						return nil, err
+					}
+				}
+
+				if !use {
+					continue
+				}
+
+				rgList = append(rgList, rg)
+				if rowGroupTester.Survivors != nil {
+					*rowGroupTester.Survivors = append(*rowGroupTester.Survivors,
+						RowGroupSpan{FirstRowPos: pos, NumRows: numRows})
+				}
+			}
+
+			// No group was skipped: emitted rows are contiguous from zero, so drop
+			// the spans and let position cursors take their contiguous fast path.
+			if rowGroupTester.Survivors != nil && len(rgList) == numRg {
+				*rowGroupTester.Survivors = nil
+			}
 		}
 	}
 
@@ -3179,24 +3208,123 @@ func buildFieldIDToColIdx(meta *metadata.FileMetaData) map[int]int {
 	return result
 }
 
-// withoutTimestampMillis returns fieldIDToColIdx without the columns that
-// store TIMESTAMP(MILLIS), copying the map only when there is one to drop.
-func withoutTimestampMillis(meta *metadata.FileMetaData, fieldIDToColIdx map[int]int) map[int]int {
-	var filtered map[int]int
-	for fieldID, colIdx := range fieldIDToColIdx {
-		if !IsTimestampMillis(meta.Schema.Column(colIdx)) {
-			continue
-		}
-		if filtered == nil {
-			filtered = maps.Clone(fieldIDToColIdx)
-		}
-		delete(filtered, fieldID)
+type timestampMillisPredStatus uint8
+
+const (
+	timestampMillisPredUnchanged timestampMillisPredStatus = iota
+	timestampMillisPredConverted
+	timestampMillisPredSkip
+	timestampMillisPredUnsatisfiable
+)
+
+// adaptTimestampMillisPhysBytes converts microsecond timestamp literals to
+// milliseconds when fieldID maps to a Parquet TIMESTAMP(MILLIS) column.
+// Non-millisecond columns are returned unchanged. Unexpected field types or
+// byte widths skip the predicate conservatively; sub-millisecond literals are
+// dropped, marking the predicate unsatisfiable if none remain.
+func adaptTimestampMillisPhysBytes(
+	fileMeta *metadata.FileMetaData,
+	fieldIDToColIdx map[int]int,
+	fieldID int,
+	fieldType iceberg.Type,
+	physBytes [][]byte,
+) ([][]byte, timestampMillisPredStatus) {
+	if len(physBytes) == 0 {
+		return physBytes, timestampMillisPredUnchanged
 	}
-	if filtered == nil {
-		return fieldIDToColIdx
+	colIdx, ok := fieldIDToColIdx[fieldID]
+	if !ok || !IsTimestampMillis(fileMeta.Schema.Column(colIdx)) {
+		return physBytes, timestampMillisPredUnchanged
+	}
+	if !isTimestampMicrosType(fieldType) {
+		return nil, timestampMillisPredSkip
 	}
 
-	return filtered
+	const microsPerMilli = 1000
+	converted := make([][]byte, 0, len(physBytes))
+	for _, b := range physBytes {
+		if len(b) != 8 {
+			return nil, timestampMillisPredSkip
+		}
+		us := int64(binary.LittleEndian.Uint64(b))
+		if us%microsPerMilli != 0 {
+			continue
+		}
+		converted = append(converted, binary.LittleEndian.AppendUint64(nil, uint64(us/microsPerMilli)))
+	}
+	if len(converted) == 0 {
+		return nil, timestampMillisPredUnsatisfiable
+	}
+
+	return converted, timestampMillisPredConverted
+}
+
+func adaptTimestampMillisPreds[T any](
+	fileMeta *metadata.FileMetaData,
+	fieldIDToColIdx map[int]int,
+	preds []T,
+	inspect func(T) (int, iceberg.Type, [][]byte),
+	withPhysBytes func(T, [][]byte) T,
+) ([]T, bool) {
+	var adapted []T
+	for i, pred := range preds {
+		fieldID, fieldType, rawBytes := inspect(pred)
+		physBytes, status := adaptTimestampMillisPhysBytes(
+			fileMeta, fieldIDToColIdx, fieldID, fieldType, rawBytes)
+		if status == timestampMillisPredUnsatisfiable {
+			return nil, true
+		}
+		if adapted == nil {
+			if status == timestampMillisPredUnchanged {
+				continue
+			}
+			adapted = make([]T, i, len(preds))
+			copy(adapted, preds[:i])
+		}
+		if status != timestampMillisPredSkip {
+			if status == timestampMillisPredConverted {
+				pred = withPhysBytes(pred, physBytes)
+			}
+			adapted = append(adapted, pred)
+		}
+	}
+	if adapted == nil {
+		return preds, false
+	}
+
+	return adapted, false
+}
+
+func adaptTimestampMillisDictionaryPreds(
+	fileMeta *metadata.FileMetaData,
+	fieldIDToColIdx map[int]int,
+	preds []RowGroupDictionaryPred,
+) ([]RowGroupDictionaryPred, bool) {
+	return adaptTimestampMillisPreds(fileMeta, fieldIDToColIdx, preds,
+		func(p RowGroupDictionaryPred) (int, iceberg.Type, [][]byte) {
+			return p.FieldID, p.FieldType, p.PhysBytes
+		},
+		func(p RowGroupDictionaryPred, b [][]byte) RowGroupDictionaryPred {
+			p.PhysBytes = b
+
+			return p
+		})
+}
+
+func adaptTimestampMillisBloomPreds(
+	fileMeta *metadata.FileMetaData,
+	fieldIDToColIdx map[int]int,
+	preds []RowGroupBloomPred,
+) ([]RowGroupBloomPred, bool) {
+	return adaptTimestampMillisPreds(fileMeta, fieldIDToColIdx, preds,
+		func(p RowGroupBloomPred) (int, iceberg.Type, [][]byte) {
+			return p.FieldID, p.FieldType, p.PhysBytes
+		},
+		func(p RowGroupBloomPred, b [][]byte) RowGroupBloomPred {
+			p.PhysBytes = b
+
+			return p
+		})
 }
 
 // checkRowGroupBloomFilters checks each bloom predicate against the bloom filter
