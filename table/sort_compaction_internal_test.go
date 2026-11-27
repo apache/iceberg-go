@@ -458,3 +458,170 @@ func TestMergeSortedStreams_EarlyStopReleases(t *testing.T) {
 	assert.False(t, ok)
 	assert.Equal(t, 1, batches)
 }
+
+// nestedSortTestSchema has a sort source x nested in struct s. The Arrow
+// schema lists s's children in a different order than the Iceberg schema,
+// so resolution must match children by name, not position.
+func nestedSortTestSchema() (*iceberg.Schema, *arrow.Schema) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64},
+		iceberg.NestedField{ID: 2, Name: "s", Type: iceberg.NewStructType(
+			iceberg.NestedField{ID: 3, Name: "x", Type: iceberg.PrimitiveTypes.Int64},
+			iceberg.NestedField{ID: 4, Name: "y", Type: iceberg.PrimitiveTypes.String},
+		)},
+	)
+	sc := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: true},
+		{Name: "s", Type: arrow.StructOf(
+			arrow.Field{Name: "y", Type: arrow.BinaryTypes.String, Nullable: true},
+			arrow.Field{Name: "x", Type: arrow.PrimitiveTypes.Int64, Nullable: true},
+		), Nullable: true},
+	}, nil)
+
+	return schema, sc
+}
+
+// nestedRow is one row of nestedSortTestSchema. A nil x is a null x; sOK
+// false makes s null while x keeps its value in the child array.
+type nestedRow struct {
+	id  int64
+	x   *int64
+	sOK bool
+}
+
+func nestedBatch(mem memory.Allocator, sc *arrow.Schema, rows ...nestedRow) arrow.RecordBatch {
+	bldr := array.NewRecordBuilder(mem, sc)
+	defer bldr.Release()
+	st := bldr.Field(1).(*array.StructBuilder)
+	for _, r := range rows {
+		bldr.Field(0).(*array.Int64Builder).Append(r.id)
+		// AppendValues, unlike Append(false), appends nothing to the children.
+		st.AppendValues([]bool{r.sOK})
+		st.FieldBuilder(0).(*array.StringBuilder).Append("y")
+		if r.x == nil {
+			st.FieldBuilder(1).(*array.Int64Builder).AppendNull()
+		} else {
+			st.FieldBuilder(1).(*array.Int64Builder).Append(*r.x)
+		}
+	}
+
+	return bldr.NewRecordBatch()
+}
+
+func nestedStream(mem memory.Allocator, sc *arrow.Schema, batches ...[]nestedRow) iter.Seq2[arrow.RecordBatch, error] {
+	return func(yield func(arrow.RecordBatch, error) bool) {
+		for _, rows := range batches {
+			if !yield(nestedBatch(mem, sc, rows...), nil) {
+				return
+			}
+		}
+	}
+}
+
+func collectInt64IDs(t *testing.T, rec arrow.RecordBatch) []int64 {
+	t.Helper()
+
+	return append([]int64(nil), rec.Column(0).(*array.Int64).Int64Values()...)
+}
+
+// TestSortedCompactionRecords_NestedKey sorts by a struct child across
+// batches. A null parent struct sorts as a null key even though its child
+// holds a value, the same as a null child.
+func TestSortedCompactionRecords_NestedKey(t *testing.T) {
+	schema, sc := nestedSortTestSchema()
+	input := [][]nestedRow{
+		{{id: 1, x: new(int64(30)), sOK: true}, {id: 2, x: new(int64(15)), sOK: false}, {id: 3, x: new(int64(10)), sOK: true}},
+		{{id: 4, sOK: true}, {id: 5, x: new(int64(20)), sOK: true}},
+	}
+
+	for _, tc := range []struct {
+		name      string
+		direction SortDirection
+		nullOrder NullOrder
+		want      []int64
+	}{
+		{"asc nulls first", SortASC, NullsFirst, []int64{2, 4, 3, 5, 1}},
+		{"desc nulls last", SortDESC, NullsLast, []int64{1, 5, 3, 2, 4}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+			defer mem.AssertSize(t, 0)
+
+			order, err := NewSortOrder(1, []SortField{identSort(3, tc.direction, tc.nullOrder)})
+			require.NoError(t, err)
+
+			var got []int64
+			for rec, err := range sortedCompactionRecords(t.Context(), *iceberg.UnpartitionedSpec, schema, order, 10,
+				nestedStream(mem, sc, input...)) {
+				require.NoError(t, err)
+				got = append(got, collectInt64IDs(t, rec)...)
+				rec.Release()
+			}
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
+// TestMergeSortedStreams_NestedKey merges streams sorted by a struct child
+// through the unbound comparator the merge heap uses.
+func TestMergeSortedStreams_NestedKey(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+
+	schema, sc := nestedSortTestSchema()
+	order, err := NewSortOrder(1, []SortField{identSort(3, SortASC, NullsFirst)})
+	require.NoError(t, err)
+	rows, err := newRowComparator(order, schema, sc)
+	require.NoError(t, err)
+
+	streams := []iter.Seq2[arrow.RecordBatch, error]{
+		nestedStream(mem, sc,
+			[]nestedRow{{id: 1, x: new(int64(25)), sOK: false}, {id: 2, x: new(int64(10)), sOK: true}},
+			[]nestedRow{{id: 3, x: new(int64(40)), sOK: true}}),
+		nestedStream(mem, sc,
+			[]nestedRow{{id: 4, sOK: true}, {id: 5, x: new(int64(20)), sOK: true}, {id: 6, x: new(int64(30)), sOK: true}}),
+	}
+
+	var got []int64
+	ok := mergeSortedStreams(t.Context(), rows, []string{"f0", "f1"}, streams, 10,
+		func(rec arrow.RecordBatch, err error) bool {
+			require.NoError(t, err)
+			got = append(got, collectInt64IDs(t, rec)...)
+			rec.Release()
+
+			return true
+		})
+	require.True(t, ok)
+	assert.Equal(t, []int64{1, 4, 2, 5, 6, 3}, got)
+}
+
+// TestMergeSortedStreams_NestedKeyRejectsUnsorted checks a stream against
+// the nested key: a null parent after a non-null key is out of order for
+// nulls first, whatever its child holds.
+func TestMergeSortedStreams_NestedKeyRejectsUnsorted(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+
+	schema, sc := nestedSortTestSchema()
+	order, err := NewSortOrder(1, []SortField{identSort(3, SortASC, NullsFirst)})
+	require.NoError(t, err)
+	rows, err := newRowComparator(order, schema, sc)
+	require.NoError(t, err)
+
+	streams := []iter.Seq2[arrow.RecordBatch, error]{
+		nestedStream(mem, sc, []nestedRow{{id: 1, x: new(int64(10)), sOK: true}, {id: 2, x: new(int64(20)), sOK: false}}),
+	}
+	var mergeErr error
+	mergeSortedStreams(t.Context(), rows, []string{"f0"}, streams, 10,
+		func(rec arrow.RecordBatch, err error) bool {
+			if err != nil {
+				mergeErr = err
+
+				return false
+			}
+			rec.Release()
+
+			return true
+		})
+	require.ErrorContains(t, mergeErr, "is not sorted by it")
+}

@@ -53,23 +53,17 @@ func NewReplaceSortOrderBuilder(t *Transaction, caseSensitive bool) *ReplaceSort
 }
 
 // Asc adds a column sorted in ascending order with the requested null ordering.
-// Go writers currently support only top-level sort columns; appending data with
-// a nested-field sort order fails until the order is replaced.
 func (u *ReplaceSortOrderBuilder) Asc(column string, nullOrder NullOrder) *ReplaceSortOrderBuilder {
 	return u.AddField(column, iceberg.IdentityTransform{}, SortASC, nullOrder)
 }
 
 // Desc adds a column sorted in descending order with the requested null ordering.
-// Go writers currently support only top-level sort columns; appending data with
-// a nested-field sort order fails until the order is replaced.
 func (u *ReplaceSortOrderBuilder) Desc(column string, nullOrder NullOrder) *ReplaceSortOrderBuilder {
 	return u.AddField(column, iceberg.IdentityTransform{}, SortDESC, nullOrder)
 }
 
 // AddField adds a transformed sort field. A nil or incompatible transform is
-// rejected when the replacement is applied or committed. Go writers currently
-// support only top-level sort columns; appending data with a nested-field sort
-// order fails until the order is replaced.
+// rejected when the replacement is applied or committed.
 func (u *ReplaceSortOrderBuilder) AddField(column string, transform iceberg.Transform, direction SortDirection, nullOrder NullOrder) *ReplaceSortOrderBuilder {
 	u.fields = append(u.fields, sortOrderColumn{
 		name: column, transform: transform,
