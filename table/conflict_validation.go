@@ -538,7 +538,10 @@ func (c *conflictContext) forEachEntryInSnapshot(
 // so attribution uses the entry snapshot ID instead of the manifest snapshot ID.
 func (c *conflictContext) forEachAddedEntry(content iceberg.ManifestContent, visit func(Snapshot, iceberg.ManifestEntry) error) error {
 	for _, snap := range c.concurrent {
-		if err := c.forEachEntryInSnapshot(snap, content /* includeAdded */, true /* includeDeleted */, false, visit); err != nil {
+		if err := c.forEachEntryInSnapshot(snap, content,
+			/* includeAdded */ true,
+			/* includeDeleted */ false,
+			visit); err != nil {
 			return err
 		}
 	}
@@ -554,12 +557,17 @@ func (c *conflictContext) forEachChangedEntryInSnapshot(
 	content iceberg.ManifestContent,
 	visit func(Snapshot, iceberg.ManifestEntry) error,
 ) error {
-	return c.forEachEntryInSnapshot(snap, content /* includeAdded */, true /* includeDeleted */, true, visit)
+	return c.forEachEntryInSnapshot(snap, content,
+		/* includeAdded */ true,
+		/* includeDeleted */ true,
+		visit)
 }
 
 func (c *conflictContext) forEachRemovedDataFile(visit func(snapshotID int64, path string) error) error {
 	for _, snap := range c.concurrent {
-		if err := c.forEachEntryInSnapshot(snap, iceberg.ManifestContentData /* includeAdded */, false /* includeDeleted */, true,
+		if err := c.forEachEntryInSnapshot(snap, iceberg.ManifestContentData,
+			/* includeAdded */ false,
+			/* includeDeleted */ true,
 			func(snap Snapshot, entry iceberg.ManifestEntry) error {
 				return visit(snap.SnapshotID, entry.DataFile().FilePath())
 			}); err != nil {
