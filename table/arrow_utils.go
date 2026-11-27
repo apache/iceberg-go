@@ -530,6 +530,24 @@ func ArrowSchemaToIcebergWithOptions(sc *arrow.Schema, opts ArrowToIcebergOption
 	}
 }
 
+// dataFileSchemaToIceberg converts the Arrow schema of a data or delete file
+// that is being read. A file that has a field ID at any depth is resolved by
+// ID only: its fields without an ID, its lists without an element ID and its
+// maps without a key or value ID are absent, and the name mapping is not used.
+// The name mapping applies to a file with no field IDs.
+//
+// ArrowSchemaToIcebergWithOptions keeps rejecting such a schema, because
+// dropping a field is only correct for a file that is read, not for data that
+// is written.
+func dataFileSchemaToIceberg(sc *arrow.Schema, opts ArrowToIcebergOptions) (*iceberg.Schema, error) {
+	if tblutils.HasAnyFieldID(sc) {
+		sc = tblutils.DropFieldsWithoutIDs(sc)
+		opts.NameMapping = nil
+	}
+
+	return ArrowSchemaToIcebergWithOptions(sc, opts)
+}
+
 func ArrowSchemaToIcebergWithFreshIDs(sc *arrow.Schema, downcastNsTimestamp bool) (*iceberg.Schema, error) {
 	schemaWithoutIDs, err := arrowToSchemaWithoutIDs(sc, downcastNsTimestamp)
 	if err != nil {
@@ -2152,12 +2170,21 @@ func fileToDataFile(ctx context.Context, fileIO iceio.IO, filePath string, curre
 	defer rdr.Close()
 
 	arrSchema := must(rdr.Schema())
+	// A scan resolves a file that has a field ID at any depth by ID only, and
+	// treats its fields without one as absent. Column metrics cannot be keyed
+	// for such fields, and metrics keyed by name would prune rows that the
+	// scan reads as null, so the file is rejected instead of registered.
+	fileHasIDs := tblutils.HasAnyFieldID(arrSchema)
+	if fileHasIDs && !tblutils.DropFieldsWithoutIDs(arrSchema).Equal(arrSchema) {
+		panic(fmt.Errorf("%w: cannot add %s: only some of its fields have a field ID",
+			iceberg.ErrInvalidSchema, filePath))
+	}
 	if err := checkArrowSchemaCompatWithProperties(currentSchema, arrSchema, false, props); err != nil {
 		panic(err)
 	}
 
 	pathToIDSchema := currentSchema
-	if fileHasIDs := must(VisitArrowSchema(arrSchema, hasIDs{})); fileHasIDs {
+	if fileHasIDs {
 		pathToIDSchema = must(ArrowSchemaToIcebergWithOptions(arrSchema, ArrowToIcebergOptions{
 			TableSchema:     currentSchema,
 			TableProperties: props,

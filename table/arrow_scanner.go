@@ -1958,7 +1958,7 @@ func (as *arrowScan) prepareToRead(
 			colIndices = nil
 		}
 
-		iceSchema, err := ArrowSchemaToIcebergWithOptions(fileSchema, ArrowToIcebergOptions{
+		iceSchema, err := dataFileSchemaToIceberg(fileSchema, ArrowToIcebergOptions{
 			NameMapping:     invariants.nameMapping,
 			TableSchema:     invariants.tableSchema,
 			TableProperties: invariants.tableProperties,
@@ -2047,7 +2047,7 @@ func (as *arrowScan) projectEqualityDeleteFields(
 			if err != nil {
 				return nil, err
 			}
-			physicalSchema, err = ArrowSchemaToIcebergWithOptions(fileArrowSchema, ArrowToIcebergOptions{
+			physicalSchema, err = dataFileSchemaToIceberg(fileArrowSchema, ArrowToIcebergOptions{
 				NameMapping:     invariants.nameMapping,
 				TableSchema:     invariants.tableSchema,
 				TableProperties: invariants.tableProperties,
@@ -2090,7 +2090,7 @@ func positionDeleteFallbackProjection(rdr tblutils.FileReader, invariants *arrow
 		NameMapping: invariants.nameMapping, TableSchema: invariants.tableSchema,
 		TableProperties: invariants.tableProperties,
 	}
-	physicalSchema, err := ArrowSchemaToIcebergWithOptions(physical, opts)
+	physicalSchema, err := dataFileSchemaToIceberg(physical, opts)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -2107,7 +2107,7 @@ func positionDeleteFallbackProjection(rdr tblutils.FileReader, invariants *arrow
 	if err != nil {
 		return nil, nil, err
 	}
-	schema, err := ArrowSchemaToIcebergWithOptions(physical, opts)
+	schema, err := dataFileSchemaToIceberg(physical, opts)
 
 	return schema, indices, err
 }
