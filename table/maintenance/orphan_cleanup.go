@@ -341,6 +341,9 @@ func rejectPlanOption(cfg *orphanCleanupConfig, name string) {
 // It also rejects REST refs-only snapshot history, which can omit still-live files.
 // Configure the REST catalog with snapshot-loading-mode=all and reload the
 // table before cleanup. A server override can force refs mode.
+// Files under a path segment starting with "_" or "." (for example
+// _delta_log or .hoodie) are never treated as orphans, except directories
+// named after a partition field.
 func DeleteOrphanFiles(ctx context.Context, tbl *table.Table, opts ...OrphanCleanupOption) (OrphanCleanupResult, error) {
 	cfg := newOrphanCleanupConfig(opts...)
 	if cfg.validationErr != nil {
@@ -784,19 +787,13 @@ func partitionFieldNames(tbl *table.Table) map[string]struct{} {
 // isHiddenPath reports whether path, relative to root, has a segment that
 // starts with "_" or ".". Such files belong to other tools (for example
 // _delta_log or .hoodie) and are never treated as orphans. A directory
-// named after a partition field, such as "_part=1", is not hidden. This
-// matches Java's PartitionAwareHiddenPathFilter.
+// named after a partition field, such as "_part=1" or ".x=1", is not hidden.
+// This matches Java's PartitionAwareHiddenPathFilter.
 func isHiddenPath(path, root string, partitionNames map[string]struct{}) bool {
 	rel := relativeToRoot(path, root)
 	segments := strings.Split(rel, "/")
 	for i, segment := range segments {
 		if segment == "" {
-			continue
-		}
-		if strings.HasPrefix(segment, ".") {
-			return true
-		}
-		if !strings.HasPrefix(segment, "_") {
 			continue
 		}
 		if i < len(segments)-1 {
@@ -806,8 +803,9 @@ func isHiddenPath(path, root string, partitionNames map[string]struct{}) bool {
 				}
 			}
 		}
-
-		return true
+		if strings.HasPrefix(segment, ".") || strings.HasPrefix(segment, "_") {
+			return true
+		}
 	}
 
 	return false
@@ -825,13 +823,23 @@ func relativeToRoot(path, root string) string {
 	return strings.TrimPrefix(pathPart, "/")
 }
 
+// urlPath returns the path of raw without its scheme and authority. It also
+// accepts Hadoop-style "file:/path" locations and collapses repeated slashes,
+// so it matches the bare paths that LocalFS yields while walking.
 func urlPath(raw string) string {
-	if _, rest, found := strings.Cut(raw, "://"); found {
+	switch {
+	case strings.Contains(raw, "://"):
+		_, rest, _ := strings.Cut(raw, "://")
 		if _, p, ok := strings.Cut(rest, "/"); ok {
-			return "/" + p
+			raw = "/" + p
+		} else {
+			return ""
 		}
-
-		return ""
+	case strings.HasPrefix(raw, "file:/"):
+		raw = strings.TrimPrefix(raw, "file:")
+	}
+	for strings.Contains(raw, "//") {
+		raw = strings.ReplaceAll(raw, "//", "/")
 	}
 
 	return raw
