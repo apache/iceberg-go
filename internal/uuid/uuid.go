@@ -15,10 +15,11 @@
 // specific language governing permissions and limitations
 // under the License.
 
-// Package uuid is the only place in the module that names the UUID
-// implementation, so it can be swapped for the standard library without
-// touching callers. Only API that both github.com/google/uuid and the
-// standard library uuid package can provide belongs here.
+// Package uuid wraps the UUID implementation so it can be swapped for the
+// standard library without touching callers, which should use this package
+// instead of naming the implementation. Only API that both
+// github.com/google/uuid and the standard library uuid package can provide
+// belongs here.
 package uuid
 
 import "github.com/google/uuid"
