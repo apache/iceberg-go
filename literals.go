@@ -1334,17 +1334,13 @@ func (u UUIDLiteral) To(typ Type) (Literal, error) {
 		return u, nil
 	case FixedType:
 		if len(u) == t.len {
-			v, _ := UUID(u).MarshalBinary()
-
-			return FixedLiteral(v), nil
+			return FixedLiteral(bytes.Clone(u[:])), nil
 		}
 
 		return nil, fmt.Errorf("%w: cannot convert UUIDLiteral to %s, different length - %d <> %d",
 			ErrBadCast, typ, len(u), t.len)
 	case BinaryType:
-		v, _ := UUID(u).MarshalBinary()
-
-		return BinaryLiteral(v), nil
+		return BinaryLiteral(bytes.Clone(u[:])), nil
 	}
 
 	return nil, fmt.Errorf("%w: UUIDLiteral to %s", ErrBadCast, typ)
@@ -1360,7 +1356,7 @@ func (u UUIDLiteral) Equals(other Literal) bool {
 }
 
 func (u UUIDLiteral) MarshalBinary() (data []byte, err error) {
-	return UUID(u).MarshalBinary()
+	return bytes.Clone(u[:]), nil
 }
 
 func (u *UUIDLiteral) UnmarshalBinary(data []byte) error {

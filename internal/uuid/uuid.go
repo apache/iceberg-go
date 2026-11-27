@@ -17,19 +17,23 @@
 
 // Package uuid is the only place in the module that names the UUID
 // implementation, so it can be swapped for the standard library without
-// touching callers.
+// touching callers. Only API that both github.com/google/uuid and the
+// standard library uuid package can provide belongs here.
 package uuid
 
 import "github.com/google/uuid"
 
+// UUID is a 16-byte RFC 9562 UUID.
 type UUID = uuid.UUID
 
-var Nil = uuid.Nil
-
+// New returns a random (version 4) UUID.
 func New() UUID { return uuid.New() }
 
-func NewRandom() (UUID, error) { return uuid.NewRandom() }
-
+// Parse decodes s into a UUID.
 func Parse(s string) (UUID, error) { return uuid.Parse(s) }
 
+// MustParse is like Parse but panics if s cannot be parsed.
+func MustParse(s string) UUID { return uuid.MustParse(s) }
+
+// FromBytes returns the UUID held in b, which must be exactly 16 bytes long.
 func FromBytes(b []byte) (UUID, error) { return uuid.FromBytes(b) }
