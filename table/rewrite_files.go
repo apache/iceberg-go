@@ -123,31 +123,6 @@ func (r *RewriteFiles) DeleteFile(df iceberg.DataFile) *RewriteFiles {
 	return r
 }
 
-// removeAutomaticDeleteFile queues a delete file that became removable as a
-// consequence of rewriting data files. These files are removed in the same
-// snapshot, but they are not considered source files for an explicit delete
-// file rewrite.
-func (r *RewriteFiles) removeAutomaticDeleteFile(df iceberg.DataFile) *RewriteFiles {
-	if r.err != nil {
-		return r
-	}
-	if df == nil {
-		r.err = fmt.Errorf("%w: automatic delete removal got nil data file", ErrInvalidOperation)
-
-		return r
-	}
-
-	switch df.ContentType() {
-	case iceberg.EntryContentPosDeletes, iceberg.EntryContentEqDeletes:
-		r.autoDeleteFilesToRemove = append(r.autoDeleteFilesToRemove, df)
-	default:
-		r.err = fmt.Errorf("%w: automatic delete removal got unsupported content type %s (%s)",
-			ErrInvalidOperation, df.ContentType(), df.FilePath())
-	}
-
-	return r
-}
-
 // AddDataFile queues a new data file. Use [RewriteFiles.AddDeleteFile] for
 // positional deletes, equality deletes, or deletion vectors.
 func (r *RewriteFiles) AddDataFile(df iceberg.DataFile) *RewriteFiles {
@@ -274,7 +249,9 @@ func (r *RewriteFiles) AddFile(df iceberg.DataFile) *RewriteFiles {
 
 // ApplyResult queues a worker's [CompactionGroupResult] onto this builder,
 // routing OldDataFiles (DeleteFile), NewDataFiles (AddFile), SafePosDeletes
-// and SafeDeletionVectors as automatic delete-file removals.
+// and SafeDeletionVectors as automatic delete-file removal candidates. Commit
+// checks position deletes against surviving files and deletion vectors against
+// the data files being replaced.
 //
 // Typical distributed-coordinator pattern:
 //
@@ -290,12 +267,11 @@ func (r *RewriteFiles) ApplyResult(gr CompactionGroupResult) *RewriteFiles {
 	for _, df := range gr.NewDataFiles {
 		r.AddFile(df)
 	}
-	// DVs are automatic removals keyed by their referenced data file.
 	for _, df := range gr.SafePosDeletes {
-		r.removeAutomaticDeleteFile(df)
+		r.removeAutomaticDeleteFile(df, false)
 	}
 	for _, df := range gr.SafeDeletionVectors {
-		r.removeAutomaticDeleteFile(df)
+		r.removeAutomaticDeleteFile(df, true)
 	}
 
 	return r
@@ -303,6 +279,9 @@ func (r *RewriteFiles) ApplyResult(gr CompactionGroupResult) *RewriteFiles {
 
 // Commit stages the rewrite snapshot on the underlying transaction.
 // The catalog commit happens once, later, at [Transaction.Commit] time.
+//
+// To check position-delete removal candidates, Commit reads delete manifests in
+// the staging snapshot and also reads data manifests for partition-scoped candidates.
 //
 // Commit is single-shot: any second call returns an error regardless
 // of whether the first call succeeded, and neither re-stages the
@@ -320,6 +299,12 @@ func (r *RewriteFiles) Commit(ctx context.Context) error {
 	if r.err != nil {
 		return r.err
 	}
+	removals, deleteParent, err := r.automaticDeleteRemovals(ctx)
+	if err != nil {
+		return err
+	}
+	r.autoDeleteFilesToRemove = removals
+
 	if len(r.dataFilesToDelete) == 0 && len(r.dataFilesToAdd) == 0 &&
 		len(r.deleteFilesToAdd) == 0 && len(r.deleteFilesToRemove) == 0 &&
 		len(r.autoDeleteFilesToRemove) == 0 {
@@ -340,6 +325,7 @@ func (r *RewriteFiles) Commit(ctx context.Context) error {
 		opts = append(opts, withDataSequenceNumber(*r.dataSequenceNumber))
 	}
 	if err := r.txn.replaceFiles(ctx, r.dataFilesToDelete, r.dataFilesToAdd,
+		deleteParent,
 		r.deleteFilesToRemove, r.autoDeleteFilesToRemove, r.deleteFilesToAdd,
 		r.snapshotProps, opts...); err != nil {
 		return err
