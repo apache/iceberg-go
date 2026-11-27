@@ -19,6 +19,7 @@ package catalogtest
 
 import (
 	"context"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -124,6 +125,21 @@ func testCreateTableWithLocation(t *testing.T, cfg Config) {
 	tbl, err := cat.LoadTable(ctx, ident)
 	require.NoError(t, err)
 	assert.Equal(t, loc, tbl.Location())
-	assert.Truef(t, strings.HasPrefix(tbl.MetadataLocation(), loc+"/"),
+	assert.Truef(t, isUnder(t, tbl.MetadataLocation(), loc),
 		"metadata %q should be written under %q", tbl.MetadataLocation(), loc)
+}
+
+// isUnder reports whether path is inside the location dir. Both are compared
+// as URIs because catalogs may spell the same location differently, such as
+// "file:/tmp/x" for "file:///tmp/x".
+func isUnder(t *testing.T, path, dir string) bool {
+	t.Helper()
+
+	p, err := url.Parse(path)
+	require.NoError(t, err)
+	d, err := url.Parse(dir)
+	require.NoError(t, err)
+
+	return p.Scheme == d.Scheme && p.Host == d.Host &&
+		strings.HasPrefix(p.Path, strings.TrimSuffix(d.Path, "/")+"/")
 }
