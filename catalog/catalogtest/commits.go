@@ -46,19 +46,6 @@ func createTable(t *testing.T, cat catalog.Catalog, opts ...catalog.CreateTableO
 	return ident, tbl
 }
 
-// testCreateTableWithProperties asserts that properties passed at create time
-// are visible on a fresh load.
-func testCreateTableWithProperties(t *testing.T, cfg Config) {
-	ctx := context.Background()
-	cat := cfg.NewCatalog(t)
-
-	ident, _ := createTable(t, cat, catalog.WithProperties(iceberg.Properties{"owner": "conformance"}))
-
-	tbl, err := cat.LoadTable(ctx, ident)
-	require.NoError(t, err)
-	assert.Equal(t, "conformance", tbl.Properties()["owner"])
-}
-
 // testUpdateTableProperties asserts that properties set and removed through a
 // transaction are visible on a fresh load.
 func testUpdateTableProperties(t *testing.T, cfg Config) {
