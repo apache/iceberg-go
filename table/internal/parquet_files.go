@@ -301,6 +301,10 @@ func ResolveParquetStatsColumnPaths(props iceberg.Properties, tableSchema, fileS
 	return mapped
 }
 
+// maxWriteBatchRows caps arrow-go's write batch. It keeps 1 MiB pages near their target for values up to 32 KiB,
+// and costs a few percent of write time on narrow tables.
+const maxWriteBatchRows = 32
+
 func (parquetFormat) GetWriteProperties(props iceberg.Properties) any {
 	pageVersion := props.Get(ParquetPageVersionKey, ParquetPageVersionDefault)
 
@@ -321,8 +325,10 @@ func (parquetFormat) GetWriteProperties(props iceberg.Properties) any {
 		parquet.WithDataPageSize(int64(props.GetInt(ParquetPageSizeBytesKey,
 			ParquetPageSizeBytesDefault))),
 		parquet.WithDataPageVersion(dpVersion),
-		parquet.WithBatchSize(int64(props.GetInt(ParquetPageRowLimitKey,
-			ParquetPageRowLimitDefault))),
+		// arrow-go checks the page size only between write batches, so a page can grow to batch size × value size.
+		// A small batch keeps pages near write.parquet.page-size-bytes when values are large.
+		parquet.WithBatchSize(int64(min(props.GetInt(ParquetPageRowLimitKey, ParquetPageRowLimitDefault),
+			maxWriteBatchRows))),
 		parquet.WithDictionaryPageSizeLimit(int64(props.GetInt(ParquetDictSizeBytesKey,
 			ParquetDictSizeBytesDefault))),
 	}
