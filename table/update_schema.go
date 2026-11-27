@@ -425,7 +425,7 @@ func (u *UpdateSchema) addColumn(path []string, fieldType iceberg.Type, doc stri
 		return fmt.Errorf("failed to assign field id: %w", err)
 	}
 	u.adds[parentID] = append(u.adds[parentID], sch.Field(0))
-	u.addedNameToID[fullName] = sch.Field(0).ID
+	u.addedNameToID[u.addedNameKey(fullName)] = sch.Field(0).ID
 
 	return nil
 }
@@ -615,7 +615,7 @@ func (u *UpdateSchema) updateColumn(path []string, update ColumnUpdate) error {
 	}
 
 	if added != nil {
-		*added = updatedField
+		u.adds[added.parentID][added.index] = updatedField
 	} else {
 		u.updates[parentID][field.ID] = updatedField
 	}
@@ -677,27 +677,33 @@ func (u *UpdateSchema) findFieldForMove(name string) (int, bool) {
 	return u.addedFieldID(name)
 }
 
-// addedFieldID returns the ID of a column added earlier in this update,
-// matching the name with UpdateSchema's case sensitivity. AddColumn rejects
-// names that differ only in case, so at most one matches.
-func (u *UpdateSchema) addedFieldID(name string) (int, bool) {
-	if id, ok := u.addedNameToID[name]; ok {
-		return id, true
-	}
-	for addedName, id := range u.addedNameToID {
-		if u.sameName(addedName, name) {
-			return id, true
-		}
+// addedNameKey returns the addedNameToID key for a name: the name itself, or
+// its lowercase form when the update is case-insensitive, as Java's
+// caseSensitivityAwareName does.
+func (u *UpdateSchema) addedNameKey(name string) string {
+	if u.caseSensitive {
+		return name
 	}
 
-	return 0, false
+	return strings.ToLower(name)
+}
+
+// addedFieldID returns the ID of a column added earlier in this update.
+func (u *UpdateSchema) addedFieldID(name string) (int, bool) {
+	id, ok := u.addedNameToID[u.addedNameKey(name)]
+
+	return id, ok
+}
+
+// addedFieldRef locates an added column: u.adds[parentID][index].
+type addedFieldRef struct {
+	parentID int
+	index    int
 }
 
 // findFieldForUpdate finds a field in the original schema, or falls back to a
-// column added earlier in this update. For an added field it also returns
-// a pointer to its entry in u.adds, so the caller can update it in place.
-// For a field in the original schema the pointer is nil.
-func (u *UpdateSchema) findFieldForUpdate(name string) (iceberg.NestedField, *iceberg.NestedField, bool) {
+// column added earlier in this update. The ref is nil for an original field.
+func (u *UpdateSchema) findFieldForUpdate(name string) (iceberg.NestedField, *addedFieldRef, bool) {
 	if field, ok := u.findField(name); ok {
 		return field, nil, true
 	}
@@ -707,12 +713,11 @@ func (u *UpdateSchema) findFieldForUpdate(name string) (iceberg.NestedField, *ic
 		return iceberg.NestedField{}, nil, false
 	}
 
-	// u.adds is keyed by parent ID, so search every parent's list. Nothing
-	// appends to u.adds before the caller uses the pointer, so it stays valid.
-	for parentID := range u.adds {
-		for i := range u.adds[parentID] {
-			if u.adds[parentID][i].ID == id {
-				return u.adds[parentID][i], &u.adds[parentID][i], true
+	// u.adds is keyed by parent ID, so search every parent's list.
+	for parentID, adds := range u.adds {
+		for i, f := range adds {
+			if f.ID == id {
+				return f, &addedFieldRef{parentID: parentID, index: i}, true
 			}
 		}
 	}
@@ -925,7 +930,7 @@ func (u *UpdateSchema) unionAddColumn(path []string, newField iceberg.NestedFiel
 		return fmt.Errorf("failed to assign field id: %w", err)
 	}
 	u.adds[parentID] = append(u.adds[parentID], sch.Field(0))
-	u.addedNameToID[fullName] = sch.Field(0).ID
+	u.addedNameToID[u.addedNameKey(fullName)] = sch.Field(0).ID
 
 	return nil
 }

@@ -415,6 +415,19 @@ func TestUpdateColumnAddedInSameUpdate(t *testing.T) {
 		assert.Equal(t, "hello", field.Doc)
 	})
 
+	t.Run("case-insensitive name added in mixed case", func(t *testing.T) {
+		sc, err := newUpdate(false, false).
+			AddColumn([]string{"Gender"}, iceberg.PrimitiveTypes.String, "", false, nil).
+			UpdateColumn([]string{"gender"}, doc("hello")).
+			MoveFirst([]string{"GENDER"}).
+			Apply()
+		require.NoError(t, err)
+
+		first := sc.Fields()[0]
+		assert.Equal(t, "Gender", first.Name)
+		assert.Equal(t, "hello", first.Doc)
+	})
+
 	t.Run("case-sensitive name must match", func(t *testing.T) {
 		_, err := newUpdate(true, false).
 			AddColumn([]string{"gender"}, iceberg.PrimitiveTypes.String, "", false, nil).
