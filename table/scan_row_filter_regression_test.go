@@ -138,6 +138,58 @@ func TestScanRowFilterStartsWith(t *testing.T) {
 	})
 }
 
+func TestScanRowFilterNotEqualSingleValueFile(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "region", Type: iceberg.PrimitiveTypes.String, Required: false},
+	)
+	arrowSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: false},
+		{Name: "region", Type: arrow.BinaryTypes.String, Nullable: true},
+	}, nil)
+
+	tbl := newTestScanTable(t, "not_equal_single_value", schema)
+	for _, rows := range []struct {
+		ids     []int64
+		regions []string
+	}{
+		{ids: []int64{1, 2}, regions: []string{"us", "us"}},
+		{ids: []int64{3, 4}, regions: []string{"us", "eu"}},
+	} {
+		bldr := array.NewRecordBuilder(memory.DefaultAllocator, arrowSchema)
+		bldr.Field(0).(*array.Int64Builder).AppendValues(rows.ids, nil)
+		bldr.Field(1).(*array.StringBuilder).AppendValues(rows.regions, nil)
+		rec := bldr.NewRecordBatch()
+		bldr.Release()
+
+		rdr, err := array.NewRecordReader(arrowSchema, []arrow.RecordBatch{rec})
+		require.NoError(t, err)
+		tbl, err = tbl.Append(t.Context(), rdr, nil)
+		rdr.Release()
+		rec.Release()
+		require.NoError(t, err)
+	}
+
+	region := iceberg.Reference("region")
+	for _, tc := range []struct {
+		name   string
+		filter iceberg.BooleanExpression
+		files  int
+		ids    []int64
+	}{
+		{name: "not equal", filter: iceberg.NotEqualTo(region, "us"), files: 1, ids: []int64{4}},
+		{name: "not in", filter: iceberg.NotIn(region, "us", "kr"), files: 1, ids: []int64{4}},
+		{name: "not equal other", filter: iceberg.NotEqualTo(region, "eu"), files: 2, ids: []int64{1, 2, 3}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tasks, err := tbl.Scan(table.WithRowFilter(tc.filter)).PlanFiles(t.Context())
+			require.NoError(t, err)
+			require.Len(t, tasks, tc.files)
+			require.ElementsMatch(t, tc.ids, scanIDsWithCheckedAlloc(t, tbl, tc.filter))
+		})
+	}
+}
+
 func TestScanRowFilterEmbeddedDictionary(t *testing.T) {
 	schema := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
