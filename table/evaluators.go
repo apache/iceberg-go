@@ -2226,7 +2226,7 @@ func (c *bloomPredicateCollector) VisitEqual(t iceberg.BoundTerm, lit iceberg.Li
 		return nil
 	}
 
-	return []internal.RowGroupBloomPred{{FieldID: field.ID, PhysBytes: physBytes}}
+	return []internal.RowGroupBloomPred{{FieldID: field.ID, FieldType: field.Type, PhysBytes: physBytes}}
 }
 
 func (c *bloomPredicateCollector) VisitIn(t iceberg.BoundTerm, s iceberg.Set[iceberg.Literal]) []internal.RowGroupBloomPred {
@@ -2249,7 +2249,7 @@ func (c *bloomPredicateCollector) VisitIn(t iceberg.BoundTerm, s iceberg.Set[ice
 		physBytes = append(physBytes, candidates...)
 	}
 
-	return []internal.RowGroupBloomPred{{FieldID: field.ID, PhysBytes: physBytes}}
+	return []internal.RowGroupBloomPred{{FieldID: field.ID, FieldType: field.Type, PhysBytes: physBytes}}
 }
 
 func (c *bloomPredicateCollector) VisitNotIn(_ iceberg.BoundTerm, _ iceberg.Set[iceberg.Literal]) []internal.RowGroupBloomPred {

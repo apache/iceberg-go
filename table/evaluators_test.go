@@ -3427,6 +3427,10 @@ func TestBloomPredicateCollector(t *testing.T) {
 	sc := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
 		iceberg.NestedField{ID: 2, Name: "name", Type: iceberg.PrimitiveTypes.String, Required: false},
+		iceberg.NestedField{ID: 3, Name: "ts", Type: iceberg.PrimitiveTypes.Timestamp, Required: false},
+		iceberg.NestedField{ID: 4, Name: "tstz", Type: iceberg.PrimitiveTypes.TimestampTz, Required: false},
+		iceberg.NestedField{ID: 5, Name: "ts_ns", Type: iceberg.PrimitiveTypes.TimestampNs, Required: false},
+		iceberg.NestedField{ID: 6, Name: "tstz_ns", Type: iceberg.PrimitiveTypes.TimestampTzNs, Required: false},
 	)
 
 	bind := func(expr iceberg.BooleanExpression) iceberg.BooleanExpression {
@@ -3442,6 +3446,7 @@ func TestBloomPredicateCollector(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, preds, 1)
 		assert.Equal(t, 1, preds[0].FieldID)
+		assert.Equal(t, iceberg.PrimitiveTypes.Int64, preds[0].FieldType)
 		assert.Len(t, preds[0].PhysBytes, 1)
 	})
 
@@ -3451,7 +3456,64 @@ func TestBloomPredicateCollector(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, preds, 1)
 		assert.Equal(t, 1, preds[0].FieldID)
+		assert.Equal(t, iceberg.PrimitiveTypes.Int64, preds[0].FieldType)
 		assert.Len(t, preds[0].PhysBytes, 3)
+	})
+
+	t.Run("populates FieldType for timestamp bloom and dictionary predicates", func(t *testing.T) {
+		for _, tt := range []struct {
+			name     string
+			expr     iceberg.BooleanExpression
+			fieldID  int
+			wantType iceberg.Type
+			wantLen  int
+		}{
+			{
+				name:     "EqualTo timestamp",
+				expr:     iceberg.EqualTo(iceberg.Reference("ts"), iceberg.Timestamp(1_500_000)),
+				fieldID:  3,
+				wantType: iceberg.PrimitiveTypes.Timestamp,
+				wantLen:  1,
+			},
+			{
+				name:     "In timestamptz",
+				expr:     iceberg.IsIn(iceberg.Reference("tstz"), iceberg.Timestamp(1_500_000), iceberg.Timestamp(2_500_000)),
+				fieldID:  4,
+				wantType: iceberg.PrimitiveTypes.TimestampTz,
+				wantLen:  2,
+			},
+		} {
+			t.Run(tt.name, func(t *testing.T) {
+				bound := bind(tt.expr)
+
+				bloomPreds, err := newBloomFilterPredicates(bound)
+				require.NoError(t, err)
+				require.Len(t, bloomPreds, 1)
+				assert.Equal(t, tt.fieldID, bloomPreds[0].FieldID)
+				assert.Equal(t, tt.wantType, bloomPreds[0].FieldType)
+				assert.Len(t, bloomPreds[0].PhysBytes, tt.wantLen)
+
+				dictPreds, err := newDictionaryPredicates(bound)
+				require.NoError(t, err)
+				require.Len(t, dictPreds, 1)
+				assert.Equal(t, tt.fieldID, dictPreds[0].FieldID)
+				assert.Equal(t, tt.wantType, dictPreds[0].FieldType)
+				assert.Len(t, dictPreds[0].PhysBytes, tt.wantLen)
+			})
+		}
+	})
+
+	t.Run("nanosecond timestamps are not collected", func(t *testing.T) {
+		for _, col := range []string{"ts_ns", "tstz_ns"} {
+			expr := bind(iceberg.EqualTo(iceberg.Reference(col), int64(1_500_000_000)))
+			bloomPreds, err := newBloomFilterPredicates(expr)
+			require.NoError(t, err)
+			assert.Empty(t, bloomPreds)
+
+			dictPreds, err := newDictionaryPredicates(expr)
+			require.NoError(t, err)
+			assert.Empty(t, dictPreds)
+		}
 	})
 
 	t.Run("And merges predicates from both sides", func(t *testing.T) {

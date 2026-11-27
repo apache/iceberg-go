@@ -88,16 +88,42 @@ func int64PhysBytes(v int64) []byte {
 	return binary.LittleEndian.AppendUint64(nil, uint64(v))
 }
 
-// A Parquet TIMESTAMP(MILLIS) column is read as an Iceberg microsecond
-// timestamp, so the predicate bytes built from a microsecond literal never
-// occur in the file's dictionary or bloom filter. Row groups must be kept for
-// such columns. The microsecond rows prove the same predicates still prune
-// when the units agree.
-func TestTimestampMillisSkipsDictionaryAndBloomPruning(t *testing.T) {
+func buildMultiRGTimestampParquet(
+	t testing.TB, nodes schema.FieldList, props *parquet.WriterProperties, rowGroups [][][]int64,
+) []byte {
+	t.Helper()
+
+	root, err := schema.NewGroupNode("schema", parquet.Repetitions.Required, nodes, -1)
+	require.NoError(t, err)
+
+	var buf bytes.Buffer
+	pw := file.NewParquetWriter(&buf, root, file.WithWriterProps(props))
+	for _, rgCols := range rowGroups {
+		require.Equal(t, len(nodes), len(rgCols))
+		rgw, err := pw.AppendRowGroupChecked()
+		require.NoError(t, err)
+		for _, colVals := range rgCols {
+			cw, err := rgw.NextColumn()
+			require.NoError(t, err)
+			_, err = cw.(*file.Int64ColumnChunkWriter).WriteBatch(colVals, nil, nil)
+			require.NoError(t, err)
+			require.NoError(t, cw.Close())
+		}
+		require.NoError(t, rgw.Close())
+	}
+	require.NoError(t, pw.Close())
+
+	return buf.Bytes()
+}
+
+func TestTimestampMillisDictionaryAndBloomPruning(t *testing.T) {
 	const (
 		rows       = 1000
+		negMilli   = int64(-1_500)
 		firstMilli = int64(1_700_000_000_000)
 		otherMilli = firstMilli + 1_500
+		maxDivUs   = (math.MaxInt64 / 1000) * 1000
+		minDivUs   = -(math.MaxInt64 / 1000) * 1000
 	)
 
 	dictionaryProps := parquet.NewWriterProperties(
@@ -110,22 +136,28 @@ func TestTimestampMillisSkipsDictionaryAndBloomPruning(t *testing.T) {
 		parquet.WithDictionaryDefault(false),
 		parquet.WithBloomFilterEnabledFor("ts", true),
 	)
+	plainProps := parquet.NewWriterProperties(
+		parquet.WithStats(false),
+		parquet.WithDictionaryDefault(false),
+	)
 
 	tests := []struct {
 		name          string
 		unit          schema.TimeUnitType
 		convertedOnly bool
 		perMilli      int64
+		fieldType     iceberg.Type
 	}{
-		{"millis logical type", schema.TimeUnitMillis, false, 1},
-		{"millis converted type only", schema.TimeUnitMillis, true, 1},
-		{"micros control", schema.TimeUnitMicros, false, 1000},
+		{"millis logical timestamp", schema.TimeUnitMillis, false, 1, iceberg.PrimitiveTypes.Timestamp},
+		{"millis logical timestamptz", schema.TimeUnitMillis, false, 1, iceberg.PrimitiveTypes.TimestampTz},
+		{"millis converted type only", schema.TimeUnitMillis, true, 1, iceberg.PrimitiveTypes.Timestamp},
+		{"micros control", schema.TimeUnitMicros, false, 1000, iceberg.PrimitiveTypes.Timestamp},
 	}
 	filters := []struct {
 		name     string
 		props    *parquet.WriterProperties
 		hasIndex func(*metadata.ColumnChunkMetaData) bool
-		tester   func(predBytes []byte) *internal.ParquetRowGroupTester
+		tester   func(fieldType iceberg.Type, preds [][]byte) *internal.ParquetRowGroupTester
 	}{
 		{
 			name:  "dictionary only",
@@ -133,9 +165,13 @@ func TestTimestampMillisSkipsDictionaryAndBloomPruning(t *testing.T) {
 			hasIndex: func(cc *metadata.ColumnChunkMetaData) bool {
 				return cc.HasDictionaryPage()
 			},
-			tester: func(b []byte) *internal.ParquetRowGroupTester {
+			tester: func(fieldType iceberg.Type, preds [][]byte) *internal.ParquetRowGroupTester {
 				return &internal.ParquetRowGroupTester{
-					DictionaryPreds: []internal.RowGroupDictionaryPred{{FieldID: 1, PhysBytes: [][]byte{b}}},
+					DictionaryPreds: []internal.RowGroupDictionaryPred{{
+						FieldID:   1,
+						FieldType: fieldType,
+						PhysBytes: preds,
+					}},
 				}
 			},
 		},
@@ -145,9 +181,13 @@ func TestTimestampMillisSkipsDictionaryAndBloomPruning(t *testing.T) {
 			hasIndex: func(cc *metadata.ColumnChunkMetaData) bool {
 				return cc.BloomFilterOffset() > 0
 			},
-			tester: func(b []byte) *internal.ParquetRowGroupTester {
+			tester: func(fieldType iceberg.Type, preds [][]byte) *internal.ParquetRowGroupTester {
 				return &internal.ParquetRowGroupTester{
-					BloomPreds: []internal.RowGroupBloomPred{{FieldID: 1, PhysBytes: [][]byte{b}}},
+					BloomPreds: []internal.RowGroupBloomPred{{
+						FieldID:   1,
+						FieldType: fieldType,
+						PhysBytes: preds,
+					}},
 				}
 			},
 		},
@@ -156,8 +196,12 @@ func TestTimestampMillisSkipsDictionaryAndBloomPruning(t *testing.T) {
 	values := func(perMilli int64) []int64 {
 		out := make([]int64, rows)
 		for i := range out {
-			out[i] = firstMilli * perMilli
-			if i%2 == 1 {
+			switch i % 3 {
+			case 0:
+				out[i] = negMilli * perMilli
+			case 1:
+				out[i] = firstMilli * perMilli
+			default:
 				out[i] = otherMilli * perMilli
 			}
 		}
@@ -178,25 +222,282 @@ func TestTimestampMillisSkipsDictionaryAndBloomPruning(t *testing.T) {
 				require.True(t, filter.hasIndex(cc), "the writer did not produce the structure under test")
 				require.NoError(t, pqRdr.Close())
 
-				countKept := func(microsLiteral int64) int64 {
+				countKept := func(microsLiterals ...int64) int64 {
+					phys := make([][]byte, len(microsLiterals))
+					for i, v := range microsLiterals {
+						phys[i] = int64PhysBytes(v)
+					}
 					rdr := openBloomTestReader(t, data)
 					defer rdr.Close()
-					rr, err := rdr.GetRecords(context.Background(), []int{0}, filter.tester(int64PhysBytes(microsLiteral)))
+					rr, err := rdr.GetRecords(context.Background(), []int{0}, filter.tester(tt.fieldType, phys))
 					require.NoError(t, err)
 
 					return countRecords(t, rr)
 				}
 
-				assert.Equal(t, int64(rows), countKept(firstMilli*1000),
-					"pruned a row group that holds the queried instant")
-				assert.Equal(t, int64(rows), countKept(otherMilli*1000),
-					"pruned a row group that holds the queried instant")
-				if tt.perMilli == 1000 {
-					assert.Zero(t, countKept((otherMilli+1)*1000),
-						"control: an absent microsecond value should still prune")
-				}
+				assert.Equal(t, int64(rows), countKept(negMilli*1000), "present negative pre-1970 instant")
+				assert.Equal(t, int64(rows), countKept(firstMilli*1000), "present positive instant")
+				assert.Equal(t, int64(rows), countKept(otherMilli*1000), "present positive instant")
+				assert.Zero(t, countKept((otherMilli+1)*1000), "absent divisible instant should prune")
+				assert.Zero(t, countKept(maxDivUs), "absent max boundary divisible instant should prune")
+				assert.Zero(t, countKept(minDivUs), "absent min boundary divisible instant should prune")
+
+				// In predicate with mixed divisible + sub-ms literals.
+				assert.Equal(t, int64(rows), countKept(firstMilli*1000+500, otherMilli*1000),
+					"In with sub-ms and present divisible literal should keep")
+				assert.Zero(t, countKept(firstMilli*1000+500, (otherMilli+1)*1000),
+					"In with sub-ms and absent divisible literal should prune")
+
+				// Sub-ms literals cannot match TIMESTAMP(MILLIS) and are absent in micros control.
+				assert.Zero(t, countKept(firstMilli*1000+500))
+				assert.Zero(t, countKept(-500))
+				assert.Zero(t, countKept(math.MaxInt64))
+				assert.Zero(t, countKept(math.MinInt64))
+				assert.Zero(t, countKept(firstMilli*1000+1, -500))
 			})
 		}
+
+		t.Run(filter.name+"/multi-row-group survivors", func(t *testing.T) {
+			data := buildMultiRGTimestampParquet(t,
+				schema.FieldList{timestampTestNode(t, schema.TimeUnitMillis, false)},
+				filter.props,
+				[][][]int64{
+					{{negMilli, firstMilli}},
+					{{otherMilli, otherMilli + 10, otherMilli + 20}},
+				},
+			)
+
+			run := func(microsLiterals ...int64) (int64, []internal.RowGroupSpan) {
+				phys := make([][]byte, len(microsLiterals))
+				for i, v := range microsLiterals {
+					phys[i] = int64PhysBytes(v)
+				}
+				var survivors []internal.RowGroupSpan
+				tester := filter.tester(iceberg.PrimitiveTypes.Timestamp, phys)
+				tester.Survivors = &survivors
+
+				rdr := openBloomTestReader(t, data)
+				defer rdr.Close()
+				rr, err := rdr.GetRecords(context.Background(), []int{0}, tester)
+				require.NoError(t, err)
+
+				return countRecords(t, rr), survivors
+			}
+
+			n, survivors := run(negMilli * 1000)
+			assert.Equal(t, int64(2), n)
+			assert.Equal(t, []internal.RowGroupSpan{{FirstRowPos: 0, NumRows: 2}}, survivors)
+
+			n, survivors = run(otherMilli * 1000)
+			assert.Equal(t, int64(3), n)
+			assert.Equal(t, []internal.RowGroupSpan{{FirstRowPos: 2, NumRows: 3}}, survivors)
+
+			n, survivors = run((otherMilli + 999) * 1000)
+			assert.Zero(t, n)
+			assert.Empty(t, survivors)
+
+			n, survivors = run(firstMilli*1000 + 500)
+			assert.Zero(t, n)
+			assert.Empty(t, survivors)
+		})
+
+		t.Run(filter.name+"/sub-ms prunes plain-encoded file without indexes", func(t *testing.T) {
+			data := buildTimestampTestParquet(t,
+				timestampTestNode(t, schema.TimeUnitMillis, false), plainProps, []int64{firstMilli, otherMilli})
+
+			pqRdr, err := file.NewParquetReader(bytes.NewReader(data))
+			require.NoError(t, err)
+			cc, err := pqRdr.MetaData().RowGroup(0).ColumnChunk(0)
+			require.NoError(t, err)
+			require.False(t, cc.HasDictionaryPage())
+			require.LessOrEqual(t, cc.BloomFilterOffset(), int64(0))
+			require.NoError(t, pqRdr.Close())
+
+			var survivors []internal.RowGroupSpan
+			tester := filter.tester(iceberg.PrimitiveTypes.Timestamp, [][]byte{
+				int64PhysBytes(firstMilli*1000 + 500),
+				int64PhysBytes(-500),
+			})
+			tester.Survivors = &survivors
+
+			rdr := openBloomTestReader(t, data)
+			defer rdr.Close()
+			rr, err := rdr.GetRecords(context.Background(), []int{0}, tester)
+			require.NoError(t, err)
+			assert.Zero(t, countRecords(t, rr))
+			assert.Empty(t, survivors)
+		})
+
+		t.Run(filter.name+"/zero-row-group file with unsatisfiable sub-ms resets survivors to nil", func(t *testing.T) {
+			data := buildMultiRGTimestampParquet(t,
+				schema.FieldList{timestampTestNode(t, schema.TimeUnitMillis, false)},
+				plainProps,
+				nil,
+			)
+
+			survivors := []internal.RowGroupSpan{{FirstRowPos: 0, NumRows: 1}}
+			tester := filter.tester(iceberg.PrimitiveTypes.Timestamp, [][]byte{int64PhysBytes(firstMilli*1000 + 500)})
+			tester.Survivors = &survivors
+
+			rdr := openBloomTestReader(t, data)
+			defer rdr.Close()
+			rr, err := rdr.GetRecords(context.Background(), []int{0}, tester)
+			require.NoError(t, err)
+			assert.Zero(t, countRecords(t, rr))
+			assert.Nil(t, survivors)
+		})
+
+		t.Run(filter.name+"/multiple predicates on same timestamp millis column", func(t *testing.T) {
+			data := buildTimestampTestParquet(t,
+				timestampTestNode(t, schema.TimeUnitMillis, false), filter.props, []int64{firstMilli, otherMilli})
+
+			makeTwoPredTester := func(firstUs, secondUs int64) *internal.ParquetRowGroupTester {
+				tester := filter.tester(iceberg.PrimitiveTypes.Timestamp, [][]byte{int64PhysBytes(firstUs)})
+				if len(tester.DictionaryPreds) > 0 {
+					tester.DictionaryPreds = append(tester.DictionaryPreds, internal.RowGroupDictionaryPred{
+						FieldID:   1,
+						FieldType: iceberg.PrimitiveTypes.Timestamp,
+						PhysBytes: [][]byte{int64PhysBytes(secondUs)},
+					})
+				} else {
+					tester.BloomPreds = append(tester.BloomPreds, internal.RowGroupBloomPred{
+						FieldID:   1,
+						FieldType: iceberg.PrimitiveTypes.Timestamp,
+						PhysBytes: [][]byte{int64PhysBytes(secondUs)},
+					})
+				}
+
+				return tester
+			}
+
+			run := func(firstUs, secondUs int64) int64 {
+				rdr := openBloomTestReader(t, data)
+				defer rdr.Close()
+				rr, err := rdr.GetRecords(context.Background(), []int{0}, makeTwoPredTester(firstUs, secondUs))
+				require.NoError(t, err)
+
+				return countRecords(t, rr)
+			}
+
+			assert.Equal(t, int64(2), run(firstMilli*1000, otherMilli*1000), "both divisible predicates present")
+			assert.Zero(t, run(firstMilli*1000, (otherMilli+1)*1000), "second divisible predicate absent")
+			assert.Zero(t, run(firstMilli*1000, firstMilli*1000+500), "sub-ms predicate after allocated adapted slice")
+		})
+
+		t.Run(filter.name+"/safety guards drop predicate conservatively", func(t *testing.T) {
+			idNode, err := schema.NewPrimitiveNode("id", parquet.Repetitions.Required, parquet.Types.Int64, 2, -1)
+			require.NoError(t, err)
+			props := parquet.NewWriterProperties(
+				parquet.WithStats(false),
+				parquet.WithDictionaryDefault(filter.name == "dictionary only"),
+				parquet.WithDictionaryCostFallbackFor("ts", false),
+				parquet.WithDictionaryCostFallbackFor("id", false),
+				parquet.WithBloomFilterEnabledFor("ts", filter.name == "bloom filter only"),
+				parquet.WithBloomFilterEnabledFor("id", filter.name == "bloom filter only"),
+			)
+			data := buildMultiRGTimestampParquet(t,
+				schema.FieldList{timestampTestNode(t, schema.TimeUnitMillis, false), idNode},
+				props,
+				[][][]int64{
+					{{firstMilli, otherMilli}, {10, 20}},
+				},
+			)
+			pqRdr, err := file.NewParquetReader(bytes.NewReader(data))
+			require.NoError(t, err)
+			tsCC, err := pqRdr.MetaData().RowGroup(0).ColumnChunk(0)
+			require.NoError(t, err)
+			require.True(t, filter.hasIndex(tsCC), "ts column missing expected index")
+			idCC, err := pqRdr.MetaData().RowGroup(0).ColumnChunk(1)
+			require.NoError(t, err)
+			require.True(t, filter.hasIndex(idCC), "id column missing expected index")
+			require.NoError(t, pqRdr.Close())
+
+			guardCases := []struct {
+				name      string
+				fieldType iceberg.Type
+				physBytes [][]byte
+			}{
+				{"nil field type divisible", nil, [][]byte{int64PhysBytes((otherMilli + 1) * 1000)}},
+				{"nil field type sub-ms", nil, [][]byte{int64PhysBytes(firstMilli*1000 + 500)}},
+				{"TimestampNs divisible", iceberg.PrimitiveTypes.TimestampNs, [][]byte{int64PhysBytes((otherMilli + 1) * 1000)}},
+				{"TimestampNs sub-ms", iceberg.PrimitiveTypes.TimestampNs, [][]byte{int64PhysBytes(firstMilli*1000 + 500)}},
+				{"TimestampTzNs divisible", iceberg.PrimitiveTypes.TimestampTzNs, [][]byte{int64PhysBytes((otherMilli + 1) * 1000)}},
+				{"TimestampTzNs sub-ms", iceberg.PrimitiveTypes.TimestampTzNs, [][]byte{int64PhysBytes(firstMilli*1000 + 500)}},
+				{"Int64 divisible", iceberg.PrimitiveTypes.Int64, [][]byte{int64PhysBytes((otherMilli + 1) * 1000)}},
+				{"Int64 sub-ms", iceberg.PrimitiveTypes.Int64, [][]byte{int64PhysBytes(firstMilli*1000 + 500)}},
+				{"malformed width", iceberg.PrimitiveTypes.Timestamp, [][]byte{{1, 2, 3, 4}}},
+				{"mixed sub-ms and malformed width", iceberg.PrimitiveTypes.Timestamp, [][]byte{int64PhysBytes(firstMilli*1000 + 500), {1, 2, 3, 4}}},
+				{"mixed divisible and malformed width", iceberg.PrimitiveTypes.Timestamp, [][]byte{int64PhysBytes((otherMilli + 1) * 1000), {1, 2, 3, 4}}},
+			}
+
+			for _, gc := range guardCases {
+				t.Run(gc.name, func(t *testing.T) {
+					// Without a companion predicate, the guarded predicate must not prune.
+					rdr := openBloomTestReader(t, data)
+					rr, err := rdr.GetRecords(context.Background(), []int{0, 1}, filter.tester(gc.fieldType, gc.physBytes))
+					require.NoError(t, err)
+					assert.Equal(t, int64(2), countRecords(t, rr))
+					require.NoError(t, rdr.Close())
+
+					// With an absent companion predicate on id, pruning still happens.
+					tester := filter.tester(gc.fieldType, gc.physBytes)
+					if len(tester.DictionaryPreds) > 0 {
+						tester.DictionaryPreds = append(tester.DictionaryPreds, internal.RowGroupDictionaryPred{
+							FieldID:   2,
+							FieldType: iceberg.PrimitiveTypes.Int64,
+							PhysBytes: [][]byte{int64PhysBytes(999)},
+						})
+					} else {
+						tester.BloomPreds = append(tester.BloomPreds, internal.RowGroupBloomPred{
+							FieldID:   2,
+							FieldType: iceberg.PrimitiveTypes.Int64,
+							PhysBytes: [][]byte{int64PhysBytes(999)},
+						})
+					}
+					rdr2 := openBloomTestReader(t, data)
+					rr2, err := rdr2.GetRecords(context.Background(), []int{0, 1}, tester)
+					require.NoError(t, err)
+					assert.Zero(t, countRecords(t, rr2))
+					require.NoError(t, rdr2.Close())
+				})
+			}
+		})
+
+		t.Run(filter.name+"/shared tester immutability across millis and micros files", func(t *testing.T) {
+			millisData := buildTimestampTestParquet(t,
+				timestampTestNode(t, schema.TimeUnitMillis, false), filter.props, []int64{firstMilli, otherMilli})
+			microsData := buildTimestampTestParquet(t,
+				timestampTestNode(t, schema.TimeUnitMicros, false), filter.props, []int64{firstMilli * 1000, otherMilli * 1000})
+
+			subMsBytes := int64PhysBytes(firstMilli*1000 + 500)
+			divBytes := int64PhysBytes(firstMilli * 1000)
+			wantOrig := [][]byte{
+				append([]byte(nil), subMsBytes...),
+				append([]byte(nil), divBytes...),
+			}
+			tester := filter.tester(iceberg.PrimitiveTypes.Timestamp, [][]byte{subMsBytes, divBytes})
+
+			// Scan TIMESTAMP(MILLIS) file first.
+			rdr1 := openBloomTestReader(t, millisData)
+			rr1, err := rdr1.GetRecords(context.Background(), []int{0}, tester)
+			require.NoError(t, err)
+			assert.Equal(t, int64(2), countRecords(t, rr1))
+			require.NoError(t, rdr1.Close())
+
+			// Caller's predicate slice length and bytes must be untouched.
+			if len(tester.DictionaryPreds) > 0 {
+				assert.Equal(t, wantOrig, tester.DictionaryPreds[0].PhysBytes)
+			} else {
+				assert.Equal(t, wantOrig, tester.BloomPreds[0].PhysBytes)
+			}
+
+			// Reuse the exact same tester on TIMESTAMP(MICROS) file.
+			rdr2 := openBloomTestReader(t, microsData)
+			rr2, err := rdr2.GetRecords(context.Background(), []int{0}, tester)
+			require.NoError(t, err)
+			assert.Equal(t, int64(2), countRecords(t, rr2))
+			require.NoError(t, rdr2.Close())
+		})
 	}
 }
 
