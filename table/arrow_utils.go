@@ -1076,6 +1076,10 @@ type arrowProjectionVisitor struct {
 	useWriteDefault      bool
 	allowMissingRequired bool
 	dictionaryFieldIDs   set[int]
+	// partitionConstants maps a field ID to the value of an identity partition
+	// on it, for the data file being read. A field the file does not store is
+	// filled from here first, per the spec's column projection rule 1.
+	partitionConstants map[int]any
 }
 
 func (a *arrowProjectionVisitor) typeToArrowType(t iceberg.Type) arrow.DataType {
@@ -1334,7 +1338,12 @@ func (a *arrowProjectionVisitor) Struct(st iceberg.StructType, structArr arrow.A
 			}
 			alloc := compute.GetAllocator(a.ctx)
 
+			constant, hasConstant := a.partitionConstants[field.ID]
 			switch {
+			case hasConstant && constant != nil:
+				arr = defaultToArray(constant, field.Type, dt, structArr.Len(), alloc)
+			case hasConstant && (!field.Required || a.allowMissingRequired):
+				arr = array.MakeArrayOfNull(alloc, dt, structArr.Len())
 			case field.WriteDefault != nil && a.useWriteDefault:
 				arr = defaultToArray(field.WriteDefault, field.Type, dt, structArr.Len(), alloc)
 			case field.InitialDefault != nil && !a.useWriteDefault:
@@ -1518,10 +1527,22 @@ func ToRequestedSchema(ctx context.Context, requested, fileSchema *iceberg.Schem
 // When targetArrowSchema is provided, an exact Arrow schema match can reuse the
 // input batch without walking the Iceberg schema or rebuilding any arrays.
 func toRequestedSchema(ctx context.Context, requested, fileSchema *iceberg.Schema, batch arrow.RecordBatch, opts SchemaOptions, targetArrowSchema *arrow.Schema) (arrow.RecordBatch, error) {
+	return projectToRequestedSchema(ctx, requested, fileSchema, batch, opts, targetArrowSchema, nil)
+}
+
+// projectToRequestedSchema is toRequestedSchema with the identity partition
+// values of the data file being read, keyed by source field ID. A requested
+// field the file does not store takes its partition value before any default.
+func projectToRequestedSchema(ctx context.Context, requested, fileSchema *iceberg.Schema, batch arrow.RecordBatch, opts SchemaOptions, targetArrowSchema *arrow.Schema, partitionConstants map[int]any) (arrow.RecordBatch, error) {
 	if targetArrowSchema != nil && arrowSchemaEqual(batch.Schema(), targetArrowSchema) {
 		batch.Retain()
 
 		return batch, nil
+	}
+
+	partitionConstants, err := convertPartitionConstants(requested, partitionConstants)
+	if err != nil {
+		return nil, err
 	}
 
 	st := array.RecordToStructArray(batch)
@@ -1539,6 +1560,7 @@ func toRequestedSchema(ctx context.Context, requested, fileSchema *iceberg.Schem
 			useWriteDefault:      opts.UseWriteDefault,
 			allowMissingRequired: opts.AllowMissingRequired,
 			dictionaryFieldIDs:   opts.dictionaryFieldIDs,
+			partitionConstants:   partitionConstants,
 		}, arrowAccessor{fileSchema: fileSchema})
 	if err != nil {
 		return nil, err
@@ -1547,6 +1569,33 @@ func toRequestedSchema(ctx context.Context, requested, fileSchema *iceberg.Schem
 	result.Release()
 
 	return out, nil
+}
+
+// convertPartitionConstants widens each constant to the type its field has in
+// the requested schema: a manifest keeps the partition type the file was
+// written with, so a field promoted since still carries the narrower value.
+// It returns constants itself when nothing needs converting.
+func convertPartitionConstants(requested *iceberg.Schema, constants map[int]any) (map[int]any, error) {
+	if len(constants) == 0 {
+		return constants, nil
+	}
+
+	converted := make(map[int]any, len(constants))
+	for id, value := range constants {
+		field, ok := requested.FindFieldByID(id)
+		if !ok || value == nil {
+			converted[id] = value
+
+			continue
+		}
+		v, err := identityPartitionValue(value, field.Type)
+		if err != nil {
+			return nil, fmt.Errorf("identity partition value for column %q: %w", field.Name, err)
+		}
+		converted[id] = v
+	}
+
+	return converted, nil
 }
 
 func arrowSchemaEqual(left, right *arrow.Schema) bool {

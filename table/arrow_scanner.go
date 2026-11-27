@@ -44,6 +44,7 @@ import (
 	"github.com/apache/iceberg-go/table/dv"
 	tblutils "github.com/apache/iceberg-go/table/internal"
 	"github.com/apache/iceberg-go/table/internal/substrait"
+	"github.com/google/uuid"
 	"github.com/substrait-io/substrait-go/v8/expr"
 	"golang.org/x/sync/errgroup"
 )
@@ -2639,6 +2640,13 @@ func (as *arrowScan) processRecordsWithPlans(
 				logicalSchema = as.projectedSchema
 			}
 
+			// rowFilter arrives folded; a separate row-group filter does not.
+			pruningFilter, _, err = foldIdentityPartitionConstants(
+				pruningFilter, fileSchema, identityPartitionConstants(as.metadata, task.Value.File))
+			if err != nil {
+				return err
+			}
+
 			hasMissingDefault, err := pruningFilterHasMissingInitialDefault(
 				pruningFilter, logicalSchema, fileSchema)
 			if err != nil {
@@ -2794,6 +2802,220 @@ func pruningFilterHasMissingInitialDefault(
 	return false, nil
 }
 
+// identityPartitionConstants returns the data file's identity partition
+// values keyed by source field ID. A writer may leave an identity partition
+// column out of its data files, as Delta and Hive-style layouts do; the spec's
+// column projection rule 1 reads such a field from the partition value.
+func identityPartitionConstants(meta Metadata, file iceberg.DataFile) map[int]any {
+	if meta == nil || file == nil {
+		return nil
+	}
+	spec := meta.PartitionSpecByID(int(file.SpecID()))
+	if spec == nil {
+		return nil
+	}
+	partition := file.Partition()
+	var constants map[int]any
+	for _, field := range spec.FieldsRef(iceinternal.PartitionSpecRef{}) {
+		switch field.Transform.(type) {
+		case iceberg.IdentityTransform, *iceberg.IdentityTransform:
+		default:
+			continue
+		}
+		if len(field.SourceIDs) != 1 {
+			continue
+		}
+		value, ok := partition[field.FieldID]
+		if !ok {
+			continue
+		}
+		// Partition() returns decimals as DecimalLiteral; the projection's
+		// default path takes the Decimal it wraps.
+		if d, ok := value.(iceberg.DecimalLiteral); ok {
+			value = iceberg.Decimal(d)
+		}
+		if constants == nil {
+			constants = make(map[int]any)
+		}
+		constants[field.SourceIDs[0]] = value
+	}
+
+	return constants
+}
+
+// identityPartitionValue converts a partition value to typ, the type its source
+// field has in the schema being read. A manifest keeps the partition type the
+// file was written with, so a field promoted since, such as float to double,
+// still carries the narrower value.
+func identityPartitionValue(value any, typ iceberg.Type) (any, error) {
+	var lit iceberg.Literal
+	switch v := value.(type) {
+	case iceberg.Literal:
+		lit = v
+	case bool:
+		lit = iceberg.NewLiteral(v)
+	case int32:
+		lit = iceberg.NewLiteral(v)
+	case int64:
+		lit = iceberg.NewLiteral(v)
+	case float32:
+		lit = iceberg.NewLiteral(v)
+	case float64:
+		lit = iceberg.NewLiteral(v)
+	case iceberg.Date:
+		lit = iceberg.NewLiteral(v)
+	case iceberg.Time:
+		lit = iceberg.NewLiteral(v)
+	case iceberg.Timestamp:
+		lit = iceberg.NewLiteral(v)
+	case iceberg.TimestampNano:
+		lit = iceberg.NewLiteral(v)
+	case string:
+		lit = iceberg.NewLiteral(v)
+	case []byte:
+		lit = iceberg.NewLiteral(v)
+	case uuid.UUID:
+		lit = iceberg.NewLiteral(v)
+	case iceberg.Decimal:
+		lit = iceberg.NewLiteral(v)
+	default:
+		return nil, fmt.Errorf("%w: partition value %v (%T) for type %s", iceberg.ErrInvalidArgument, value, value, typ)
+	}
+
+	converted, err := lit.To(typ)
+	if err != nil {
+		return nil, fmt.Errorf("partition value %v for type %s: %w", value, typ, err)
+	}
+
+	return converted.Any(), nil
+}
+
+// foldIdentityPartitionConstants rewrites a bound filter for one data file.
+// A predicate on a field the file does not store, but whose value an identity
+// partition gives, is replaced by its result for that value. Left alone, the
+// translation to the file schema would read the field as null in every row. It
+// reports whether it replaced anything; a filter it changed holds for this file
+// only and must not be cached by file schema.
+func foldIdentityPartitionConstants(filter iceberg.BooleanExpression, fileSchema *iceberg.Schema, constants map[int]any) (iceberg.BooleanExpression, bool, error) {
+	if filter == nil || fileSchema == nil || len(constants) == 0 {
+		return filter, false, nil
+	}
+
+	folder := &partitionConstantFolder{fileSchema: fileSchema, constants: constants}
+	folded, err := iceberg.VisitExpr(filter, folder)
+	if err != nil {
+		return nil, false, err
+	}
+	if !folder.changed {
+		return filter, false, nil
+	}
+
+	return folded, true, nil
+}
+
+type partitionConstantFolder struct {
+	fileSchema *iceberg.Schema
+	constants  map[int]any
+	changed    bool
+}
+
+func (*partitionConstantFolder) VisitTrue() iceberg.BooleanExpression { return iceberg.AlwaysTrue{} }
+
+func (*partitionConstantFolder) VisitFalse() iceberg.BooleanExpression { return iceberg.AlwaysFalse{} }
+
+func (*partitionConstantFolder) VisitNot(child iceberg.BooleanExpression) iceberg.BooleanExpression {
+	return iceberg.NewNot(child)
+}
+
+func (*partitionConstantFolder) VisitAnd(left, right iceberg.BooleanExpression) iceberg.BooleanExpression {
+	return iceberg.NewAnd(left, right)
+}
+
+func (*partitionConstantFolder) VisitOr(left, right iceberg.BooleanExpression) iceberg.BooleanExpression {
+	return iceberg.NewOr(left, right)
+}
+
+func (*partitionConstantFolder) VisitUnbound(pred iceberg.UnboundPredicate) iceberg.BooleanExpression {
+	panic(fmt.Errorf("%w: expected bound predicate, got: %s", iceberg.ErrInvalidArgument, pred.Term()))
+}
+
+func (f *partitionConstantFolder) VisitBound(pred iceberg.BoundPredicate) iceberg.BooleanExpression {
+	if _, ok := pred.Term().(iceberg.BoundReference); !ok {
+		return pred
+	}
+	field := pred.Ref().Field()
+	value, ok := f.constants[field.ID]
+	if !ok {
+		return pred
+	}
+	if _, stored := f.fileSchema.FindFieldByID(field.ID); stored {
+		return pred
+	}
+
+	ref := iceberg.Reference(field.Name)
+	var unbound iceberg.UnboundPredicate
+	switch p := pred.(type) {
+	case iceberg.BoundUnaryPredicate:
+		unbound = p.AsUnbound(ref)
+	case iceberg.BoundLiteralPredicate:
+		unbound = p.AsUnbound(ref, p.Literal())
+	case iceberg.BoundSetPredicate:
+		unbound = p.AsUnbound(ref, p.Literals().Members())
+	default:
+		return pred
+	}
+
+	// The partition value stands in for the column, so neither default applies.
+	field.InitialDefault, field.WriteDefault = nil, nil
+	constantSchema := iceberg.NewSchema(0, field)
+	withContext := func(err error) error {
+		return fmt.Errorf("identity partition value for column %q (id %d): %w", field.Name, field.ID, err)
+	}
+
+	if value == nil {
+		if pred.Ref().Field().InitialDefault == nil {
+			// The translation already reads a missing field as null.
+			return pred
+		}
+		// Rebind to the field without its initial-default, so the translation
+		// reads it as null and not as the default.
+		field.Required = false
+		rebound, err := unbound.Bind(iceberg.NewSchema(0, field), true)
+		if err != nil {
+			panic(withContext(err))
+		}
+		f.changed = true
+
+		return rebound
+	}
+
+	value, err := identityPartitionValue(value, field.Type)
+	if err != nil {
+		panic(withContext(err))
+	}
+	eval, err := iceberg.ExpressionEvaluator(constantSchema, unbound, true)
+	if err != nil {
+		panic(withContext(err))
+	}
+	matches, err := eval(partitionConstantRow{value})
+	if err != nil {
+		panic(withContext(err))
+	}
+	f.changed = true
+	if matches {
+		return iceberg.AlwaysTrue{}
+	}
+
+	return iceberg.AlwaysFalse{}
+}
+
+// partitionConstantRow is the one-field row a folded predicate is evaluated on.
+type partitionConstantRow [1]any
+
+func (r partitionConstantRow) Size() int       { return len(r) }
+func (r partitionConstantRow) Get(pos int) any { return r[pos] }
+func (partitionConstantRow) Set(int, any)      {}
+
 // canReuseFlatProjection detects the common case of flat, already-typed
 // batches. Full schema projection still handles nested types, schema evolution,
 // promotions, defaults, and changed column ordering. A matching Arrow type alone
@@ -2868,7 +3090,20 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task tblutils.Enumerat
 		return err
 	}
 	defer iceinternal.CheckedClose(rdr, &err)
-	if task.Value.Residual == nil {
+
+	// A filter that reads a field the file leaves to its identity partition is
+	// folded with that file's value, so it cannot share the plans cached by
+	// file schema.
+	partitionConstants := identityPartitionConstants(as.metadata, task.Value.File)
+	rowFilter, foldedRowFilter, err := foldIdentityPartitionConstants(rowFilter, iceSchema, partitionConstants)
+	if err != nil {
+		return err
+	}
+	_, foldedPruningFilter, err := foldIdentityPartitionConstants(as.rowGroupFilter, iceSchema, partitionConstants)
+	if err != nil {
+		return err
+	}
+	if task.Value.Residual == nil && !foldedRowFilter && !foldedPruningFilter {
 		filterPlans, err = as.cachedFileFilterPlans(
 			iceSchema, task.Value.File.FileFormat() == iceberg.ParquetFile)
 		if err != nil {
@@ -2946,11 +3181,13 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task tblutils.Enumerat
 			pipeline = append(pipeline, func(r arrow.RecordBatch) (arrow.RecordBatch, error) {
 				defer r.Release()
 
-				return ToRequestedSchema(ctx, outputSchema, inputSchema, r, SchemaOptions{
+				// An equality delete keyed on a field the file leaves to its
+				// identity partition must compare the partition value, not null.
+				return projectToRequestedSchema(ctx, outputSchema, inputSchema, r, SchemaOptions{
 					IncludeFieldIDs: true,
 					UseLargeTypes:   as.useLargeTypes,
 					TableProperties: invariants.tableProperties,
-				})
+				}, nil, partitionConstants)
 			})
 			readSchema = equalitySchema
 		}
@@ -3027,11 +3264,11 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task tblutils.Enumerat
 			return array.NewRecordBatch(invariants.outputArrowSchema, r.Columns(), r.NumRows()), nil
 		}
 
-		return ToRequestedSchema(ctx, as.projectedSchema, readSchema, r, SchemaOptions{
+		return projectToRequestedSchema(ctx, as.projectedSchema, readSchema, r, SchemaOptions{
 			UseLargeTypes:      as.useLargeTypes,
 			TableProperties:    invariants.tableProperties,
 			dictionaryFieldIDs: as.dictionaryFieldIDs,
-		})
+		}, nil, partitionConstants)
 	})
 
 	err = as.processRecordsWithPlans(ctx, task, iceSchema, rowFilter, rdr, colIndices, pipeline, posSource, sink, filterPlans)
@@ -3067,10 +3304,23 @@ func (as *arrowScan) producePosDeletesFromTask(ctx context.Context, task tblutil
 		}
 	}
 
-	filterPlans, err = as.cachedFileFilterPlans(
-		iceSchema, task.Value.File.FileFormat() == iceberg.ParquetFile)
+	// As in recordsFromTask, a filter folded with this file's identity
+	// partition values cannot use the plans cached by file schema.
+	partitionConstants := identityPartitionConstants(as.metadata, task.Value.File)
+	rowFilter, foldedRowFilter, err := foldIdentityPartitionConstants(as.boundRowFilter, iceSchema, partitionConstants)
 	if err != nil {
 		return err
+	}
+	_, foldedPruningFilter, err := foldIdentityPartitionConstants(as.rowGroupFilter, iceSchema, partitionConstants)
+	if err != nil {
+		return err
+	}
+	if !foldedRowFilter && !foldedPruningFilter {
+		filterPlans, err = as.cachedFileFilterPlans(
+			iceSchema, task.Value.File.FileFormat() == iceberg.ParquetFile)
+		if err != nil {
+			return err
+		}
 	}
 
 	fields := append(iceSchema.Fields(), iceberg.PositionalDeleteSchema.Fields()...)
@@ -3093,7 +3343,11 @@ func (as *arrowScan) producePosDeletesFromTask(ctx context.Context, task tblutil
 		pipeline = append(pipeline, processPositionalDeletes(ctx, deletes, posSource.cursor()))
 	}
 
-	filterFunc, dropFile, err = as.getRecordFilterFromPlan(ctx, filterPlans.record)
+	if filterPlans != nil {
+		filterFunc, dropFile, err = as.getRecordFilterFromPlan(ctx, filterPlans.record)
+	} else {
+		filterFunc, dropFile, err = as.getRecordFilter(ctx, iceSchema, rowFilter)
+	}
 	if err != nil {
 		return err
 	}
@@ -3121,7 +3375,7 @@ func (as *arrowScan) producePosDeletesFromTask(ctx context.Context, task tblutil
 		return ToRequestedSchema(ctx, iceberg.PositionalDeleteSchema, enrichedIcebergSchema, r, SchemaOptions{IncludeFieldIDs: true, UseLargeTypes: as.useLargeTypes})
 	})
 
-	err = as.processRecordsWithPlans(ctx, task, iceSchema, as.boundRowFilter, rdr, colIndices, pipeline, posSource, sink, filterPlans)
+	err = as.processRecordsWithPlans(ctx, task, iceSchema, rowFilter, rdr, colIndices, pipeline, posSource, sink, filterPlans)
 
 	return err
 }
