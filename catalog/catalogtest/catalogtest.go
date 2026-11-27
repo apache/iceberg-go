@@ -139,6 +139,8 @@ func RunCatalogTests(t *testing.T, cfg Config) {
 	t.Run("UpdateTableSchema", func(t *testing.T) { testUpdateTableSchema(t, cfg) })
 	t.Run("CommitWithStaleRequirement", func(t *testing.T) { testCommitWithStaleRequirement(t, cfg) })
 	t.Run("CommitToDroppedTable", func(t *testing.T) { testCommitToDroppedTable(t, cfg) })
+	t.Run("CreateTableWithPartitionSpec", func(t *testing.T) { testCreateTableWithPartitionSpec(t, cfg) })
+	t.Run("CreateTableWithSortOrder", func(t *testing.T) { testCreateTableWithSortOrder(t, cfg) })
 
 	t.Run("CreateNamespace", func(t *testing.T) { testCreateNamespace(t, cfg) })
 	t.Run("CreateNamespaceThatAlreadyExists", func(t *testing.T) { testCreateNamespaceThatAlreadyExists(t, cfg) })
