@@ -35,6 +35,7 @@ func TestSqlCatalogConformance(t *testing.T) {
 		SupportsNamespaceProperties: true,
 		SupportsRenameTable:         true,
 		SupportsNestedNamespaces:    true,
+		SupportsCustomTableLocation: true,
 		NewCatalog: func(t *testing.T) catalog.Catalog {
 			warehouse := t.TempDir()
 

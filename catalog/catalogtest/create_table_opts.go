@@ -19,11 +19,14 @@ package catalogtest
 
 import (
 	"context"
+	"net/url"
+	"strings"
 	"testing"
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
 	"github.com/apache/iceberg-go/table"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -115,4 +118,42 @@ func testCreateTableWithSortOrder(t *testing.T, cfg Config) {
 		assert.Equal(t, want.Transform, got.Transform)
 		assert.Equal(t, sourceName(t, Schema, want.SourceIDs), sourceName(t, tbl.Schema(), got.SourceIDs))
 	}
+}
+
+// testCreateTableWithLocation asserts that a table created with an explicit
+// location reports it on a fresh load and writes its metadata under it. The
+// suite does not know the catalog's warehouse, so the location is a sibling
+// of a default table location, which the catalog's storage already accepts.
+func testCreateTableWithLocation(t *testing.T, cfg Config) {
+	ctx := context.Background()
+	cat := cfg.NewCatalog(t)
+
+	defaultIdent, defaultTbl := createTable(t, cat)
+	loc := strings.TrimSuffix(defaultTbl.Location(), "/") + "_custom_" + strings.ReplaceAll(uuid.NewString(), "-", "_")
+
+	ident := table.Identifier{defaultIdent[0], "tbl_with_location"}
+	_, err := cat.CreateTable(ctx, ident, Schema, catalog.WithLocation(loc))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cat.DropTable(ctx, ident) })
+
+	tbl, err := cat.LoadTable(ctx, ident)
+	require.NoError(t, err)
+	assert.Equal(t, loc, tbl.Location())
+	assert.Truef(t, isUnder(t, tbl.MetadataLocation(), loc),
+		"metadata %q should be written under %q", tbl.MetadataLocation(), loc)
+}
+
+// isUnder reports whether path is inside the location dir. Both are compared
+// as URIs because catalogs may spell the same location differently, such as
+// "file:/tmp/x" for "file:///tmp/x".
+func isUnder(t *testing.T, path, dir string) bool {
+	t.Helper()
+
+	p, err := url.Parse(path)
+	require.NoError(t, err)
+	d, err := url.Parse(dir)
+	require.NoError(t, err)
+
+	return p.Scheme == d.Scheme && p.Host == d.Host &&
+		strings.HasPrefix(p.Path, strings.TrimSuffix(d.Path, "/")+"/")
 }
