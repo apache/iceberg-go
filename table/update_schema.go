@@ -371,7 +371,7 @@ func (u *UpdateSchema) addColumn(path []string, fieldType iceberg.Type, doc stri
 		if required && defaultValue == nil && !u.allowIncompatibleChanges {
 			return fmt.Errorf("required field %s has no default value", fullName)
 		}
-		if defaultValue != nil && !defaultValue.Type().Equals(t) {
+		if defaultValue != nil && !defaultTypeMatches(defaultValue.Type(), t) {
 			return fmt.Errorf("default value type mismatch: %s != %s", defaultValue.Type(), t)
 		}
 	default:
@@ -1009,6 +1009,20 @@ func nativeDefaultLiteral(v any) (iceberg.Literal, bool) {
 	return nil, false
 }
 
+// defaultTypeMatches reports whether a default literal of type litType fits a
+// column of type colType. Timestamp literals carry no time zone, so a
+// timestamptz or timestamptz_ns default is a timestamp or timestamp_ns literal.
+func defaultTypeMatches(litType, colType iceberg.Type) bool {
+	switch colType.(type) {
+	case iceberg.TimestampTzType:
+		colType = iceberg.PrimitiveTypes.Timestamp
+	case iceberg.TimestampTzNsType:
+		colType = iceberg.PrimitiveTypes.TimestampNs
+	}
+
+	return litType.Equals(colType)
+}
+
 func validateDefaultValue(t iceberg.Type, v any) (err error) {
 	if v == nil {
 		return nil
@@ -1017,7 +1031,7 @@ func validateDefaultValue(t iceberg.Type, v any) (err error) {
 		return fmt.Errorf("default values are not supported for %s", t)
 	}
 
-	if lit, ok := nativeDefaultLiteral(v); ok && !lit.Type().Equals(t) {
+	if lit, ok := nativeDefaultLiteral(v); ok && !defaultTypeMatches(lit.Type(), t) {
 		return fmt.Errorf("value of type %s does not match column type %s", lit.Type(), t)
 	}
 

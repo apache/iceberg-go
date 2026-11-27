@@ -2747,6 +2747,90 @@ func TestUnionByNameRejectsMistypedNativeDefault(t *testing.T) {
 	require.ErrorContains(t, err, "invalid initial-default for count")
 }
 
+// Timestamp literals carry no zone, so a timestamptz or timestamptz_ns default
+// is given as a timestamp literal. Every schema update path must accept it.
+func TestTimestampTzDefaults(t *testing.T) {
+	ts := iceberg.Timestamp(1510871468123456)
+	tsNs := iceberg.TimestampNano(1510871468123456789)
+	current := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{ID: 2, Name: "updated", Type: iceberg.PrimitiveTypes.TimestampTz},
+		iceberg.NestedField{ID: 3, Name: "updated_ns", Type: iceberg.PrimitiveTypes.TimestampTzNs},
+	)
+	meta, err := NewMetadata(current, nil, UnsortedSortOrder, "",
+		iceberg.Properties{PropertyFormatVersion: "3"})
+	require.NoError(t, err)
+	tbl := New([]string{"tbl"}, meta, "", nil, nil)
+
+	t.Run("AddColumn", func(t *testing.T) {
+		applied, err := NewUpdateSchema(tbl.NewTransaction(), true, false).
+			AddColumn([]string{"created"}, iceberg.PrimitiveTypes.TimestampTz, "", true, iceberg.NewLiteral(ts)).
+			AddColumn([]string{"created_ns"}, iceberg.PrimitiveTypes.TimestampTzNs, "", true, iceberg.NewLiteral(tsNs)).
+			Apply()
+		require.NoError(t, err)
+
+		created, ok := applied.FindFieldByName("created")
+		require.True(t, ok)
+		assert.Equal(t, ts, created.InitialDefault)
+		assert.Equal(t, ts, created.WriteDefault)
+		createdNs, ok := applied.FindFieldByName("created_ns")
+		require.True(t, ok)
+		assert.Equal(t, tsNs, createdNs.InitialDefault)
+		assert.Equal(t, tsNs, createdNs.WriteDefault)
+	})
+
+	t.Run("UpdateColumn", func(t *testing.T) {
+		applied, err := NewUpdateSchema(tbl.NewTransaction(), true, false).
+			UpdateColumn([]string{"updated"}, ColumnUpdate{
+				WriteDefault: iceberg.Optional[iceberg.Literal]{Valid: true, Val: iceberg.NewLiteral(ts)},
+			}).
+			UpdateColumn([]string{"updated_ns"}, ColumnUpdate{
+				WriteDefault: iceberg.Optional[iceberg.Literal]{Valid: true, Val: iceberg.NewLiteral(tsNs)},
+			}).
+			Apply()
+		require.NoError(t, err)
+
+		updated, ok := applied.FindFieldByName("updated")
+		require.True(t, ok)
+		assert.Equal(t, ts, updated.WriteDefault)
+		updatedNs, ok := applied.FindFieldByName("updated_ns")
+		require.True(t, ok)
+		assert.Equal(t, tsNs, updatedNs.WriteDefault)
+	})
+
+	t.Run("UnionByName", func(t *testing.T) {
+		incoming := iceberg.NewSchema(1,
+			iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+			iceberg.NestedField{ID: 2, Name: "updated", Type: iceberg.PrimitiveTypes.TimestampTz, WriteDefault: ts},
+			iceberg.NestedField{ID: 3, Name: "updated_ns", Type: iceberg.PrimitiveTypes.TimestampTzNs, WriteDefault: tsNs},
+			iceberg.NestedField{
+				ID: 4, Name: "created", Type: iceberg.PrimitiveTypes.TimestampTz,
+				InitialDefault: ts, WriteDefault: ts,
+			},
+		)
+
+		applied, err := NewUpdateSchema(tbl.NewTransaction(), true, false).UnionByNameWith(incoming).Apply()
+		require.NoError(t, err)
+
+		updated, ok := applied.FindFieldByName("updated")
+		require.True(t, ok)
+		assert.Equal(t, ts, updated.WriteDefault)
+		updatedNs, ok := applied.FindFieldByName("updated_ns")
+		require.True(t, ok)
+		assert.Equal(t, tsNs, updatedNs.WriteDefault)
+		created, ok := applied.FindFieldByName("created")
+		require.True(t, ok)
+		assert.Equal(t, ts, created.InitialDefault)
+	})
+
+	t.Run("rejects a timestamp_ns literal for a timestamptz column", func(t *testing.T) {
+		_, err := NewUpdateSchema(tbl.NewTransaction(), true, false).
+			AddColumn([]string{"created"}, iceberg.PrimitiveTypes.TimestampTz, "", false, iceberg.NewLiteral(tsNs)).
+			Apply()
+		require.ErrorContains(t, err, "default value type mismatch")
+	})
+}
+
 func TestUnionByNamePromoteDecimalKeepsWiderWriteDefault(t *testing.T) {
 	current := iceberg.NewSchema(1,
 		iceberg.NestedField{ID: 1, Name: "amount", Type: iceberg.MustDecimalTypeOf(9, 2), Required: true},
