@@ -848,13 +848,20 @@ func TestAddColumnUnderDeletedParent(t *testing.T) {
 		}, "cannot add to a column that will be deleted: address"},
 		{"grandparent", func(u *UpdateSchema) *UpdateSchema {
 			return u.DeleteColumn([]string{"address"}).AddColumn([]string{"address", "geo", "lon"}, iceberg.PrimitiveTypes.Float64, "", false, nil)
-		}, "cannot add to a column that will be deleted: address.geo"},
+		}, "cannot add to a column that will be deleted: address"},
 		{"list element", func(u *UpdateSchema) *UpdateSchema {
 			return u.DeleteColumn([]string{"points"}).AddColumn([]string{"points", "y"}, iceberg.PrimitiveTypes.Int32, "", false, nil)
 		}, "cannot add to a column that will be deleted: points"},
 		{"map value", func(u *UpdateSchema) *UpdateSchema {
 			return u.DeleteColumn([]string{"props"}).AddColumn([]string{"props", "size"}, iceberg.PrimitiveTypes.Int32, "", false, nil)
 		}, "cannot add to a column that will be deleted: props"},
+		{"union by name", func(u *UpdateSchema) *UpdateSchema {
+			return u.DeleteColumn([]string{"address"}).UnionByNameWith(iceberg.NewSchema(0,
+				iceberg.NestedField{ID: 1, Name: "address", Type: iceberg.NewStructType(
+					iceberg.NestedField{ID: 2, Name: "country", Type: iceberg.PrimitiveTypes.String},
+				)},
+			))
+		}, "cannot add to a column that will be deleted: address"},
 		{"add then delete", func(u *UpdateSchema) *UpdateSchema {
 			return u.AddColumn([]string{"address", "country"}, iceberg.PrimitiveTypes.String, "", false, nil).DeleteColumn([]string{"address"})
 		}, "field that has additions cannot be deleted: address"},

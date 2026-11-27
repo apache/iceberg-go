@@ -290,6 +290,22 @@ func (u *UpdateSchema) checkIdentifierNotDeleted(name string) error {
 	return nil
 }
 
+// checkParentNotDeleted returns an error if the struct with the given ID, or
+// one of its ancestors, is deleted in this update. For a list or map,
+// parentID is the element or value struct, and its parent in u.parentID is
+// the list or map column itself.
+func (u *UpdateSchema) checkParentNotDeleted(parentID int) error {
+	for id := parentID; id != TableRootID; id = u.findParentID(id) {
+		if u.isDeleted(id) {
+			name, _ := u.schema.FindColumnName(id)
+
+			return fmt.Errorf("cannot add to a column that will be deleted: %s", name)
+		}
+	}
+
+	return nil
+}
+
 func (u *UpdateSchema) findParentID(fieldID int) int {
 	parentID, ok := u.parentID[fieldID]
 	if !ok {
@@ -403,13 +419,8 @@ func (u *UpdateSchema) addColumn(path []string, fieldType iceberg.Type, doc stri
 
 		parentID = parentField.ID
 
-		// Walk up from the parent so a deleted ancestor is caught too. For a
-		// list or map, parentID is the element or value struct, and its parent
-		// in u.parentID is the list or map column itself.
-		for id := parentID; id != TableRootID; id = u.findParentID(id) {
-			if u.isDeleted(id) {
-				return fmt.Errorf("cannot add to a column that will be deleted: %s", parentFullPath)
-			}
+		if err := u.checkParentNotDeleted(parentID); err != nil {
+			return err
 		}
 	}
 
@@ -848,6 +859,9 @@ func (u *UpdateSchema) unionAddColumn(path []string, newField iceberg.NestedFiel
 		}
 
 		parentID = parentField.ID
+		if err := u.checkParentNotDeleted(parentID); err != nil {
+			return err
+		}
 	}
 
 	name := path[len(path)-1]
