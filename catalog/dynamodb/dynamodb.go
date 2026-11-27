@@ -93,18 +93,38 @@ func init() {
 	}))
 }
 
+type options struct {
+	clientOptions []func(*dynamodb.Options)
+}
+
+// Option configures a DynamoDB catalog.
+type Option func(*options)
+
+// WithClientOptions passes optFns to the DynamoDB SDK service client, for
+// example to set an endpoint for DynamoDB Local.
+func WithClientOptions(optFns ...func(*dynamodb.Options)) Option {
+	return func(o *options) {
+		o.clientOptions = append(o.clientOptions, optFns...)
+	}
+}
+
 // NewCatalog opens a catalog and creates its backing DynamoDB table if absent.
 // cfg supplies AWS credentials, region, and transport. The warehouse property is
-// required; dynamodb.table-name defaults to "iceberg". Options configure the SDK
-// service client, for example an endpoint for DynamoDB Local.
-func NewCatalog(ctx context.Context, name string, cfg aws.Config, props iceberg.Properties, options ...func(*dynamodb.Options)) (*Catalog, error) {
+// required; dynamodb.table-name defaults to "iceberg". Use WithClientOptions to
+// configure the SDK service client.
+func NewCatalog(ctx context.Context, name string, cfg aws.Config, props iceberg.Properties, opts ...Option) (*Catalog, error) {
 	if strings.TrimSpace(props["warehouse"]) == "" {
 		return nil, errors.New("DynamoDB catalog requires a warehouse")
 	}
-	if endpoint := props[EndpointKey]; endpoint != "" {
-		options = append(append([]func(*dynamodb.Options){}, options...), func(o *dynamodb.Options) { o.BaseEndpoint = aws.String(endpoint) })
+	var o options
+	for _, opt := range opts {
+		opt(&o)
 	}
-	c := &Catalog{name: name, tableName: props.Get(TableNameKey, "iceberg"), props: maps.Clone(props), awsConfig: cfg.Copy(), client: dynamodb.NewFromConfig(cfg, options...)}
+	clientOptions := o.clientOptions
+	if endpoint := props[EndpointKey]; endpoint != "" {
+		clientOptions = append(clientOptions, func(o *dynamodb.Options) { o.BaseEndpoint = aws.String(endpoint) })
+	}
+	c := &Catalog{name: name, tableName: props.Get(TableNameKey, "iceberg"), props: maps.Clone(props), awsConfig: cfg.Copy(), client: dynamodb.NewFromConfig(cfg, clientOptions...)}
 	if _, err := c.reporter.Get(props); err != nil {
 		return nil, err
 	}
