@@ -970,6 +970,69 @@ func TestNestedFieldMarshalDecimalDefaultsAsString(t *testing.T) {
 	assert.Equal(t, "-0.05", decoded.WriteDefault)
 }
 
+// Date, time and timestamp defaults must be written as ISO-8601 strings, the
+// spec's JSON single-value serialization. Java's SingleValueParser rejects a
+// number for these types, so a table with such a default could not be loaded.
+func TestNestedFieldMarshalTemporalDefaultsAsISOStrings(t *testing.T) {
+	tests := []struct {
+		typ      iceberg.Type
+		input    string
+		expected string
+	}{
+		{iceberg.PrimitiveTypes.Date, "2017-11-16", "2017-11-16"},
+		{iceberg.PrimitiveTypes.Date, "1969-12-31", "1969-12-31"},
+		{iceberg.PrimitiveTypes.Time, "22:31:08.123456", "22:31:08.123456"},
+		{iceberg.PrimitiveTypes.Timestamp, "2017-11-16T22:31:08.123456", "2017-11-16T22:31:08.123456"},
+		{iceberg.PrimitiveTypes.TimestampTz, "2017-11-16T22:31:08.123456+00:00", "2017-11-16T22:31:08.123456+00:00"},
+		{iceberg.PrimitiveTypes.TimestampNs, "2017-11-16T22:31:08.123456789", "2017-11-16T22:31:08.123456789"},
+		{iceberg.PrimitiveTypes.TimestampTzNs, "2017-11-16T22:31:08.123456789+00:00", "2017-11-16T22:31:08.123456789+00:00"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.typ.String()+"/"+tt.input, func(t *testing.T) {
+			lit, err := iceberg.NewLiteral(tt.input).To(tt.typ)
+			require.NoError(t, err)
+
+			field := iceberg.NestedField{
+				ID: 1, Name: "col", Type: tt.typ,
+				// AddColumn stores a default literal's Any(), such as an iceberg.Date.
+				InitialDefault: lit.Any(),
+				WriteDefault:   lit.Any(),
+			}
+
+			actual, err := json.Marshal(field)
+			require.NoError(t, err)
+
+			var raw struct {
+				InitialDefault any `json:"initial-default"`
+				WriteDefault   any `json:"write-default"`
+			}
+			require.NoError(t, json.Unmarshal(actual, &raw))
+			assert.Equal(t, tt.expected, raw.InitialDefault)
+			assert.Equal(t, tt.expected, raw.WriteDefault)
+
+			// The written string must parse back to the same value.
+			back, err := iceberg.NewLiteral(tt.expected).To(tt.typ)
+			require.NoError(t, err)
+			assert.Equal(t, lit.Any(), back.Any())
+		})
+	}
+}
+
+// A numeric temporal default written by older iceberg-go versions still loads,
+// and is written back in the spec's string form.
+func TestNestedFieldRewritesLegacyNumericTemporalDefault(t *testing.T) {
+	var field iceberg.NestedField
+	require.NoError(t, json.Unmarshal(
+		[]byte(`{"id":1,"name":"day","type":"date","required":false,"initial-default":17486}`), &field))
+
+	actual, err := json.Marshal(field)
+	require.NoError(t, err)
+	assert.JSONEq(t,
+		`{"id":1,"name":"day","type":"date","required":false,"initial-default":"2017-11-16"}`,
+		string(actual))
+}
+
 func TestTypeIFaceMarshalJSONNilType(t *testing.T) {
 	// A NestedField with a nil Type must not panic during JSON marshalling.
 	// Prior to this fix, typeIFace.MarshalJSON called t.Type.Type() on a nil
