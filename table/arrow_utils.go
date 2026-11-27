@@ -1341,13 +1341,8 @@ func (a *arrowProjectionVisitor) Struct(st iceberg.StructType, structArr arrow.A
 			constant, hasConstant := a.partitionConstants[field.ID]
 			switch {
 			case hasConstant && constant != nil:
-				// Widen a value written before the field was promoted. A value
-				// the conversion does not cover is used as the manifest gave it.
-				if converted, err := identityPartitionValue(constant, field.Type); err == nil {
-					constant = converted
-				}
 				arr = defaultToArray(constant, field.Type, dt, structArr.Len(), alloc)
-			case hasConstant:
+			case hasConstant && (!field.Required || a.allowMissingRequired):
 				arr = array.MakeArrayOfNull(alloc, dt, structArr.Len())
 			case field.WriteDefault != nil && a.useWriteDefault:
 				arr = defaultToArray(field.WriteDefault, field.Type, dt, structArr.Len(), alloc)
@@ -1545,6 +1540,11 @@ func projectToRequestedSchema(ctx context.Context, requested, fileSchema *iceber
 		return batch, nil
 	}
 
+	partitionConstants, err := convertPartitionConstants(requested, partitionConstants)
+	if err != nil {
+		return nil, err
+	}
+
 	st := array.RecordToStructArray(batch)
 	defer st.Release()
 
@@ -1569,6 +1569,33 @@ func projectToRequestedSchema(ctx context.Context, requested, fileSchema *iceber
 	result.Release()
 
 	return out, nil
+}
+
+// convertPartitionConstants widens each constant to the type its field has in
+// the requested schema: a manifest keeps the partition type the file was
+// written with, so a field promoted since still carries the narrower value.
+// It returns constants itself when nothing needs converting.
+func convertPartitionConstants(requested *iceberg.Schema, constants map[int]any) (map[int]any, error) {
+	if len(constants) == 0 {
+		return constants, nil
+	}
+
+	converted := make(map[int]any, len(constants))
+	for id, value := range constants {
+		field, ok := requested.FindFieldByID(id)
+		if !ok || value == nil {
+			converted[id] = value
+
+			continue
+		}
+		v, err := identityPartitionValue(value, field.Type)
+		if err != nil {
+			return nil, fmt.Errorf("identity partition value for column %q: %w", field.Name, err)
+		}
+		converted[id] = v
+	}
+
+	return converted, nil
 }
 
 func arrowSchemaEqual(left, right *arrow.Schema) bool {
