@@ -25,7 +25,7 @@ import (
 
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/iceberg-go"
-	"github.com/google/uuid"
+	"github.com/apache/iceberg-go/internal/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -1118,7 +1118,7 @@ func TestEvaluatorCmpTypes(t *testing.T) {
 		{iceberg.GreaterThan(iceberg.Reference("k"), []byte{0x00}), true},
 		{iceberg.LessThan(iceberg.Reference("k"), []byte{0x00}), false},
 		{iceberg.EqualTo(iceberg.Reference("l"), uuid.New().String()), false},
-		{iceberg.EqualTo(iceberg.Reference("l"), rowData[11].(uuid.UUID)), true},
+		{iceberg.EqualTo(iceberg.Reference("l"), rowData[11].(iceberg.UUID)), true},
 		{iceberg.EqualTo(iceberg.Reference("m"), []byte{0xDE, 0xAD, 0xBE, 0xEF, 0x1}), false},
 		{iceberg.EqualTo(iceberg.Reference("m"), []byte{0xDE, 0xAD, 0xBE, 0xEF, 0x0}), true},
 		{iceberg.EqualTo(iceberg.Reference("n"), iceberg.TimestampNano(123456789)), true},

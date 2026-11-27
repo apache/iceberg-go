@@ -23,7 +23,6 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/arrow-go/v18/parquet/variant"
 	"github.com/apache/iceberg-go/internal"
-	"github.com/google/uuid"
 )
 
 const (
@@ -157,7 +156,7 @@ func exactVariantMatch(pt variant.Type, raw any, typ PrimitiveType) (any, bool) 
 		}
 	case UUIDType:
 		if pt == variant.UUID {
-			return raw.(uuid.UUID), true
+			return raw.(UUID), true
 		}
 	case StringType:
 		if pt == variant.String {
@@ -270,7 +269,7 @@ func literalFromCastValue(result any) Literal {
 		return NewLiteral(r)
 	case []byte:
 		return NewLiteral(r)
-	case uuid.UUID:
+	case UUID:
 		return NewLiteral(r)
 	case Decimal:
 		return NewLiteral(r)
