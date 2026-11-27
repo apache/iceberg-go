@@ -819,6 +819,76 @@ func TestDeleteColumn(t *testing.T) {
 	})
 }
 
+func TestAddColumnUnderDeletedParent(t *testing.T) {
+	schema := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{ID: 2, Name: "address", Type: iceberg.NewStructType(
+			iceberg.NestedField{ID: 3, Name: "city", Type: iceberg.PrimitiveTypes.String},
+			iceberg.NestedField{ID: 4, Name: "geo", Type: iceberg.NewStructType(
+				iceberg.NestedField{ID: 5, Name: "lat", Type: iceberg.PrimitiveTypes.Float64},
+			)},
+		)},
+		iceberg.NestedField{ID: 6, Name: "points", Type: iceberg.NewListType(7, iceberg.NewStructType(
+			iceberg.NestedField{ID: 8, Name: "x", Type: iceberg.PrimitiveTypes.Int32},
+		), false)},
+		iceberg.NestedField{ID: 9, Name: "props", Type: iceberg.NewMapType(10, iceberg.PrimitiveTypes.String, 11, iceberg.NewStructType(
+			iceberg.NestedField{ID: 12, Name: "color", Type: iceberg.PrimitiveTypes.String},
+		), false)},
+	)
+	meta, err := NewMetadata(schema, nil, UnsortedSortOrder, "", nil)
+	require.NoError(t, err)
+
+	tests := []struct {
+		name    string
+		build   func(*UpdateSchema) *UpdateSchema
+		wantErr string
+	}{
+		{"struct parent", func(u *UpdateSchema) *UpdateSchema {
+			return u.DeleteColumn([]string{"address"}).AddColumn([]string{"address", "country"}, iceberg.PrimitiveTypes.String, "", false, nil)
+		}, "cannot add to a column that will be deleted: address"},
+		{"grandparent", func(u *UpdateSchema) *UpdateSchema {
+			return u.DeleteColumn([]string{"address"}).AddColumn([]string{"address", "geo", "lon"}, iceberg.PrimitiveTypes.Float64, "", false, nil)
+		}, "cannot add to a column that will be deleted: address"},
+		{"list element", func(u *UpdateSchema) *UpdateSchema {
+			return u.DeleteColumn([]string{"points"}).AddColumn([]string{"points", "y"}, iceberg.PrimitiveTypes.Int32, "", false, nil)
+		}, "cannot add to a column that will be deleted: points"},
+		{"map value", func(u *UpdateSchema) *UpdateSchema {
+			return u.DeleteColumn([]string{"props"}).AddColumn([]string{"props", "size"}, iceberg.PrimitiveTypes.Int32, "", false, nil)
+		}, "cannot add to a column that will be deleted: props"},
+		{"union by name", func(u *UpdateSchema) *UpdateSchema {
+			return u.DeleteColumn([]string{"address"}).UnionByNameWith(iceberg.NewSchema(0,
+				iceberg.NestedField{ID: 1, Name: "address", Type: iceberg.NewStructType(
+					iceberg.NestedField{ID: 2, Name: "country", Type: iceberg.PrimitiveTypes.String},
+				)},
+			))
+		}, "cannot add to a column that will be deleted: address"},
+		{"add then delete", func(u *UpdateSchema) *UpdateSchema {
+			return u.AddColumn([]string{"address", "country"}, iceberg.PrimitiveTypes.String, "", false, nil).DeleteColumn([]string{"address"})
+		}, "field that has additions cannot be deleted: address"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			txn := New([]string{"t"}, meta, "", nil, nil).NewTransaction()
+			_, err := tt.build(NewUpdateSchema(txn, true, false)).Apply()
+			require.ErrorContains(t, err, tt.wantErr)
+		})
+	}
+
+	t.Run("sibling deleted", func(t *testing.T) {
+		txn := New([]string{"t"}, meta, "", nil, nil).NewTransaction()
+		s, err := NewUpdateSchema(txn, true, false).
+			DeleteColumn([]string{"address", "city"}).
+			AddColumn([]string{"address", "country"}, iceberg.PrimitiveTypes.String, "", false, nil).
+			Apply()
+		require.NoError(t, err)
+		_, ok := s.FindFieldByName("address.country")
+		assert.True(t, ok)
+		_, ok = s.FindFieldByName("address.city")
+		assert.False(t, ok)
+	})
+}
+
 func TestUpdateColumn(t *testing.T) {
 	t.Run("test update column type", func(t *testing.T) {
 		table := New([]string{"id"}, testMetadata, "", nil, nil)
