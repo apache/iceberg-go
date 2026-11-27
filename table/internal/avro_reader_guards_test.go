@@ -24,6 +24,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/iceberg-go"
 	"github.com/stretchr/testify/require"
+	avro "github.com/twmb/avro"
 )
 
 func TestAvroRejectsReservedFieldIDs(t *testing.T) {
@@ -65,7 +66,7 @@ func TestAvroRejectsInvalidLogicalPhysicalType(t *testing.T) {
 		`{"type":"record","name":"row","fields":[{"name":"ts","field-id":1,"type":{"type":"string","logicalType":"timestamp-micros"}}]}`,
 		`{"type":"record","name":"row","fields":[{"name":"value","field-id":1,"type":{"type":"long","logicalType":"decimal","precision":8,"scale":2}}]}`,
 	} {
-		_, err := avroArrowSchema(schema)
+		_, err := avroArrowSchema(avro.MustParse(schema))
 		require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
 	}
 }

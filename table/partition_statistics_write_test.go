@@ -26,6 +26,7 @@ import (
 	"math"
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -39,6 +40,7 @@ import (
 	tblutils "github.com/apache/iceberg-go/table/internal"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
+	"github.com/twmb/avro"
 	"github.com/twmb/avro/ocf"
 )
 
@@ -629,6 +631,19 @@ func TestPartitionStatisticsEmbeddedManifestWithoutSpecID(t *testing.T) {
 	const missingFieldIDs = "mem://stats/missing-field-ids.avro"
 	writeEmpty(missingFieldIDs)
 	snapshot.ManifestLocations = []string{missingFieldIDs}
+	rows, err = collectPartitionStatistics(t.Context(), fs, snapshot, pt, []iceberg.PartitionSpec{spec}, 1, nil)
+	require.NoError(t, err)
+	require.Empty(t, rows)
+
+	// Java allows non-ASCII letters and digits in an Avro name (it tests
+	// each UTF-16 char with Character.isLetter/isLetterOrDigit), and the
+	// strict Avro name rule rejects them.
+	schema, err = avro.Parse(strings.Replace(schema.String(), `"id"`, `"café"`, 1), avro.WithLaxNames(nil))
+	require.NoError(t, err)
+	require.Contains(t, schema.String(), `"café"`)
+	const nonASCIIName = "mem://stats/non-ascii-name.avro"
+	writeEmpty(nonASCIIName)
+	snapshot.ManifestLocations = []string{nonASCIIName}
 	rows, err = collectPartitionStatistics(t.Context(), fs, snapshot, pt, []iceberg.PartitionSpec{spec}, 1, nil)
 	require.NoError(t, err)
 	require.Empty(t, rows)

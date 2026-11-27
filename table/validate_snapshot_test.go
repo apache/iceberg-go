@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"math"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -30,6 +31,7 @@ import (
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/twmb/avro"
 	"github.com/twmb/avro/ocf"
 )
 
@@ -253,6 +255,19 @@ func TestEmbeddedValidationSpecIDV1OptionalHeaders(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, known)
 	require.Contains(t, detail, "no matching partition spec")
+
+	// Java allows non-ASCII letters and digits in an Avro name (it tests
+	// each UTF-16 char with Character.isLetter/isLetterOrDigit), and the
+	// strict Avro name rule rejects them.
+	schema, err = avro.Parse(strings.Replace(schema.String(), `"id"`, `"café"`, 1), avro.WithLaxNames(nil))
+	require.NoError(t, err)
+	require.Contains(t, schema.String(), `"café"`)
+	writeHeader()
+	got, known, detail, err = embeddedValidationSpecID(t.Context(), fs, path, map[int32]iceberg.PartitionSpec{7: spec})
+	require.NoError(t, err)
+	require.Empty(t, detail)
+	require.True(t, known)
+	require.EqualValues(t, spec.ID(), got)
 }
 
 func TestValidateSnapshotV1RepeatedManifest(t *testing.T) {

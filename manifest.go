@@ -718,10 +718,15 @@ func newManifestReader(
 	var writerSchema *avro.Schema
 	var rd *ocf.Reader
 	var err error
+	// Java allows non-ASCII letters and digits in an Avro name (it tests
+	// each UTF-16 char with Character.isLetter/isLetterOrDigit), so a
+	// Java-written header can name a partition field with a character that
+	// the strict Avro name rule rejects.
+	laxNames := ocf.WithSchemaOpts(avro.WithLaxNames(nil))
 	if projection == nil {
-		rd, err = ocf.NewReader(in)
+		rd, err = ocf.NewReader(in, laxNames)
 	} else {
-		rd, err = ocf.NewReader(in, ocf.WithReaderSchemaFunc(func(reader *ocf.Reader) (*avro.Schema, error) {
+		rd, err = ocf.NewReader(in, laxNames, ocf.WithReaderSchemaFunc(func(reader *ocf.Reader) (*avro.Schema, error) {
 			writerSchema = reader.Schema()
 
 			return projectedManifestEntrySchema(writerSchema, *projection)

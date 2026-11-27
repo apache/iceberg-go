@@ -30,6 +30,7 @@ import (
 	"math"
 	"math/big"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -3297,6 +3298,58 @@ func TestManifestRoundTripFixedPartitions(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestReadManifestNonASCIIPartitionName reads a header that names a partition
+// field with a non-ASCII letter. Java allows non-ASCII letters and digits in
+// an Avro name (it tests each UTF-16 char with
+// Character.isLetter/isLetterOrDigit), and the strict Avro name rule rejects
+// such a name.
+func TestReadManifestNonASCIIPartitionName(t *testing.T) {
+	const name = "café"
+	spec := NewPartitionSpecID(1,
+		PartitionField{FieldID: 1000, SourceIDs: []int{1}, Name: name, Transform: IdentityTransform{}})
+	schema := NewSchema(0, NestedField{ID: 1, Name: name, Type: PrimitiveTypes.Int32})
+	builder, err := NewDataFileBuilder(spec, EntryContentData, "data.parquet", ParquetFile,
+		map[int]any{1000: int32(7)}, nil, nil, 1, 128)
+	require.NoError(t, err)
+	snapshotID, seqNum := int64(5), int64(6)
+	entry := NewManifestEntry(EntryStatusADDED, &snapshotID, &seqNum, &seqNum, builder.Build())
+
+	// The schema helpers parse names strictly, so build the schema with a
+	// placeholder name and rename the field in the header JSON.
+	partNode := avro.SchemaNode{Type: atype.Record, Name: "r102", Fields: []avro.SchemaField{
+		{Name: "placeholder", Type: internal.NullableNode(internal.IntNode), Props: internal.WithFieldID(1000)},
+	}}
+	partSchema, err := partNode.Schema()
+	require.NoError(t, err)
+	strictSchema, err := internal.NewManifestEntrySchema(partSchema, 2)
+	require.NoError(t, err)
+	entrySchema, err := avro.Parse(strings.Replace(strictSchema.String(), `"placeholder"`, `"`+name+`"`, 1),
+		avro.WithLaxNames(nil))
+	require.NoError(t, err)
+
+	mw := ManifestWriter{version: 2, spec: spec, schema: schema, content: ManifestContentData}
+	metadata, err := mw.meta()
+	require.NoError(t, err)
+	var buf bytes.Buffer
+	writer, err := ocf.NewWriter(&buf, entrySchema, ocf.WithMetadata(metadata))
+	require.NoError(t, err)
+	require.NoError(t, writer.Encode(entry))
+	require.NoError(t, writer.Close())
+
+	file := &manifestFile{version: 2, SpecID: 1, Content: ManifestContentData}
+	entries, err := ReadManifest(file, bytes.NewReader(buf.Bytes()), false)
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	assert.Equal(t, map[int]any{1000: int32(7)}, entries[0].DataFile().Partition())
+
+	reader, err := NewManifestReaderWithProjection(file, bytes.NewReader(buf.Bytes()), ManifestEntryProjection{})
+	require.NoError(t, err)
+	projected, err := reader.ReadEntry()
+	require.NoError(t, err)
+	require.NoError(t, reader.Close())
+	assert.Equal(t, map[int]any{1000: int32(7)}, projected.DataFile().Partition())
 }
 
 func TestManifests(t *testing.T) {

@@ -35,11 +35,7 @@ import (
 // avroArrowSchema converts the OCF writer schema without passing through
 // arrow/avro. Iceberg field IDs remain attached to their corresponding Arrow
 // fields, including elements and map key/value fields.
-func avroArrowSchema(schemaJSON string) (*arrow.Schema, error) {
-	schema, err := avro.Parse(schemaJSON)
-	if err != nil {
-		return nil, fmt.Errorf("%w: parse Avro writer schema: %v", iceberg.ErrInvalidSchema, err)
-	}
+func avroArrowSchema(schema *avro.Schema) (*arrow.Schema, error) {
 	root := schema.Root().ExpandReferences()
 	if root.Type != "record" {
 		return nil, fmt.Errorf("%w: Avro data must have a root record", iceberg.ErrInvalidSchema)
@@ -47,6 +43,7 @@ func avroArrowSchema(schemaJSON string) (*arrow.Schema, error) {
 	fields := make([]arrow.Field, len(root.Fields))
 	used := make(map[int]struct{})
 	for i, child := range root.Fields {
+		var err error
 		fields[i], err = avroArrowField(child.Name, child.Type, child.Props, "field-id", used)
 		if err != nil {
 			return nil, fmt.Errorf("avro field %q: %w", child.Name, err)

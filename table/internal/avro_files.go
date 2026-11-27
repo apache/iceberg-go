@@ -31,6 +31,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/compute"
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
+	avro "github.com/twmb/avro"
 	"github.com/twmb/avro/ocf"
 )
 
@@ -78,15 +79,18 @@ func newAvroFileReader(ctx context.Context, f iceio.File) (*avroFileReader, erro
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	records, err := ocf.NewReader(f)
+	// Java allows non-ASCII letters and digits in an Avro name (it tests
+	// each UTF-16 char with Character.isLetter/isLetterOrDigit), so a
+	// Java-written header can name a column with a character that the
+	// strict Avro name rule rejects.
+	records, err := ocf.NewReader(f, ocf.WithSchemaOpts(avro.WithLaxNames(nil)))
 	if err != nil {
 		return nil, err
 	}
-	schemaJSON := string(records.Metadata()["avro.schema"])
-	if err := validateAvroReadSchema(schemaJSON); err != nil {
+	if err := validateAvroReadSchema(records.Schema()); err != nil {
 		return nil, errors.Join(err, records.Close())
 	}
-	schema, err := avroArrowSchema(schemaJSON)
+	schema, err := avroArrowSchema(records.Schema())
 	if err != nil {
 		return nil, errors.Join(err, records.Close())
 	}

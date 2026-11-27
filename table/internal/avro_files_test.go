@@ -35,7 +35,7 @@ import (
 
 func writeAvroOCF(t *testing.T, schemaText string, rows ...any) string {
 	t.Helper()
-	sc, err := avro.Parse(schemaText)
+	sc, err := avro.Parse(schemaText, avro.WithLaxNames(nil))
 	require.NoError(t, err)
 	path := filepath.Join(t.TempDir(), "data.avro")
 	out, err := os.Create(path)
@@ -189,18 +189,25 @@ func TestAvroRejectsExplicitColumnSelectionWithoutConsumingStream(t *testing.T) 
 }
 
 func TestAvroReadTablePreservesFieldIDs(t *testing.T) {
-	const schema = `{"type":"record","name":"row","fields":[{"name":"id","type":"long","field-id":1}]}`
-	path := writeAvroOCF(t, schema, map[string]any{"id": int64(7)}, map[string]any{"id": int64(9)})
-	reader := openAvroFile(t, path, 2)
+	// Java allows non-ASCII letters and digits in an Avro name (it tests
+	// each UTF-16 char with Character.isLetter/isLetterOrDigit), and the
+	// strict Avro name rule rejects them.
+	for _, name := range []string{"id", "café"} {
+		t.Run(name, func(t *testing.T) {
+			schema := `{"type":"record","name":"row","fields":[{"name":"` + name + `","type":"long","field-id":1}]}`
+			path := writeAvroOCF(t, schema, map[string]any{name: int64(7)}, map[string]any{name: int64(9)})
+			reader := openAvroFile(t, path, 2)
 
-	tbl, err := reader.ReadTable(context.Background())
-	require.NoError(t, err)
-	defer tbl.Release()
-	require.Equal(t, int64(2), tbl.NumRows())
-	require.Equal(t, int64(1), tbl.NumCols())
-	fieldID, ok := tbl.Schema().Field(0).Metadata.GetValue("PARQUET:field_id")
-	require.True(t, ok)
-	require.Equal(t, "1", fieldID)
+			tbl, err := reader.ReadTable(context.Background())
+			require.NoError(t, err)
+			defer tbl.Release()
+			require.Equal(t, int64(2), tbl.NumRows())
+			require.Equal(t, int64(1), tbl.NumCols())
+			fieldID, ok := tbl.Schema().Field(0).Metadata.GetValue("PARQUET:field_id")
+			require.True(t, ok)
+			require.Equal(t, "1", fieldID)
+		})
+	}
 }
 
 func TestAvroRecordReaderMultipleBatches(t *testing.T) {
