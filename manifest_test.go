@@ -3203,19 +3203,27 @@ func TestAvroEncodePartitionDataUsesDeclaredDecimalFixedSize(t *testing.T) {
 // TestManifestRoundTripFixedPartitions round-trips partition values whose Avro
 // type is a fixed: a negative decimal, which tests the signed fixed encoding,
 // and two fields of one fixed type, where the second field refers to the
-// first's named type.
+// first's named type. A row with names gives partition field names that are
+// not valid Avro names.
 func TestManifestRoundTripFixedPartitions(t *testing.T) {
 	dec := func(v int64, scale int) Decimal { return Decimal{Val: decimal128.FromI64(v), Scale: scale} }
 	ua, ub := uuid.UUID{1, 2, 3}, uuid.UUID{4, 5, 6}
 	for _, tt := range []struct {
 		name   string
-		types  []Type // one source column and identity partition field per type
-		values []any  // the partition value of each field, which reads back the same
+		types  []Type   // one source column and identity partition field per type
+		values []any    // the partition value of each field, which reads back the same
+		names  []string // the partition field names, or c0, c1, ... when nil
 	}{
-		{"decimal", []Type{MustDecimalTypeOf(10, 2)}, []any{dec(-1, 2)}},
-		{"two decimals of different precision", []Type{MustDecimalTypeOf(10, 2), MustDecimalTypeOf(20, 4)}, []any{dec(-1, 2), dec(12345, 4)}},
-		{"two decimals of one precision and scale", []Type{MustDecimalTypeOf(10, 2), MustDecimalTypeOf(10, 2)}, []any{dec(-1, 2), dec(7, 2)}},
-		{"two uuids", []Type{UUIDType{}, UUIDType{}}, []any{ua, ub}},
+		{"decimal", []Type{MustDecimalTypeOf(10, 2)}, []any{dec(-1, 2)}, nil},
+		{"two decimals of different precision", []Type{MustDecimalTypeOf(10, 2), MustDecimalTypeOf(20, 4)}, []any{dec(-1, 2), dec(12345, 4)}, nil},
+		{"two decimals of one precision and scale", []Type{MustDecimalTypeOf(10, 2), MustDecimalTypeOf(10, 2)}, []any{dec(-1, 2), dec(7, 2)}, nil},
+		{"two uuids", []Type{UUIDType{}, UUIDType{}}, []any{ua, ub}, nil},
+		{
+			"partition names that are not Avro names",
+			[]Type{MustDecimalTypeOf(10, 2), UUIDType{}, MustDecimalTypeOf(10, 2)},
+			[]any{dec(-1, 2), ua, dec(7, 2)},
+			[]string{"event.ts_day", "event-id", "2nd"},
+		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			var fields []NestedField
@@ -3223,8 +3231,12 @@ func TestManifestRoundTripFixedPartitions(t *testing.T) {
 			values := make(map[int]any)
 			for i, typ := range tt.types {
 				name := fmt.Sprintf("c%d", i)
+				partitionName := name
+				if tt.names != nil {
+					partitionName = tt.names[i]
+				}
 				fields = append(fields, NestedField{ID: i + 1, Name: name, Type: typ})
-				partitionFields = append(partitionFields, PartitionField{FieldID: 1000 + i, SourceIDs: []int{i + 1}, Name: name, Transform: IdentityTransform{}})
+				partitionFields = append(partitionFields, PartitionField{FieldID: 1000 + i, SourceIDs: []int{i + 1}, Name: partitionName, Transform: IdentityTransform{}})
 				values[1000+i] = tt.values[i]
 			}
 			schema := NewSchema(0, fields...)
