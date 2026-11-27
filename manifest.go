@@ -423,7 +423,10 @@ func (m *manifestFile) Entries(ctx context.Context, fs iceio.IO, discardDeleted 
 }
 
 func getFieldIDMap(sc *avro.Schema) dataFileFieldMaps {
-	root := sc.Root()
+	// The schema defines a named type, such as uuid_fixed, at its first use
+	// and refers to it by name after that. Expanding the references gives
+	// every partition field its type's logical type and size.
+	root := sc.Root().ExpandReferences()
 	getField := func(node avro.SchemaNode, name string) *avro.SchemaField {
 		for i := range node.Fields {
 			if node.Fields[i].Name == name {

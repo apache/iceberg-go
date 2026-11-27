@@ -59,10 +59,13 @@ func DecimalRequiredBytes(precision int) int {
 	return requiredLength[precision]
 }
 
+// DecimalNode returns the fixed schema of a decimal, named by its precision and
+// scale as Java names it, so that two decimal fields of different precision or
+// scale define two types.
 func DecimalNode(precision, scale int) avro.SchemaNode {
 	return avro.SchemaNode{
 		Type:        atype.Fixed,
-		Name:        "fixed",
+		Name:        fmt.Sprintf("decimal_%d_%d", precision, scale),
 		Size:        DecimalRequiredBytes(precision),
 		LogicalType: atype.Decimal,
 		Precision:   precision,

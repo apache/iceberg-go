@@ -3200,69 +3200,90 @@ func TestAvroEncodePartitionDataUsesDeclaredDecimalFixedSize(t *testing.T) {
 	}
 }
 
-func TestManifestRoundTripDecimalPartitionUsesSignedFixedSize(t *testing.T) {
-	schema := NewSchema(
-		0,
-		NestedField{ID: 1, Name: "price", Type: MustDecimalTypeOf(10, 2)},
-	)
-	partitionSpec := NewPartitionSpecID(
-		1,
-		PartitionField{FieldID: 1000, SourceIDs: []int{1}, Name: "price", Transform: IdentityTransform{}},
-	)
-	partitionValue := Decimal{Val: decimal128.FromI64(-1), Scale: 2}
-	dataFileBuilder, err := NewDataFileBuilder(
-		partitionSpec,
-		EntryContentData,
-		"s3://bucket/ns/table/data/decimal-partition.parquet",
-		ParquetFile,
-		map[int]any{1000: partitionValue},
-		map[int]string{1000: atype.Decimal},
-		map[int]int{1000: internal.DecimalRequiredBytes(10)},
-		1,
-		1024,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
+// TestManifestRoundTripFixedPartitions round-trips partition values whose Avro
+// type is a fixed: a negative decimal, which tests the signed fixed encoding,
+// and two fields of one fixed type, where the second field refers to the
+// first's named type.
+func TestManifestRoundTripFixedPartitions(t *testing.T) {
+	dec := func(v int64, scale int) Decimal { return Decimal{Val: decimal128.FromI64(v), Scale: scale} }
+	ua, ub := uuid.UUID{1, 2, 3}, uuid.UUID{4, 5, 6}
+	for _, tt := range []struct {
+		name   string
+		types  []Type // one source column and identity partition field per type
+		values []any  // the partition value of each field, which reads back the same
+	}{
+		{"decimal", []Type{MustDecimalTypeOf(10, 2)}, []any{dec(-1, 2)}},
+		{"two decimals of different precision", []Type{MustDecimalTypeOf(10, 2), MustDecimalTypeOf(20, 4)}, []any{dec(-1, 2), dec(12345, 4)}},
+		{"two decimals of one precision and scale", []Type{MustDecimalTypeOf(10, 2), MustDecimalTypeOf(10, 2)}, []any{dec(-1, 2), dec(7, 2)}},
+		{"two uuids", []Type{UUIDType{}, UUIDType{}}, []any{ua, ub}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var fields []NestedField
+			var partitionFields []PartitionField
+			values := make(map[int]any)
+			for i, typ := range tt.types {
+				name := fmt.Sprintf("c%d", i)
+				fields = append(fields, NestedField{ID: i + 1, Name: name, Type: typ})
+				partitionFields = append(partitionFields, PartitionField{FieldID: 1000 + i, SourceIDs: []int{i + 1}, Name: name, Transform: IdentityTransform{}})
+				values[1000+i] = tt.values[i]
+			}
+			schema := NewSchema(0, fields...)
+			partitionSpec := NewPartitionSpecID(1, partitionFields...)
+			dataFileBuilder, err := NewDataFileBuilder(
+				partitionSpec,
+				EntryContentData,
+				"s3://bucket/ns/table/data/fixed-partition.parquet",
+				ParquetFile,
+				values,
+				nil,
+				nil,
+				1,
+				1024,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
 
-	snapshotID := int64(1234)
-	seqNum := int64(1)
-	entry := NewManifestEntry(
-		EntryStatusADDED,
-		&snapshotID,
-		&seqNum,
-		&seqNum,
-		dataFileBuilder.Build(),
-	)
+			snapshotID := int64(1234)
+			seqNum := int64(1)
+			entry := NewManifestEntry(EntryStatusADDED, &snapshotID, &seqNum, &seqNum, dataFileBuilder.Build())
 
-	var buf bytes.Buffer
-	file, err := WriteManifest(
-		"s3://bucket/ns/table/metadata/decimal-manifest.avro",
-		&buf,
-		2,
-		partitionSpec,
-		schema,
-		snapshotID,
-		[]ManifestEntry{entry},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
+			var buf bytes.Buffer
+			file, err := WriteManifest(
+				"s3://bucket/ns/table/metadata/fixed-manifest.avro",
+				&buf,
+				2,
+				partitionSpec,
+				schema,
+				snapshotID,
+				[]ManifestEntry{entry},
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
 
-	entries, err := ReadManifest(file, bytes.NewReader(buf.Bytes()), false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(entries) != 1 {
-		t.Fatalf("ReadManifest returned %d entries, want 1", len(entries))
-	}
-
-	got, ok := entries[0].DataFile().Partition()[1000].(DecimalLiteral)
-	if !ok {
-		t.Fatalf("Partition()[1000] type = %T, want DecimalLiteral", entries[0].DataFile().Partition()[1000])
-	}
-	if want := DecimalLiteral(partitionValue); !got.Equals(want) {
-		t.Fatalf("Partition()[1000] = %v, want %v", got, want)
+			entries, err := ReadManifest(file, bytes.NewReader(buf.Bytes()), false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(entries) != 1 {
+				t.Fatalf("ReadManifest returned %d entries, want 1", len(entries))
+			}
+			partition := entries[0].DataFile().Partition()
+			for i, want := range tt.values {
+				got := partition[1000+i]
+				switch want := want.(type) {
+				case Decimal:
+					if d, ok := got.(DecimalLiteral); !ok || !d.Equals(DecimalLiteral(want)) {
+						t.Errorf("Partition()[%d] = %T %v, want DecimalLiteral %v", 1000+i, got, got, want)
+					}
+				default:
+					if got != want {
+						t.Errorf("Partition()[%d] = %T %v, want %T %v", 1000+i, got, got, want, want)
+					}
+				}
+			}
+		})
 	}
 }
 
