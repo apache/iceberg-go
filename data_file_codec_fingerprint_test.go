@@ -107,11 +107,13 @@ func TestManifestEntrySchemaForMultipleParameterizedFields(t *testing.T) {
 				require.NoError(t, err)
 				want, err := internal.NewManifestEntrySchema(partition, version)
 				require.NoError(t, err)
+				wantMaps, err := getFieldIDMap(want)
+				require.NoError(t, err)
 				for range 2 {
 					got, maps, err := manifestEntrySchemaFor(tc.spec, schema, version)
 					require.NoError(t, err)
 					require.Equal(t, want.String(), got.String())
-					require.Equal(t, getFieldIDMap(want), maps)
+					require.Equal(t, wantMaps, maps)
 				}
 			})
 		}

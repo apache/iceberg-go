@@ -1938,10 +1938,8 @@ func (m *ManifestTestSuite) TestReadManifestListIncompleteSchema() {
 }
 
 func (m *ManifestTestSuite) TestReadManifestIncompleteSchema() {
-	// Verify that reading a manifest entry whose embedded schema references
-	// an undefined named type ("r2" without its definition) fails. A stray
-	// cache or cross-file resolver could mask this by reusing a definition
-	// from a previously-read file.
+	// Verify that reading a manifest entry whose embedded schema is
+	// incomplete returns an error.
 	var buf bytes.Buffer
 	partitionSpec := NewPartitionSpecID(1)
 	snapshotID := int64(12345678)
@@ -1980,12 +1978,8 @@ func (m *ManifestTestSuite) TestReadManifestIncompleteSchema() {
 	m.NoError(err)
 	m.Len(entries, 1)
 
-	// This schema is that of a v2 manifest file, except that it refers to
-	// a type named "r2" for the "data_file" field, instead of actually
-	// including the definition of the "data_file" record type.
-	// This omission should result in an error. But if a schema cache were
-	// in use, this could get resolved based on a type of the same name read
-	// from a file that defined it.
+	// This schema is that of a v2 manifest file, except for its "data_file"
+	// field, which each case below fills in.
 	incompleteSchema := `
 	{
 		"name": "manifest_entry",
@@ -2019,12 +2013,7 @@ func (m *ManifestTestSuite) TestReadManifestIncompleteSchema() {
 					"long"
 				],
 				"field-id": 4
-			},
-			{
-				"name": "data_file",
-				"type": "r2",
-				"field-id": 2
-			}
+			}%s
 		]
 	}`
 
@@ -2036,23 +2025,58 @@ func (m *ManifestTestSuite) TestReadManifestIncompleteSchema() {
 	m.NoError(err)
 	sch, err := internal.NewManifestEntrySchema(partitionSchema, 2)
 	m.NoError(err)
-	wr, err := ocf.NewWriter(
-		&buf, sch,
-		ocf.WithSchema(incompleteSchema),
-		ocf.WithMetadata(map[string][]byte{
-			"format-version": {'2'},
-			// TODO: spec says other things are required, like schema and partition-spec info,
-			//       but this package currently only looks at this one value when reading...
-		}),
-	)
-	m.NoError(err)
-	for _, entry := range entries {
-		m.NoError(wr.Encode(entry))
-	}
+	for _, tt := range []struct {
+		name          string
+		dataFile      string
+		errorContains string
+	}{
+		// The field refers to a type named "r2" instead of including the
+		// definition of the "data_file" record type. If a schema cache were
+		// in use, this could get resolved based on a type of the same name
+		// read from a file that defined it.
+		{"undefined data_file type", `, {"name": "data_file", "type": "r2", "field-id": 2}`, `"r2"`},
+		// A manifest list or another Avro file that is not a manifest has no
+		// data_file field. A corrupt or foreign file can have a data_file
+		// record without a partition field.
+		{"no data_file", ``, "does not contain a data_file field"},
+		{
+			"no partition",
+			`, {"name": "data_file", "type": {"type": "record", "name": "r2", "fields": [{"name": "file_path", "type": "string", "field-id": 100}]}, "field-id": 2}`,
+			"does not contain a partition field",
+		},
+		// twmb/avro accepts a union with no branches, which no value can
+		// match.
+		{
+			"empty union partition field",
+			`, {"name": "data_file", "type": {"type": "record", "name": "r2", "fields": [{"name": "partition", "type": {"type": "record", "name": "r102", "fields": [{"name": "x", "type": [], "field-id": 1000}]}, "field-id": 102}]}, "field-id": 2}`,
+			"is an empty union",
+		},
+	} {
+		m.Run(tt.name, func() {
+			var out bytes.Buffer
+			wr, err := ocf.NewWriter(
+				&out, sch,
+				ocf.WithSchema(fmt.Sprintf(incompleteSchema, tt.dataFile)),
+				ocf.WithMetadata(map[string][]byte{
+					"format-version": {'2'},
+					"content":        []byte("data"),
+					// TODO: spec says other things are required, like schema
+					// and partition-spec info, but this package requires only
+					// these two values when opening a manifest...
+				}),
+			)
+			m.NoError(err)
+			for _, entry := range entries {
+				m.NoError(wr.Encode(entry))
+			}
 
-	// This should fail because the file's schema is incomplete.
-	_, err = ReadManifest(file, &buf, false)
-	m.Error(err)
+			// This should fail because the file's schema is incomplete.
+			_, err = ReadManifest(file, bytes.NewReader(out.Bytes()), false)
+			m.ErrorContains(err, tt.errorContains)
+			_, err = NewManifestReaderWithProjection(file, bytes.NewReader(out.Bytes()), ManifestEntryProjection{})
+			m.ErrorContains(err, tt.errorContains)
+		})
+	}
 }
 
 func (m *ManifestTestSuite) TestManifestEntriesV2() {

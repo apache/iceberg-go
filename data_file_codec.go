@@ -317,7 +317,10 @@ func manifestEntrySchemaFor(spec PartitionSpec, schema *Schema, version int) (*a
 	if err != nil {
 		return nil, dataFileFieldMaps{}, err
 	}
-	fieldMaps := getFieldIDMap(fullSchema)
+	fieldMaps, err := getFieldIDMap(fullSchema)
+	if err != nil {
+		return nil, dataFileFieldMaps{}, err
+	}
 	entry := &dataFileSchemaEntry{
 		schema: fullSchema,
 		maps:   fieldMaps,

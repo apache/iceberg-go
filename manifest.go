@@ -422,7 +422,7 @@ func (m *manifestFile) Entries(ctx context.Context, fs iceio.IO, discardDeleted 
 	return manifestEntries(ctx, fs, m, discardDeleted, nil)
 }
 
-func getFieldIDMap(sc *avro.Schema) dataFileFieldMaps {
+func getFieldIDMap(sc *avro.Schema) (dataFileFieldMaps, error) {
 	// The schema defines a named type, such as uuid_fixed, at its first use
 	// and refers to it by name after that. Expanding the references gives
 	// every partition field its type's logical type and size.
@@ -444,7 +444,13 @@ func getFieldIDMap(sc *avro.Schema) dataFileFieldMaps {
 	unknownFieldIDs := make(map[int]struct{})
 
 	entryField := getField(*root, "data_file")
+	if entryField == nil {
+		return dataFileFieldMaps{}, errors.New("manifest entry schema does not contain a data_file field")
+	}
 	partitionField := getField(entryField.Type, "partition")
+	if partitionField == nil {
+		return dataFileFieldMaps{}, errors.New("manifest entry schema's data_file does not contain a partition field")
+	}
 
 	for _, field := range partitionField.Type.Fields {
 		fid, ok := schemaFieldID(field)
@@ -455,6 +461,9 @@ func getFieldIDMap(sc *avro.Schema) dataFileFieldMaps {
 		result[field.Name] = fid
 		typ := field.Type
 		if typ.Type == atype.Union {
+			if len(typ.Branches) == 0 {
+				return dataFileFieldMaps{}, fmt.Errorf("manifest entry schema's partition field %q is an empty union", field.Name)
+			}
 			typ = typ.Branches[len(typ.Branches)-1]
 		}
 		if typ.Type == atype.Null {
@@ -475,7 +484,7 @@ func getFieldIDMap(sc *avro.Schema) dataFileFieldMaps {
 		idToFixedSize:    fixedSizes,
 		idToDecimalScale: decimalScales,
 		unknownFieldIDs:  unknownFieldIDs,
-	}
+	}, nil
 }
 
 // applyDayTransformDates marks every day(...) partition field described by the
@@ -797,7 +806,10 @@ func newManifestReader(
 			}
 		}
 	}
-	fieldMaps := getFieldIDMap(sc)
+	fieldMaps, err := getFieldIDMap(sc)
+	if err != nil {
+		return nil, err
+	}
 	// day(...) partition values are days since the Unix epoch, but a manifest
 	// may encode them either as an Avro int carrying the "date" logical type or
 	// as a legacy plain Avro int. Overlay the manifest's partition spec so
@@ -1838,7 +1850,10 @@ func NewManifestWriter(version int, out io.Writer, spec PartitionSpec, schema *S
 		return nil, err
 	}
 
-	fieldMaps := getFieldIDMap(fileSchema)
+	fieldMaps, err := getFieldIDMap(fileSchema)
+	if err != nil {
+		return nil, err
+	}
 	partitionStats, partitionStatsErr := newPartitionSummaryStats(spec, schema)
 
 	w := &ManifestWriter{
