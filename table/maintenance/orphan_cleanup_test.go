@@ -2917,3 +2917,37 @@ func TestGetReferencedFilesAcrossBatchBoundary(t *testing.T) {
 		require.True(t, refs[fmt.Sprintf("s3://bucket/data/%d.parquet", i)])
 	}
 }
+
+func TestIsHiddenPath(t *testing.T) {
+	root := "s3://bucket/warehouse/db/tbl"
+	partitions := map[string]struct{}{"_part": {}, "region": {}}
+
+	tests := []struct {
+		name   string
+		path   string
+		hidden bool
+	}{
+		{"data file", root + "/data/00000.parquet", false},
+		{"metadata file", root + "/metadata/v1.metadata.json", false},
+		{"delta log", root + "/_delta_log/00000.json", true},
+		{"hoodie dir", root + "/.hoodie/hoodie.properties", true},
+		{"hidden file", root + "/data/.hidden", true},
+		{"underscore file", root + "/data/_SUCCESS", true},
+		{"nested hidden dir", root + "/data/_tmp/part.parquet", true},
+		{"partition dir with underscore", root + "/data/_part=1/00000.parquet", false},
+		{"unknown underscore partition dir", root + "/data/_other=1/00000.parquet", true},
+		{"regular partition dir", root + "/data/region=us/00000.parquet", false},
+		{"root with trailing slash", root + "/data/_SUCCESS", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.hidden, isHiddenPath(tt.path, root, partitions))
+		})
+	}
+
+	// A hidden segment in the root itself must not hide every file.
+	assert.False(t, isHiddenPath("s3://bucket/_wh/tbl/data/a.parquet", "s3://bucket/_wh/tbl/", nil))
+	// A different scheme for the same location still resolves relative paths.
+	assert.True(t, isHiddenPath("s3a://bucket/warehouse/db/tbl/_delta_log/0.json", root, nil))
+}
