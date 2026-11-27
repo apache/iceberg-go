@@ -18,12 +18,16 @@
 package dynamodb
 
 import (
+	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
 	"github.com/apache/iceberg-go/table"
 	"github.com/aws/aws-sdk-go-v2/aws"
+	sdk "github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
@@ -64,6 +68,50 @@ func TestIdentifierValidation(t *testing.T) {
 func TestConstructorRequiresWarehouse(t *testing.T) {
 	_, err := NewCatalog(t.Context(), "test", aws.Config{}, iceberg.Properties{})
 	require.ErrorContains(t, err, "requires a warehouse")
+}
+
+const activeCatalogTable = `{"Table":{"TableName":"iceberg","TableStatus":"ACTIVE",
+"AttributeDefinitions":[{"AttributeName":"identifier","AttributeType":"S"},{"AttributeName":"namespace","AttributeType":"S"}],
+"KeySchema":[{"AttributeName":"identifier","KeyType":"HASH"},{"AttributeName":"namespace","KeyType":"RANGE"}],
+"GlobalSecondaryIndexes":[{"IndexName":"namespace-identifier","IndexStatus":"ACTIVE",
+"KeySchema":[{"AttributeName":"namespace","KeyType":"HASH"},{"AttributeName":"identifier","KeyType":"RANGE"}]}]}}`
+
+func describeTableServer(t *testing.T) (*httptest.Server, *atomic.Int32) {
+	var hits atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		require.Equal(t, "DynamoDB_20120810.DescribeTable", r.Header.Get("X-Amz-Target"))
+		w.Header().Set("Content-Type", "application/x-amz-json-1.0")
+		_, _ = w.Write([]byte(activeCatalogTable))
+	}))
+	t.Cleanup(server.Close)
+
+	return server, &hits
+}
+
+func TestNewCatalogAppliesClientOptions(t *testing.T) {
+	cfg := aws.Config{Region: "us-east-1", Credentials: aws.AnonymousCredentials{}}
+	withEndpoint := func(url string) Option {
+		return WithClientOptions(func(o *sdk.Options) { o.BaseEndpoint = aws.String(url) })
+	}
+
+	t.Run("client options", func(t *testing.T) {
+		server, hits := describeTableServer(t)
+		c, err := NewCatalog(t.Context(), "test", cfg, iceberg.Properties{"warehouse": "s3://bucket/wh"}, withEndpoint(server.URL))
+		require.NoError(t, err)
+		require.NoError(t, c.Close())
+		require.Positive(t, hits.Load())
+	})
+
+	t.Run("endpoint property wins", func(t *testing.T) {
+		optionServer, optionHits := describeTableServer(t)
+		propServer, propHits := describeTableServer(t)
+		c, err := NewCatalog(t.Context(), "test", cfg, iceberg.Properties{"warehouse": "s3://bucket/wh", EndpointKey: propServer.URL}, withEndpoint(optionServer.URL))
+		require.NoError(t, err)
+		require.NoError(t, c.Close())
+		require.Positive(t, propHits.Load())
+		require.Zero(t, optionHits.Load())
+	})
 }
 
 func TestConditionalFailureClassification(t *testing.T) {
