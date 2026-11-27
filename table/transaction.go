@@ -2745,7 +2745,17 @@ func (t *Transaction) Scan(opts ...ScanOption) (*Scan, error) {
 }
 
 func (t *Transaction) StagedTable() (*StagedTable, error) {
+	if err := t.checkNotNil(); err != nil {
+		return nil, err
+	}
+	// apply swaps t.meta under t.mx, so copy the builder under the lock and
+	// build the staged view from the copy.
+	t.mx.Lock()
 	meta, err := t.txnMeta()
+	if err == nil {
+		meta = meta.clone()
+	}
+	t.mx.Unlock()
 	if err != nil {
 		return nil, err
 	}

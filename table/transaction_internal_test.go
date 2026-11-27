@@ -23,6 +23,7 @@ import (
 	"io/fs"
 	"maps"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -2470,5 +2471,35 @@ func TestTransactionApplyDuplicateRequirementWithUpdates(t *testing.T) {
 			require.Equal(t, "test-value", after.Properties()["test-key"])
 			require.Empty(t, before.Properties()["test-key"])
 		})
+	}
+}
+
+// Why: StagedTable read the transaction's metadata builder without the
+// transaction lock while apply swaps it, a data race under -race.
+// Condition: StagedTable and SetProperties run concurrently on one transaction.
+// Assertion: both succeed with no race reported, and the final staged view
+// has every property.
+func TestTransactionStagedTableConcurrentWithSetProperties(t *testing.T) {
+	txn := createTestTransaction(t, iceio.LocalFS{}, *iceberg.UnpartitionedSpec)
+
+	const n = 50
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		for i := range n {
+			assert.NoError(t, txn.SetProperties(iceberg.Properties{fmt.Sprintf("k%d", i): "v"}))
+		}
+	})
+	wg.Go(func() {
+		for range n {
+			_, err := txn.StagedTable()
+			assert.NoError(t, err)
+		}
+	})
+	wg.Wait()
+
+	staged, err := txn.StagedTable()
+	require.NoError(t, err)
+	for i := range n {
+		assert.Equal(t, "v", staged.Properties()[fmt.Sprintf("k%d", i)])
 	}
 }
