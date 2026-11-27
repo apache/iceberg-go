@@ -1311,7 +1311,7 @@ func (m *inclusiveMetricsEval) VisitEqual(t iceberg.BoundTerm, lit iceberg.Liter
 }
 
 func (m *inclusiveMetricsEval) VisitNotEqual(t iceberg.BoundTerm, lit iceberg.Literal) bool {
-	if value := m.uniqueValue(t); value != nil && getCmpLiteral(value)(value, lit) == 0 {
+	if value := m.findUniqueValue(t); value != nil && getCmpLiteral(value)(value, lit) == 0 {
 		return rowsCannotMatch
 	}
 
@@ -1407,16 +1407,16 @@ func (m *inclusiveMetricsEval) VisitNotIn(t iceberg.BoundTerm, s iceberg.Set[ice
 	// because the bounds are not necessarily a min or max value, this cannot be
 	// answered using them. notIn(col, {X, ...}) with (XX, Y) doesn't guarantee that
 	// X is a value in col, unless every row holds the same value.
-	if value := m.uniqueValue(t); value != nil && s.Contains(value) {
+	if value := m.findUniqueValue(t); value != nil && s.Contains(value) {
 		return rowsCannotMatch
 	}
 
 	return rowsMightMatch
 }
 
-// uniqueValue returns the value every row of the file holds for t, or nil if
+// findUniqueValue returns the value every row of the file holds for t, or nil if
 // the stats don't prove that the column has a single value.
-func (m *inclusiveMetricsEval) uniqueValue(t iceberg.BoundTerm) iceberg.Literal {
+func (m *inclusiveMetricsEval) findUniqueValue(t iceberg.BoundTerm) iceberg.Literal {
 	if _, ok := t.(iceberg.BoundExtract); ok {
 		return nil
 	}
