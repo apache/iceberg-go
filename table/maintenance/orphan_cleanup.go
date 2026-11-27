@@ -341,6 +341,9 @@ func rejectPlanOption(cfg *orphanCleanupConfig, name string) {
 // It also rejects REST refs-only snapshot history, which can omit still-live files.
 // Configure the REST catalog with snapshot-loading-mode=all and reload the
 // table before cleanup. A server override can force refs mode.
+// Files under a path segment starting with "_" or "." (for example
+// _delta_log or .hoodie) are never treated as orphans, except directories
+// named after a partition field.
 func DeleteOrphanFiles(ctx context.Context, tbl *table.Table, opts ...OrphanCleanupOption) (OrphanCleanupResult, error) {
 	cfg := newOrphanCleanupConfig(opts...)
 	if cfg.validationErr != nil {
@@ -494,6 +497,7 @@ func planOrphanFiles(ctx context.Context, tbl *table.Table, cfg *orphanCleanupCo
 	var referencedFiles map[string]bool
 	var scannedFiles []scannedFile
 	cutoff := time.Now().Add(-cfg.olderThan)
+	partitionNames := partitionFieldNames(tbl)
 
 	g, gctx := errgroup.WithContext(ctx)
 	g.Go(func() error {
@@ -509,6 +513,9 @@ func planOrphanFiles(ctx context.Context, tbl *table.Table, cfg *orphanCleanupCo
 				return gctx.Err()
 			}
 			if info.IsDir() || !info.ModTime().Before(cutoff) {
+				return nil
+			}
+			if isHiddenPath(path, scanLocation, partitionNames) {
 				return nil
 			}
 			scannedFiles = append(scannedFiles, scannedFile{path: path, size: info.Size()})
@@ -762,6 +769,80 @@ func (b *referencePathBatch) flush() {
 	b.mu.Unlock()
 	clear(b.paths)
 	b.paths = b.paths[:0]
+}
+
+// partitionFieldNames returns the names of all partition fields across every
+// partition spec of the table.
+func partitionFieldNames(tbl *table.Table) map[string]struct{} {
+	names := make(map[string]struct{})
+	for _, spec := range tbl.Metadata().PartitionSpecs() {
+		for _, field := range spec.Fields() {
+			names[field.Name] = struct{}{}
+		}
+	}
+
+	return names
+}
+
+// isHiddenPath reports whether path, relative to root, has a segment that
+// starts with "_" or ".". Such files belong to other tools (for example
+// _delta_log or .hoodie) and are never treated as orphans. A directory
+// named after a partition field, such as "_part=1" or ".x=1", is not hidden.
+// This matches Java's PartitionAwareHiddenPathFilter.
+func isHiddenPath(path, root string, partitionNames map[string]struct{}) bool {
+	rel := relativeToRoot(path, root)
+	segments := strings.Split(rel, "/")
+	for i, segment := range segments {
+		if segment == "" {
+			continue
+		}
+		if i < len(segments)-1 {
+			if name, _, found := strings.Cut(segment, "="); found {
+				if _, ok := partitionNames[name]; ok {
+					continue
+				}
+			}
+		}
+		if strings.HasPrefix(segment, ".") || strings.HasPrefix(segment, "_") {
+			return true
+		}
+	}
+
+	return false
+}
+
+// relativeToRoot returns path relative to root, comparing only the URL path
+// so that differing schemes or authorities for the same location still match.
+func relativeToRoot(path, root string) string {
+	pathPart := urlPath(path)
+	rootPart := strings.TrimSuffix(urlPath(root), "/")
+	if rootPart != "" && strings.HasPrefix(pathPart, rootPart+"/") {
+		return strings.TrimPrefix(pathPart, rootPart+"/")
+	}
+
+	return strings.TrimPrefix(pathPart, "/")
+}
+
+// urlPath returns the path of raw without its scheme and authority. It also
+// accepts Hadoop-style "file:/path" locations and collapses repeated slashes,
+// so it matches the bare paths that LocalFS yields while walking.
+func urlPath(raw string) string {
+	switch {
+	case strings.Contains(raw, "://"):
+		_, rest, _ := strings.Cut(raw, "://")
+		if _, p, ok := strings.Cut(rest, "/"); ok {
+			raw = "/" + p
+		} else {
+			return ""
+		}
+	case strings.HasPrefix(raw, "file:/"):
+		raw = strings.TrimPrefix(raw, "file:")
+	}
+	for strings.Contains(raw, "//") {
+		raw = strings.ReplaceAll(raw, "//", "/")
+	}
+
+	return raw
 }
 
 func walkDirectory(ctx context.Context, fsys io.IO, root string, fn func(path string, info stdfs.FileInfo) error) error {

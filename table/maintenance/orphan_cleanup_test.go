@@ -2917,3 +2917,89 @@ func TestGetReferencedFilesAcrossBatchBoundary(t *testing.T) {
 		require.True(t, refs[fmt.Sprintf("s3://bucket/data/%d.parquet", i)])
 	}
 }
+
+func TestIsHiddenPath(t *testing.T) {
+	root := "s3://bucket/warehouse/db/tbl"
+	partitions := map[string]struct{}{"_part": {}, ".x": {}, "region": {}}
+
+	tests := []struct {
+		name   string
+		root   string
+		path   string
+		hidden bool
+	}{
+		{"data file", root, root + "/data/00000.parquet", false},
+		{"metadata file", root, root + "/metadata/v1.metadata.json", false},
+		{"delta log", root, root + "/_delta_log/00000.json", true},
+		{"hoodie dir", root, root + "/.hoodie/hoodie.properties", true},
+		{"hidden file", root, root + "/data/.hidden", true},
+		{"underscore file", root, root + "/data/_SUCCESS", true},
+		{"nested hidden dir", root, root + "/data/_tmp/part.parquet", true},
+		{"partition dir with underscore", root, root + "/data/_part=1/00000.parquet", false},
+		{"partition dir with dot", root, root + "/data/.x=1/00000.parquet", false},
+		{"unknown underscore partition dir", root, root + "/data/_other=1/00000.parquet", true},
+		{"unknown dot partition dir", root, root + "/data/.other=1/00000.parquet", true},
+		{"regular partition dir", root, root + "/data/region=us/00000.parquet", false},
+		{"root with trailing slash", root + "/", root + "/data/_SUCCESS", true},
+		{"root with trailing slash and data file", root + "/", root + "/data/00000.parquet", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.hidden, isHiddenPath(tt.path, tt.root, partitions))
+		})
+	}
+
+	// A hidden segment in the root itself must not hide every file.
+	assert.False(t, isHiddenPath("s3://bucket/_wh/tbl/data/a.parquet", "s3://bucket/_wh/tbl/", nil))
+	// A different scheme for the same location still resolves relative paths.
+	assert.True(t, isHiddenPath("s3a://bucket/warehouse/db/tbl/_delta_log/0.json", root, nil))
+	// Hadoop-style file:/ roots and repeated slashes match the bare paths
+	// that LocalFS yields while walking.
+	assert.False(t, isHiddenPath("/tmp/_wh/tbl/data/a.parquet", "file:/tmp/_wh/tbl", nil))
+	assert.False(t, isHiddenPath("/tmp/_wh/tbl/data/a.parquet", "/tmp/_wh//tbl", nil))
+	assert.True(t, isHiddenPath("/tmp/_wh/tbl/_delta_log/0.json", "file:/tmp/_wh/tbl", nil))
+}
+
+func TestPlanOrphanFilesSkipsHiddenPathsOnLocalFS(t *testing.T) {
+	ctx := context.Background()
+	base := filepath.Join(t.TempDir(), "_wh", "tbl")
+	old := time.Now().Add(-48 * time.Hour)
+
+	files := []string{
+		"metadata/v1.metadata.json",
+		"data/orphan.parquet",
+		"_delta_log/00000.json",
+		".hoodie/hoodie.properties",
+	}
+	for _, name := range files {
+		full := filepath.Join(base, filepath.FromSlash(name))
+		require.NoError(t, os.MkdirAll(filepath.Dir(full), 0o755))
+		require.NoError(t, os.WriteFile(full, []byte("x"), 0o644))
+		require.NoError(t, os.Chtimes(full, old, old))
+	}
+
+	for _, location := range []string{
+		"file:" + base,
+		"file://" + base,
+		base,
+	} {
+		t.Run(location, func(t *testing.T) {
+			metadataLocation := location + "/metadata/v1.metadata.json"
+			meta, err := table.NewMetadata(iceberg.NewSchema(0), nil, table.UnsortedSortOrder, location, nil)
+			require.NoError(t, err)
+			tbl := table.New(
+				table.Identifier{"db", "tbl"},
+				meta,
+				metadataLocation,
+				func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil },
+				nil,
+			)
+
+			plan, err := PlanOrphanFiles(ctx, tbl, WithCleanupFilesOlderThan(time.Hour))
+			require.NoError(t, err)
+			require.Len(t, plan.Files(), 1)
+			assert.True(t, strings.HasSuffix(plan.Files()[0], "data/orphan.parquet"), plan.Files()[0])
+		})
+	}
+}
