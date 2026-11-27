@@ -361,12 +361,14 @@ func (d *DataFileStatistics) ToDataFile(opts DataFileOpts) iceberg.DataFile {
 	upperBounds := make(map[int][]byte)
 
 	for fieldID, agg := range d.ColAggs {
+		// An empty string or binary bound serializes to zero bytes, so only
+		// nil means there is no bound.
 		min := must(agg.MinAsBytes())
 		max := must(agg.MaxAsBytes())
-		if len(min) > 0 {
+		if min != nil {
 			lowerBounds[fieldID] = min
 		}
-		if len(max) > 0 {
+		if max != nil {
 			upperBounds[fieldID] = max
 		}
 	}
@@ -502,7 +504,15 @@ func (s *statsAggregator[T]) toBytes(val iceberg.Literal) ([]byte, error) {
 		return nil, err
 	}
 
-	return v.MarshalBinary()
+	b, err := v.MarshalBinary()
+	if err != nil {
+		return nil, err
+	}
+	if b == nil {
+		b = []byte{}
+	}
+
+	return b, nil
 }
 
 func (s *statsAggregator[T]) updateMin(val T) {
@@ -554,24 +564,28 @@ func (s *statsAggregator[T]) MaxAsBytes() ([]byte, error) {
 		}
 
 		curMax := any(s.curMax.Value()).(string)
-		result := TruncateUpperBoundText(curMax, s.truncLen)
-		if result != "" {
-			return s.toBytes(iceberg.StringLiteral(result))
+		result, truncated := truncateUpperBoundText(curMax, s.truncLen)
+		if truncated && result == "" {
+			return nil, nil
 		}
 
-		return nil, nil
+		return s.toBytes(iceberg.StringLiteral(result))
 	case iceberg.BinaryType:
 		if !s.curMax.Type().Equals(s.primitiveType) {
 			return nil, errors.New("expected current max to be a binary")
 		}
 
 		curMax := any(s.curMax.Value()).([]byte)
-		result := TruncateUpperBoundBinary(curMax, s.truncLen)
-		if len(result) > 0 {
-			return s.toBytes(iceberg.BinaryLiteral(result))
+		if len(curMax) <= s.truncLen {
+			return s.toBytes(iceberg.BinaryLiteral(curMax))
 		}
 
-		return nil, nil
+		result := TruncateUpperBoundBinary(curMax, s.truncLen)
+		if result == nil {
+			return nil, nil
+		}
+
+		return s.toBytes(iceberg.BinaryLiteral(result))
 	default:
 		return nil, fmt.Errorf("%s cannot be truncated for upper bound", s.primitiveType)
 	}

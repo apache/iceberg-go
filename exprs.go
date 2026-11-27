@@ -23,7 +23,6 @@ import (
 	"reflect"
 
 	"github.com/apache/arrow-go/v18/parquet/variant"
-	"github.com/google/uuid"
 )
 
 //go:generate stringer -type=Operation -linecomment
@@ -473,7 +472,7 @@ func createBoundRef(field NestedField, acc accessor, name string) BoundReference
 	case DecimalType:
 		return &boundRef[Decimal]{field: field, acc: acc, fullName: name}
 	case UUIDType:
-		return &boundRef[uuid.UUID]{field: field, acc: acc, fullName: name}
+		return &boundRef[UUID]{field: field, acc: acc, fullName: name}
 	case VariantType:
 		return &boundRef[variant.Value]{field: field, acc: acc, fullName: name}
 	}
@@ -676,7 +675,7 @@ func createBoundUnaryPredicate(op Operation, term BoundTerm) BoundUnaryPredicate
 	case DecimalType:
 		return newBoundUnaryPred[Decimal](op, term)
 	case UUIDType:
-		return newBoundUnaryPred[uuid.UUID](op, term)
+		return newBoundUnaryPred[UUID](op, term)
 	case VariantType:
 		return newBoundUnaryPred[variant.Value](op, term)
 	}
@@ -898,7 +897,7 @@ func createBoundLiteralPredicate(op Operation, term BoundTerm, lit Literal) (Bou
 	case DecimalType:
 		return newBoundLiteralPredicate[Decimal](op, term, finalLit), nil
 	case UUIDType:
-		return newBoundLiteralPredicate[uuid.UUID](op, term, finalLit), nil
+		return newBoundLiteralPredicate[UUID](op, term, finalLit), nil
 	case VariantType:
 		return nil, fmt.Errorf("%w: ordered predicates are not supported on variant fields", ErrInvalidArgument)
 	}
@@ -1081,7 +1080,7 @@ func createBoundSetPredicate(op Operation, term BoundTerm, lits Set[Literal]) (B
 	case DecimalType:
 		return newBoundSetPredicate[Decimal](op, term, typedSet), nil
 	case UUIDType:
-		return newBoundSetPredicate[uuid.UUID](op, term, typedSet), nil
+		return newBoundSetPredicate[UUID](op, term, typedSet), nil
 	}
 
 	return nil, fmt.Errorf("%w: invalid bound type for set predicate - %s",

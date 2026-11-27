@@ -57,7 +57,8 @@ const (
 
 // TestExternalRestCatalogConformance runs the catalog conformance suite against
 // an external REST catalog server. It is opt-in: the test is skipped unless
-// REST_CATALOG_URI is set.
+// REST_CATALOG_URI is set. The server must allow purging tables on drop, which
+// Polaris, for example, only does with drop-with-purge.enabled.
 func TestExternalRestCatalogConformance(t *testing.T) {
 	uri := os.Getenv(externalURIEnv)
 	if uri == "" {

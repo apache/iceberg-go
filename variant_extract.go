@@ -21,7 +21,6 @@ import (
 	"fmt"
 
 	"github.com/apache/arrow-go/v18/parquet/variant"
-	"github.com/google/uuid"
 )
 
 // BoundExtract is a bound variant sub-path term used for metrics pruning and residual evaluation.
@@ -145,7 +144,7 @@ func createBoundExtract(ref BoundReference, fields []string, path string, typ Pr
 	case DecimalType:
 		return &boundExtract[Decimal]{ref: ref, fields: fields, path: path, typ: typ, acc: acc}
 	case UUIDType:
-		return &boundExtract[uuid.UUID]{ref: ref, fields: fields, path: path, typ: typ, acc: acc}
+		return &boundExtract[UUID]{ref: ref, fields: fields, path: path, typ: typ, acc: acc}
 	}
 	panic("unhandled variant extract target type: " + typ.String())
 }

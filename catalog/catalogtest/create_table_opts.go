@@ -44,14 +44,28 @@ func sourceName(t *testing.T, schema *iceberg.Schema, sourceIDs []int) string {
 	return name
 }
 
+// testCreateTableWithProperties asserts that properties passed at create time
+// are visible on a fresh load.
+func testCreateTableWithProperties(t *testing.T, cfg Config) {
+	ctx := context.Background()
+	cat := cfg.NewCatalog(t)
+
+	ident, _ := createTable(t, cat, catalog.WithProperties(iceberg.Properties{"owner": "conformance"}))
+
+	tbl, err := cat.LoadTable(ctx, ident)
+	require.NoError(t, err)
+	assert.Equal(t, "conformance", tbl.Properties()["owner"])
+}
+
 // testCreateTableWithPartitionSpec asserts that the partition spec passed at
-// create time is the table's spec on a fresh load, allowing for reassigned
-// spec, field and source IDs.
+// create time is the table's spec on a fresh load, with fresh spec and field
+// IDs assigned.
 func testCreateTableWithPartitionSpec(t *testing.T, cfg Config) {
 	ctx := context.Background()
 	cat := cfg.NewCatalog(t)
 
 	spec, err := iceberg.NewPartitionSpecOpts(
+		iceberg.WithSpecID(3),
 		iceberg.AddPartitionFieldByName("id", "id_bucket", iceberg.BucketTransform{NumBuckets: 16}, Schema, nil),
 		iceberg.AddPartitionFieldByName("data", "data", iceberg.IdentityTransform{}, Schema, nil),
 	)
@@ -63,9 +77,11 @@ func testCreateTableWithPartitionSpec(t *testing.T, cfg Config) {
 	require.NoError(t, err)
 
 	loaded := tbl.Spec()
+	assert.Equal(t, iceberg.InitialPartitionSpecID, loaded.ID())
 	require.Equal(t, spec.NumFields(), loaded.NumFields(), "loaded spec should have the fields it was created with")
 	for i := range spec.NumFields() {
 		want, got := spec.Field(i), loaded.Field(i)
+		assert.Equal(t, iceberg.PartitionDataIDStart+i, got.FieldID)
 		assert.Equal(t, want.Name, got.Name)
 		assert.Equal(t, want.Transform, got.Transform)
 		assert.Equal(t, sourceName(t, Schema, want.SourceIDs), sourceName(t, tbl.Schema(), got.SourceIDs))
@@ -73,13 +89,13 @@ func testCreateTableWithPartitionSpec(t *testing.T, cfg Config) {
 }
 
 // testCreateTableWithSortOrder asserts that the sort order passed at create
-// time is the table's sort order on a fresh load, allowing for reassigned
-// order and source IDs.
+// time is the table's sort order on a fresh load, with a fresh order ID
+// assigned.
 func testCreateTableWithSortOrder(t *testing.T, cfg Config) {
 	ctx := context.Background()
 	cat := cfg.NewCatalog(t)
 
-	order, err := table.NewSortOrder(1, []table.SortField{
+	order, err := table.NewSortOrder(5, []table.SortField{
 		{SourceIDs: []int{4}, Transform: iceberg.IdentityTransform{}, Direction: table.SortASC, NullOrder: table.NullsFirst},
 		{SourceIDs: []int{3}, Transform: iceberg.BucketTransform{NumBuckets: 16}, Direction: table.SortDESC, NullOrder: table.NullsLast},
 	})
@@ -92,17 +108,15 @@ func testCreateTableWithSortOrder(t *testing.T, cfg Config) {
 
 	loaded := tbl.SortOrder()
 	require.False(t, loaded.IsUnsorted(), "loaded table should be sorted")
+	assert.Equal(t, table.InitialSortOrderID, loaded.OrderID())
 	require.Equal(t, order.Len(), loaded.Len(), "loaded sort order should have the fields it was created with")
 
-	want := make([]table.SortField, 0, order.Len())
-	for _, f := range order.Fields() {
-		want = append(want, f)
-	}
 	for i, got := range loaded.Fields() {
-		assert.Equal(t, want[i].Direction, got.Direction)
-		assert.Equal(t, want[i].NullOrder, got.NullOrder)
-		assert.Equal(t, want[i].Transform, got.Transform)
-		assert.Equal(t, sourceName(t, Schema, want[i].SourceIDs), sourceName(t, tbl.Schema(), got.SourceIDs))
+		want := order.Field(i)
+		assert.Equal(t, want.Direction, got.Direction)
+		assert.Equal(t, want.NullOrder, got.NullOrder)
+		assert.Equal(t, want.Transform, got.Transform)
+		assert.Equal(t, sourceName(t, Schema, want.SourceIDs), sourceName(t, tbl.Schema(), got.SourceIDs))
 	}
 }
 
