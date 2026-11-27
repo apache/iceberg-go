@@ -2513,6 +2513,21 @@ func commitPartitionedDataFile(t *testing.T, tbl *table.Table) (*table.Table, st
 	return tbl, dataPath
 }
 
+// commitDeletesErr stages dels in a row delta and commits the transaction,
+// returning the first error. Deletes for data files already on the branch
+// head are checked when the transaction commits.
+func commitDeletesErr(t *testing.T, tbl *table.Table, dels ...iceberg.DataFile) error {
+	t.Helper()
+
+	tx := tbl.NewTransaction()
+	if err := tx.NewRowDelta(nil).AddDeletes(dels...).Commit(t.Context()); err != nil {
+		return err
+	}
+	_, err := tx.Commit(t.Context())
+
+	return err
+}
+
 // Why: the spec requires a delete file to carry the partition of the data
 // file it references, and scans match deletion vectors by path only.
 // Condition: a DV for a committed data file in data=a declares data=b.
@@ -2522,7 +2537,8 @@ func TestRowDeltaDVPartitionMustMatchDataFile(t *testing.T) {
 		tbl, dataPath := commitPartitionedDataFile(t, newPartitionedRowDeltaTable(t, 3))
 
 		dv := buildPartitionedDV(t, tbl.Spec(), tbl.Location()+"/data/dv.puffin", dataPath, map[int]any{1000: "b"})
-		err := tbl.NewTransaction().NewRowDelta(nil).AddDeletes(dv).Commit(t.Context())
+		err := commitDeletesErr(t, tbl, dv)
+		require.ErrorIs(t, err, table.ErrInvalidOperation)
 		require.ErrorContains(t, err, "partition does not match")
 	})
 
@@ -2544,6 +2560,7 @@ func TestRowDeltaDVPartitionMustMatchDataFile(t *testing.T) {
 			AddRows(buildPartitionedDataFile(t, tbl.Spec(), dataPath, map[int]any{1000: "a"})).
 			AddDeletes(buildPartitionedDV(t, tbl.Spec(), tbl.Location()+"/data/dv.puffin", dataPath, map[int]any{1000: "b"})).
 			Commit(t.Context())
+		require.ErrorIs(t, err, table.ErrInvalidOperation)
 		require.ErrorContains(t, err, "partition does not match")
 	})
 }
@@ -2564,7 +2581,8 @@ func TestRowDeltaDVSpecMustMatchDataFileAfterEvolution(t *testing.T) {
 
 	dv := buildPartitionedDV(t, spec, tbl.Location()+"/data/dv.puffin", dataPath,
 		map[int]any{1000: "a", 1001: int64(1)})
-	err = tbl.NewTransaction().NewRowDelta(nil).AddDeletes(dv).Commit(t.Context())
+	err = commitDeletesErr(t, tbl, dv)
+	require.ErrorIs(t, err, table.ErrInvalidOperation)
 	require.ErrorContains(t, err, "uses partition spec 1")
 }
 
@@ -2607,7 +2625,8 @@ func TestRowDeltaDVDecimalPartitionComparedByValue(t *testing.T) {
 
 		dv := buildPartitionedDV(t, tbl.Spec(), tbl.Location()+"/data/dv.puffin", dataPath,
 			map[int]any{1000: iceberg.Decimal{Val: decimal128.FromI64(9999), Scale: 2}})
-		err := tbl.NewTransaction().NewRowDelta(nil).AddDeletes(dv).Commit(t.Context())
+		err := commitDeletesErr(t, tbl, dv)
+		require.ErrorIs(t, err, table.ErrInvalidOperation)
 		require.ErrorContains(t, err, "partition does not match")
 	})
 }
@@ -2623,9 +2642,8 @@ func TestRowDeltaV2PosDeletePartitionMustMatchReferencedDataFile(t *testing.T) {
 		tbl.Location()+"/data/pos-del.parquet", iceberg.ParquetFile, map[int]any{1000: "b"}, nil, nil, 5, 512)
 	require.NoError(t, err)
 
-	err = tbl.NewTransaction().NewRowDelta(nil).
-		AddDeletes(b.ReferencedDataFile(dataPath).Build()).
-		Commit(t.Context())
+	err = commitDeletesErr(t, tbl, b.ReferencedDataFile(dataPath).Build())
+	require.ErrorIs(t, err, table.ErrInvalidOperation)
 	require.ErrorContains(t, err, "partition does not match")
 }
 
@@ -2666,7 +2684,8 @@ func TestRowDeltaDVDatePartitionComparedByValue(t *testing.T) {
 
 		dv := buildPartitionedDV(t, tbl.Spec(), tbl.Location()+"/data/dv.puffin", dataPath,
 			map[int]any{1000: int32(19001)})
-		err := tbl.NewTransaction().NewRowDelta(nil).AddDeletes(dv).Commit(t.Context())
+		err := commitDeletesErr(t, tbl, dv)
+		require.ErrorIs(t, err, table.ErrInvalidOperation)
 		require.ErrorContains(t, err, "partition does not match")
 	})
 }
@@ -2691,6 +2710,32 @@ func TestRowDeltaV2PosDeleteScopedByBoundsMustMatchDataFile(t *testing.T) {
 		UpperBoundValues(map[int][]byte{filePath.ID: bound}).
 		Build()
 
-	err = tbl.NewTransaction().NewRowDelta(nil).AddDeletes(del).Commit(t.Context())
+	err = commitDeletesErr(t, tbl, del)
+	require.ErrorIs(t, err, table.ErrInvalidOperation)
 	require.ErrorContains(t, err, "partition does not match")
+}
+
+// Why: a delete scoped to one data file only by equal file_path bounds must
+// go through the same existence check as one that sets referenced_data_file.
+// Condition: such a delete names a data file that is not in the table.
+// Assertion: the transaction commit reports the missing data file.
+func TestRowDeltaV2PosDeleteScopedByBoundsRequiresLiveDataFile(t *testing.T) {
+	tbl, _ := commitPartitionedDataFile(t, newPartitionedRowDeltaTable(t, 2))
+	missing := tbl.Location() + "/data/data=a/missing.parquet"
+
+	filePath, ok := iceberg.PositionalDeleteSchema.FindFieldByName("file_path")
+	require.True(t, ok)
+	bound, err := iceberg.StringLiteral(missing).MarshalBinary()
+	require.NoError(t, err)
+
+	b, err := iceberg.NewDataFileBuilder(tbl.Spec(), iceberg.EntryContentPosDeletes,
+		tbl.Location()+"/data/pos-del.parquet", iceberg.ParquetFile, map[int]any{1000: "a"}, nil, nil, 5, 512)
+	require.NoError(t, err)
+	del := b.LowerBoundValues(map[int][]byte{filePath.ID: bound}).
+		UpperBoundValues(map[int][]byte{filePath.ID: bound}).
+		Build()
+
+	err = commitDeletesErr(t, tbl, del)
+	require.ErrorIs(t, err, table.ErrDataFilesMissing)
+	require.ErrorContains(t, err, missing)
 }

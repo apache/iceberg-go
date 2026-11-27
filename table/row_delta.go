@@ -24,7 +24,6 @@ import (
 	"maps"
 
 	"github.com/apache/iceberg-go"
-	iceberginternal "github.com/apache/iceberg-go/internal"
 	iceio "github.com/apache/iceberg-go/io"
 )
 
@@ -272,7 +271,7 @@ func (rd *RowDelta) Commit(ctx context.Context) error {
 		return err
 	}
 
-	if err := rd.validateDeletesMatchDataFiles(ctx, fs, meta); err != nil {
+	if err := rd.validateDeletesMatchAddedDataFiles(); err != nil {
 		return err
 	}
 
@@ -371,10 +370,10 @@ func (rd *RowDelta) Commit(ctx context.Context) error {
 }
 
 // referencedDataFiles returns the distinct data files that this delta's
-// position deletes name in referenced_data_file. A position delete that
-// leaves the field unset, such as a v2 file covering several data files,
-// names its targets only in its file_path column, which is not read here,
-// so those targets go unchecked.
+// position deletes target, named in referenced_data_file or in equal
+// file_path bounds (see referencedDataFilePath). A position delete that
+// covers several data files names its targets only in its file_path
+// column, which is not read here, so those targets go unchecked.
 func (rd *RowDelta) referencedDataFiles() []string {
 	var referenced []string
 	seen := make(map[string]struct{})
@@ -382,13 +381,13 @@ func (rd *RowDelta) referencedDataFiles() []string {
 		if f.ContentType() != iceberg.EntryContentPosDeletes {
 			continue
 		}
-		ref := iceberginternal.BorrowedDataFileReferencedDataFile(f)
-		if ref == nil || *ref == "" {
+		ref := referencedDataFilePath(f)
+		if ref == "" {
 			continue
 		}
-		if _, ok := seen[*ref]; !ok {
-			seen[*ref] = struct{}{}
-			referenced = append(referenced, *ref)
+		if _, ok := seen[ref]; !ok {
+			seen[ref] = struct{}{}
+			referenced = append(referenced, ref)
 		}
 	}
 
@@ -498,16 +497,10 @@ func (rd *RowDelta) validateAddedDeletionVectors() error {
 	return nil
 }
 
-// validateDeletesMatchDataFiles rejects an added position delete file
-// scoped to a single data file, a deletion vector or a v2 position delete
-// that names it in referenced_data_file or in equal file_path bounds, when
-// its partition spec or partition differs from that data file's. The spec requires them to match. Scans
-// match deletion vectors by path alone, so a mismatched DV would otherwise
-// commit and be applied, and a mismatched v2 position delete would commit
-// a table whose scans fail. A reference to a data file that is neither
-// added here nor live in the current snapshot is left to the conflict
-// checks.
-func (rd *RowDelta) validateDeletesMatchDataFiles(ctx context.Context, fs iceio.IO, meta *MetadataBuilder) error {
+// deletesByDataFile groups this delta's position deletes that target a
+// single data file, a deletion vector or a v2 position delete that names it
+// in referenced_data_file or in equal file_path bounds, by that file's path.
+func (rd *RowDelta) deletesByDataFile() map[string][]iceberg.DataFile {
 	byRef := make(map[string][]iceberg.DataFile)
 	for _, f := range rd.delFiles {
 		if f.ContentType() != iceberg.EntryContentPosDeletes {
@@ -517,60 +510,53 @@ func (rd *RowDelta) validateDeletesMatchDataFiles(ctx context.Context, fs iceio.
 			byRef[ref] = append(byRef[ref], f)
 		}
 	}
+
+	return byRef
+}
+
+// validateDeletesMatchAddedDataFiles rejects a position delete scoped to a
+// data file added in the same delta when their partition spec or partition
+// differ. Deletes for data files already on the branch head are checked by
+// validateDataFilesExist when the transaction commits.
+func (rd *RowDelta) validateDeletesMatchAddedDataFiles() error {
+	byRef := rd.deletesByDataFile()
 	if len(byRef) == 0 {
 		return nil
 	}
-
-	check := func(data iceberg.DataFile) error {
-		dels, ok := byRef[data.FilePath()]
-		if !ok {
-			return nil
-		}
-		delete(byRef, data.FilePath())
-		dataKey, err := canonicalPartitionKey(data.SpecID(), dataFilePartition(data))
-		if err != nil {
-			return fmt.Errorf("building partition key for data file %s: %w", data.FilePath(), err)
-		}
-		for _, del := range dels {
-			if del.SpecID() != data.SpecID() {
-				return fmt.Errorf("delete file %s uses partition spec %d, but its referenced data file %s uses partition spec %d; write the delete file with the data file's spec",
-					del.FilePath(), del.SpecID(), data.FilePath(), data.SpecID())
-			}
-			delKey, err := canonicalPartitionKey(del.SpecID(), dataFilePartition(del))
-			if err != nil {
-				return fmt.Errorf("building partition key for delete file %s: %w", del.FilePath(), err)
-			}
-			if delKey != dataKey {
-				return fmt.Errorf("delete file %s partition does not match its referenced data file %s",
-					del.FilePath(), data.FilePath())
-			}
-		}
-
-		return nil
-	}
-
 	for _, df := range rd.dataFiles {
-		if err := check(df); err != nil {
+		if err := validateDeletesMatchDataFile(df, byRef[df.FilePath()]); err != nil {
 			return err
 		}
-	}
-	if len(byRef) == 0 {
-		return nil
 	}
 
-	snap := rd.txn.planningSnapshot(meta)
-	if snap == nil {
+	return nil
+}
+
+// validateDeletesMatchDataFile rejects a delete in dels, each scoped to
+// data, whose partition spec or partition differs from data's. The spec
+// requires them to match. Scans match deletion vectors by path alone, so a
+// mismatched DV would otherwise commit and be applied, and a mismatched v2
+// position delete would commit a table whose scans fail.
+func validateDeletesMatchDataFile(data iceberg.DataFile, dels []iceberg.DataFile) error {
+	if len(dels) == 0 {
 		return nil
 	}
-	for entry, err := range snap.entries(ctx, fs, iceberg.ManifestContentData, true) {
+	dataKey, err := canonicalPartitionKey(data.SpecID(), dataFilePartition(data))
+	if err != nil {
+		return fmt.Errorf("building partition key for data file %s: %w", data.FilePath(), err)
+	}
+	for _, del := range dels {
+		if del.SpecID() != data.SpecID() {
+			return fmt.Errorf("%w: delete file %s uses partition spec %d, but its referenced data file %s uses partition spec %d; write the delete file with the data file's spec",
+				ErrInvalidOperation, del.FilePath(), del.SpecID(), data.FilePath(), data.SpecID())
+		}
+		delKey, err := canonicalPartitionKey(del.SpecID(), dataFilePartition(del))
 		if err != nil {
-			return err
+			return fmt.Errorf("building partition key for delete file %s: %w", del.FilePath(), err)
 		}
-		if err := check(entry.DataFile()); err != nil {
-			return err
-		}
-		if len(byRef) == 0 {
-			break
+		if delKey != dataKey {
+			return fmt.Errorf("%w: delete file %s partition does not match its referenced data file %s",
+				ErrInvalidOperation, del.FilePath(), data.FilePath())
 		}
 	}
 
@@ -843,7 +829,7 @@ func (rd *RowDelta) validate(cc *conflictContext, referenced []string) error {
 	}
 
 	if len(referenced) > 0 {
-		if err := validateDataFilesExist(cc, referenced); err != nil {
+		if err := validateDataFilesExistMatchingDeletes(cc, referenced, rd.deletesByDataFile()); err != nil {
 			return err
 		}
 	}

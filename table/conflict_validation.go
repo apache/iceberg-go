@@ -571,6 +571,14 @@ func (c *conflictContext) forEachChangedEntryInSnapshot(
 // len(referencedPaths); callers MUST batch referenced paths into a
 // single call rather than calling once per path.
 func validateDataFilesExist(cc *conflictContext, referencedPaths []string) error {
+	return validateDataFilesExistMatchingDeletes(cc, referencedPaths, nil)
+}
+
+// validateDataFilesExistMatchingDeletes is validateDataFilesExist that also
+// checks each live data file it finds against the added delete files deletes
+// scopes to it (keyed by data file path) with validateDeletesMatchDataFile,
+// so the partition check shares the same manifest walk.
+func validateDataFilesExistMatchingDeletes(cc *conflictContext, referencedPaths []string, deletes map[string][]iceberg.DataFile) error {
 	if len(referencedPaths) == 0 {
 		return nil
 	}
@@ -602,8 +610,11 @@ func validateDataFilesExist(cc *conflictContext, referencedPaths []string) error
 			if entry.Status() == iceberg.EntryStatusDELETED {
 				continue
 			}
-			path := entry.DataFile().FilePath()
-			delete(needed, path)
+			data := entry.DataFile()
+			if err := validateDeletesMatchDataFile(data, deletes[data.FilePath()]); err != nil {
+				return err
+			}
+			delete(needed, data.FilePath())
 		}
 		if len(needed) == 0 {
 			return nil

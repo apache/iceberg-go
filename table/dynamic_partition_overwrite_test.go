@@ -600,7 +600,7 @@ func TestDynamicPartitionOverwriteKeepsDeleteForSurvivingOldSpecData(t *testing.
 	posDelete := newTestPosDeleteFileForSpec(t, currentSpec, "file://old-spec-delete.parquet",
 		nullPartition, oldData.FilePath())
 	addDelete := New(Identifier{"db", "tbl"}, evolved, "metadata.json", fsF, nil).NewTransaction()
-	commitLegacyPosDelete(t, addDelete, fs, posDelete)
+	commitPosDeleteSkippingRowDelta(t, addDelete, fs, posDelete)
 	withDelete, err := addDelete.meta.Build()
 	require.NoError(t, err)
 
@@ -773,7 +773,7 @@ func TestDynamicPartitionOverwritePrunedKeepsDeleteForSurvivingOldSpecData(t *te
 	posDelete := newTestPosDeleteFileForSpec(t, currentSpec, "file://old-spec-delete.parquet",
 		nullPartition, oldData.FilePath())
 	addDelete := New(Identifier{"db", "tbl"}, evolved, "metadata.json", fsF, nil).NewTransaction()
-	commitLegacyPosDelete(t, addDelete, fs, posDelete)
+	commitPosDeleteSkippingRowDelta(t, addDelete, fs, posDelete)
 	withDelete, err := addDelete.meta.Build()
 	require.NoError(t, err)
 
@@ -801,12 +801,13 @@ func TestDynamicPartitionOverwritePrunedKeepsDeleteForSurvivingOldSpecData(t *te
 		"deletes for surviving old-spec data must not be dropped")
 }
 
-// commitLegacyPosDelete commits a position delete through the snapshot
-// producer, skipping RowDelta's validation. v2 merge-on-read deletes written
-// after spec evolution store an old-spec data file's delete under the current
-// spec with a null partition value; RowDelta now rejects that layout, but
-// tables written before that check still contain it.
-func commitLegacyPosDelete(t *testing.T, txn *Transaction, fs iceio.WriteFileIO, del iceberg.DataFile) {
+// commitPosDeleteSkippingRowDelta commits a position delete through the
+// snapshot producer, skipping RowDelta's validation. The fixtures above store
+// an old-spec data file's delete under the current spec with a null partition
+// value. No current iceberg-go writer produces that layout and RowDelta now
+// rejects it, but RowDelta accepted it before that check, so tables committed
+// earlier may contain it.
+func commitPosDeleteSkippingRowDelta(t *testing.T, txn *Transaction, fs iceio.WriteFileIO, del iceberg.DataFile) {
 	t.Helper()
 
 	sp := newFastAppendFilesProducer(OpDelete, txn, fs, nil, nil)
