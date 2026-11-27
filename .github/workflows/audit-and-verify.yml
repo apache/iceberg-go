@@ -21,7 +21,9 @@ on:
     branches:
       - '**'
       - '!dependabot/**'
+      - '!gh-readonly-queue/**'
   pull_request:
+  merge_group:
 
 env: # Set default VERSION and RC to simulate inputs for push to branch
   VERSION: 0.0.1

@@ -22,6 +22,7 @@ on:
     branches:
       - 'main'
   pull_request:
+  merge_group:
 
 concurrency:
   group: ${{ github.repository }}-${{ github.head_ref || github.sha }}-${{ github.workflow }}
@@ -170,3 +171,17 @@ jobs:
           ${{ github.workspace }}/.gocache/mod
           ${{ github.workspace }}/.gocache/build
         key: go-cross-s390x-${{ hashFiles('go.sum') }}
+
+  go-ci-required:
+    if: ${{ always() }}
+    needs: [lint-and-test, cross-compile]
+    runs-on: ubuntu-latest
+    steps:
+    - name: Verify Go CI jobs succeeded
+      env:
+        RESULTS: ${{ join(needs.*.result, ' ') }}
+      run: |
+        read -ra results <<< "$RESULTS"
+        for result in "${results[@]}"; do
+          test "$result" = "success"
+        done

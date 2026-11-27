@@ -22,6 +22,7 @@ on:
     branches:
       - 'main'
   pull_request:
+  merge_group:
 
 concurrency:
   group: ${{ github.repository }}-${{ github.head_ref || github.sha }}-${{ github.workflow }}
@@ -107,3 +108,17 @@ jobs:
             ${{ github.workspace }}/.gocache/mod
             ${{ github.workspace }}/.gocache/build
           key: go-integration-${{ hashFiles('go.sum') }}
+
+  go-integration-required:
+    if: ${{ always() }}
+    needs: [integration-test]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify Go integration jobs succeeded
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          read -ra results <<< "$RESULTS"
+          for result in "${results[@]}"; do
+            test "$result" = "success"
+          done
