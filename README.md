@@ -269,7 +269,7 @@ local scans.
 | Load View                   |  X   |  X   |        |  X   |        |          |
 | List View                   |  X   |  X   |        |  X   |        |          |
 | Drop View                   |  X   |  X   |        |  X   |        |          |
-| Rename View                 |  X   |      |        |  X   |        |          |
+| Rename View                 |  X   |  X   |        |  X   |        |          |
 | Update View                 |  X   |  X   |        |  X   |        |          |
 | Check View Exists           |  X   |  X   |        |  X   |        |          |
 
