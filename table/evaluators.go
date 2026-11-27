@@ -1310,7 +1310,11 @@ func (m *inclusiveMetricsEval) VisitEqual(t iceberg.BoundTerm, lit iceberg.Liter
 	return rowsMightMatch
 }
 
-func (m *inclusiveMetricsEval) VisitNotEqual(iceberg.BoundTerm, iceberg.Literal) bool {
+func (m *inclusiveMetricsEval) VisitNotEqual(t iceberg.BoundTerm, lit iceberg.Literal) bool {
+	if value := m.findUniqueValue(t); value != nil && getCmpLiteral(value)(value, lit) == 0 {
+		return rowsCannotMatch
+	}
+
 	return rowsMightMatch
 }
 
@@ -1399,11 +1403,61 @@ func (m *inclusiveMetricsEval) visitIn(
 	return rowsMightMatch
 }
 
-func (m *inclusiveMetricsEval) VisitNotIn(iceberg.BoundTerm, iceberg.Set[iceberg.Literal]) bool {
+func (m *inclusiveMetricsEval) VisitNotIn(t iceberg.BoundTerm, s iceberg.Set[iceberg.Literal]) bool {
 	// because the bounds are not necessarily a min or max value, this cannot be
 	// answered using them. notIn(col, {X, ...}) with (XX, Y) doesn't guarantee that
-	// X is a value in col
+	// X is a value in col, unless every row holds the same value.
+	if value := m.findUniqueValue(t); value != nil && s.Contains(value) {
+		return rowsCannotMatch
+	}
+
 	return rowsMightMatch
+}
+
+// findUniqueValue returns the value every row of the file holds for t, or nil if
+// the stats don't prove that the column has a single value.
+func (m *inclusiveMetricsEval) findUniqueValue(t iceberg.BoundTerm) iceberg.Literal {
+	if _, ok := t.(iceberg.BoundExtract); ok {
+		return nil
+	}
+
+	field := t.Ref().Field()
+	if m.mayContainNull(field.ID) {
+		return nil
+	}
+
+	lowerBound, upperBound := m.lowerBounds[field.ID], m.upperBounds[field.ID]
+	if lowerBound == nil || upperBound == nil || !slices.Equal(lowerBound, upperBound) {
+		return nil
+	}
+
+	switch field.Type.(type) {
+	case iceberg.GeometryType, iceberg.GeographyType:
+		return nil
+	case iceberg.Float32Type, iceberg.Float64Type:
+		if count, ok := m.nanCounts[field.ID]; !ok || count != 0 {
+			return nil
+		}
+	}
+
+	value, err := iceberg.LiteralFromBytes(field.Type, lowerBound)
+	if err != nil {
+		return nil
+	}
+
+	// Keep zero floats for the row filter, which can tell -0 from +0.
+	switch v := value.(type) {
+	case iceberg.Float32Literal:
+		if v == 0 || m.isNan(v) {
+			return nil
+		}
+	case iceberg.Float64Literal:
+		if v == 0 || m.isNan(v) {
+			return nil
+		}
+	}
+
+	return value
 }
 
 func (m *inclusiveMetricsEval) VisitStartsWith(t iceberg.BoundTerm, lit iceberg.Literal) bool {
