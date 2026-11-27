@@ -34,6 +34,7 @@ import (
 	iceio "github.com/apache/iceberg-go/io"
 	tblutils "github.com/apache/iceberg-go/table/internal"
 	"github.com/google/uuid"
+	"github.com/twmb/avro"
 	"github.com/twmb/avro/ocf"
 )
 
@@ -271,7 +272,11 @@ func partitionStatisticsEmbeddedManifest(ctx context.Context, fs iceio.IO, manif
 		return nil, err
 	}
 	defer f.Close()
-	ocfReader, err := ocf.NewReader(f)
+	// Java allows non-ASCII letters and digits in an Avro name (it tests
+	// each UTF-16 char with Character.isLetter/isLetterOrDigit), so a
+	// Java-written header can name a partition field with a character that
+	// the strict Avro name rule rejects.
+	ocfReader, err := ocf.NewReader(f, ocf.WithSchemaOpts(avro.WithLaxNames(nil)))
 	if err != nil {
 		return nil, fmt.Errorf("read embedded manifest %q: %w", manifest.FilePath(), err)
 	}

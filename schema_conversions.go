@@ -19,6 +19,7 @@ package iceberg
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/apache/iceberg-go/internal"
 	"github.com/twmb/avro"
@@ -69,7 +70,7 @@ func partitionTypeToAvroSchema(t *StructType) (*avro.Schema, error) {
 		}
 
 		fields[i] = avro.SchemaField{
-			Name:  f.Name,
+			Name:  avroCompatibleName(f.Name),
 			Type:  node,
 			Props: internal.WithFieldID(f.ID),
 		}
@@ -82,4 +83,30 @@ func partitionTypeToAvroSchema(t *StructType) (*avro.Schema, error) {
 	}
 
 	return node.Schema()
+}
+
+// avroCompatibleName returns name as a valid Avro name. For an ASCII name it
+// matches Java's AvroSchemaUtil.makeCompatibleName: a character Avro does not
+// allow becomes "_x" and its code point in upper-case hex, and a digit that
+// starts the name gets a "_" before it. Unlike Java and makeCompatibleName,
+// it also escapes a non-ASCII letter, because twmb/avro accepts only names
+// that match [A-Za-z_][A-Za-z0-9_]*. A partition field name such as
+// "event.ts_day", which GeneratePartitionFieldName makes for a nested source
+// column, is not a valid Avro name. Readers find partition fields by field
+// ID, so the name is only a label.
+func avroCompatibleName(name string) string {
+	var b strings.Builder
+	for i, r := range name {
+		switch {
+		case r == '_' || 'a' <= r && r <= 'z' || 'A' <= r && r <= 'Z' || i > 0 && '0' <= r && r <= '9':
+			b.WriteRune(r)
+		case '0' <= r && r <= '9':
+			b.WriteByte('_')
+			b.WriteRune(r)
+		default:
+			fmt.Fprintf(&b, "_x%X", r)
+		}
+	}
+
+	return b.String()
 }

@@ -30,6 +30,7 @@ import (
 	"math"
 	"math/big"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -1937,10 +1938,8 @@ func (m *ManifestTestSuite) TestReadManifestListIncompleteSchema() {
 }
 
 func (m *ManifestTestSuite) TestReadManifestIncompleteSchema() {
-	// Verify that reading a manifest entry whose embedded schema references
-	// an undefined named type ("r2" without its definition) fails. A stray
-	// cache or cross-file resolver could mask this by reusing a definition
-	// from a previously-read file.
+	// Verify that reading a manifest entry whose embedded schema is
+	// incomplete returns an error.
 	var buf bytes.Buffer
 	partitionSpec := NewPartitionSpecID(1)
 	snapshotID := int64(12345678)
@@ -1979,12 +1978,8 @@ func (m *ManifestTestSuite) TestReadManifestIncompleteSchema() {
 	m.NoError(err)
 	m.Len(entries, 1)
 
-	// This schema is that of a v2 manifest file, except that it refers to
-	// a type named "r2" for the "data_file" field, instead of actually
-	// including the definition of the "data_file" record type.
-	// This omission should result in an error. But if a schema cache were
-	// in use, this could get resolved based on a type of the same name read
-	// from a file that defined it.
+	// This schema is that of a v2 manifest file, except for its "data_file"
+	// field, which each case below fills in.
 	incompleteSchema := `
 	{
 		"name": "manifest_entry",
@@ -2018,12 +2013,7 @@ func (m *ManifestTestSuite) TestReadManifestIncompleteSchema() {
 					"long"
 				],
 				"field-id": 4
-			},
-			{
-				"name": "data_file",
-				"type": "r2",
-				"field-id": 2
-			}
+			}%s
 		]
 	}`
 
@@ -2035,23 +2025,58 @@ func (m *ManifestTestSuite) TestReadManifestIncompleteSchema() {
 	m.NoError(err)
 	sch, err := internal.NewManifestEntrySchema(partitionSchema, 2)
 	m.NoError(err)
-	wr, err := ocf.NewWriter(
-		&buf, sch,
-		ocf.WithSchema(incompleteSchema),
-		ocf.WithMetadata(map[string][]byte{
-			"format-version": {'2'},
-			// TODO: spec says other things are required, like schema and partition-spec info,
-			//       but this package currently only looks at this one value when reading...
-		}),
-	)
-	m.NoError(err)
-	for _, entry := range entries {
-		m.NoError(wr.Encode(entry))
-	}
+	for _, tt := range []struct {
+		name          string
+		dataFile      string
+		errorContains string
+	}{
+		// The field refers to a type named "r2" instead of including the
+		// definition of the "data_file" record type. If a schema cache were
+		// in use, this could get resolved based on a type of the same name
+		// read from a file that defined it.
+		{"undefined data_file type", `, {"name": "data_file", "type": "r2", "field-id": 2}`, `"r2"`},
+		// A manifest list or another Avro file that is not a manifest has no
+		// data_file field. A corrupt or foreign file can have a data_file
+		// record without a partition field.
+		{"no data_file", ``, "does not contain a data_file field"},
+		{
+			"no partition",
+			`, {"name": "data_file", "type": {"type": "record", "name": "r2", "fields": [{"name": "file_path", "type": "string", "field-id": 100}]}, "field-id": 2}`,
+			"does not contain a partition field",
+		},
+		// twmb/avro accepts a union with no branches, which no value can
+		// match.
+		{
+			"empty union partition field",
+			`, {"name": "data_file", "type": {"type": "record", "name": "r2", "fields": [{"name": "partition", "type": {"type": "record", "name": "r102", "fields": [{"name": "x", "type": [], "field-id": 1000}]}, "field-id": 102}]}, "field-id": 2}`,
+			"is an empty union",
+		},
+	} {
+		m.Run(tt.name, func() {
+			var out bytes.Buffer
+			wr, err := ocf.NewWriter(
+				&out, sch,
+				ocf.WithSchema(fmt.Sprintf(incompleteSchema, tt.dataFile)),
+				ocf.WithMetadata(map[string][]byte{
+					"format-version": {'2'},
+					"content":        []byte("data"),
+					// TODO: spec says other things are required, like schema
+					// and partition-spec info, but this package requires only
+					// these two values when opening a manifest...
+				}),
+			)
+			m.NoError(err)
+			for _, entry := range entries {
+				m.NoError(wr.Encode(entry))
+			}
 
-	// This should fail because the file's schema is incomplete.
-	_, err = ReadManifest(file, &buf, false)
-	m.Error(err)
+			// This should fail because the file's schema is incomplete.
+			_, err = ReadManifest(file, bytes.NewReader(out.Bytes()), false)
+			m.ErrorContains(err, tt.errorContains)
+			_, err = NewManifestReaderWithProjection(file, bytes.NewReader(out.Bytes()), ManifestEntryProjection{})
+			m.ErrorContains(err, tt.errorContains)
+		})
+	}
 }
 
 func (m *ManifestTestSuite) TestManifestEntriesV2() {
@@ -3200,70 +3225,155 @@ func TestAvroEncodePartitionDataUsesDeclaredDecimalFixedSize(t *testing.T) {
 	}
 }
 
-func TestManifestRoundTripDecimalPartitionUsesSignedFixedSize(t *testing.T) {
-	schema := NewSchema(
-		0,
-		NestedField{ID: 1, Name: "price", Type: MustDecimalTypeOf(10, 2)},
-	)
-	partitionSpec := NewPartitionSpecID(
-		1,
-		PartitionField{FieldID: 1000, SourceIDs: []int{1}, Name: "price", Transform: IdentityTransform{}},
-	)
-	partitionValue := Decimal{Val: decimal128.FromI64(-1), Scale: 2}
-	dataFileBuilder, err := NewDataFileBuilder(
-		partitionSpec,
-		EntryContentData,
-		"s3://bucket/ns/table/data/decimal-partition.parquet",
-		ParquetFile,
-		map[int]any{1000: partitionValue},
-		map[int]string{1000: atype.Decimal},
-		map[int]int{1000: internal.DecimalRequiredBytes(10)},
-		1,
-		1024,
-	)
-	if err != nil {
-		t.Fatal(err)
+// TestManifestRoundTripFixedPartitions round-trips partition values whose Avro
+// type is a fixed: a negative decimal, which tests the signed fixed encoding,
+// and two fields of one fixed type, where the second field refers to the
+// first's named type. A row with names gives partition field names that are
+// not valid Avro names.
+func TestManifestRoundTripFixedPartitions(t *testing.T) {
+	dec := func(v int64, scale int) Decimal { return Decimal{Val: decimal128.FromI64(v), Scale: scale} }
+	ua, ub := uuid.UUID{1, 2, 3}, uuid.UUID{4, 5, 6}
+	for _, tt := range []struct {
+		name   string
+		types  []Type   // one source column and identity partition field per type
+		values []any    // the partition value of each field, which reads back the same
+		names  []string // the partition field names, or c0, c1, ... when nil
+	}{
+		{"decimal", []Type{MustDecimalTypeOf(10, 2)}, []any{dec(-1, 2)}, nil},
+		{"two decimals of different precision", []Type{MustDecimalTypeOf(10, 2), MustDecimalTypeOf(20, 4)}, []any{dec(-1, 2), dec(12345, 4)}, nil},
+		{"two decimals of one precision and scale", []Type{MustDecimalTypeOf(10, 2), MustDecimalTypeOf(10, 2)}, []any{dec(-1, 2), dec(7, 2)}, nil},
+		{"two uuids", []Type{UUIDType{}, UUIDType{}}, []any{ua, ub}, nil},
+		{
+			"partition names that are not Avro names",
+			[]Type{MustDecimalTypeOf(10, 2), UUIDType{}, MustDecimalTypeOf(10, 2)},
+			[]any{dec(-1, 2), ua, dec(7, 2)},
+			[]string{"event.ts_day", "event-id", "2nd"},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var fields []NestedField
+			var partitionFields []PartitionField
+			values := make(map[int]any)
+			for i, typ := range tt.types {
+				name := fmt.Sprintf("c%d", i)
+				partitionName := name
+				if tt.names != nil {
+					partitionName = tt.names[i]
+				}
+				fields = append(fields, NestedField{ID: i + 1, Name: name, Type: typ})
+				partitionFields = append(partitionFields, PartitionField{FieldID: 1000 + i, SourceIDs: []int{i + 1}, Name: partitionName, Transform: IdentityTransform{}})
+				values[1000+i] = tt.values[i]
+			}
+			schema := NewSchema(0, fields...)
+			partitionSpec := NewPartitionSpecID(1, partitionFields...)
+			dataFileBuilder, err := NewDataFileBuilder(
+				partitionSpec,
+				EntryContentData,
+				"s3://bucket/ns/table/data/fixed-partition.parquet",
+				ParquetFile,
+				values,
+				nil,
+				nil,
+				1,
+				1024,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			snapshotID := int64(1234)
+			seqNum := int64(1)
+			entry := NewManifestEntry(EntryStatusADDED, &snapshotID, &seqNum, &seqNum, dataFileBuilder.Build())
+
+			var buf bytes.Buffer
+			file, err := WriteManifest(
+				"s3://bucket/ns/table/metadata/fixed-manifest.avro",
+				&buf,
+				2,
+				partitionSpec,
+				schema,
+				snapshotID,
+				[]ManifestEntry{entry},
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			entries, err := ReadManifest(file, bytes.NewReader(buf.Bytes()), false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(entries) != 1 {
+				t.Fatalf("ReadManifest returned %d entries, want 1", len(entries))
+			}
+			partition := entries[0].DataFile().Partition()
+			for i, want := range tt.values {
+				got := partition[1000+i]
+				switch want := want.(type) {
+				case Decimal:
+					if d, ok := got.(DecimalLiteral); !ok || !d.Equals(DecimalLiteral(want)) {
+						t.Errorf("Partition()[%d] = %T %v, want DecimalLiteral %v", 1000+i, got, got, want)
+					}
+				default:
+					if got != want {
+						t.Errorf("Partition()[%d] = %T %v, want %T %v", 1000+i, got, got, want, want)
+					}
+				}
+			}
+		})
 	}
+}
 
-	snapshotID := int64(1234)
-	seqNum := int64(1)
-	entry := NewManifestEntry(
-		EntryStatusADDED,
-		&snapshotID,
-		&seqNum,
-		&seqNum,
-		dataFileBuilder.Build(),
-	)
+// TestReadManifestNonASCIIPartitionName reads a header that names a partition
+// field with a non-ASCII letter. Java allows non-ASCII letters and digits in
+// an Avro name (it tests each UTF-16 char with
+// Character.isLetter/isLetterOrDigit), and the strict Avro name rule rejects
+// such a name.
+func TestReadManifestNonASCIIPartitionName(t *testing.T) {
+	const name = "café"
+	spec := NewPartitionSpecID(1,
+		PartitionField{FieldID: 1000, SourceIDs: []int{1}, Name: name, Transform: IdentityTransform{}})
+	schema := NewSchema(0, NestedField{ID: 1, Name: name, Type: PrimitiveTypes.Int32})
+	builder, err := NewDataFileBuilder(spec, EntryContentData, "data.parquet", ParquetFile,
+		map[int]any{1000: int32(7)}, nil, nil, 1, 128)
+	require.NoError(t, err)
+	snapshotID, seqNum := int64(5), int64(6)
+	entry := NewManifestEntry(EntryStatusADDED, &snapshotID, &seqNum, &seqNum, builder.Build())
 
+	// The schema helpers parse names strictly, so build the schema with a
+	// placeholder name and rename the field in the header JSON.
+	partNode := avro.SchemaNode{Type: atype.Record, Name: "r102", Fields: []avro.SchemaField{
+		{Name: "placeholder", Type: internal.NullableNode(internal.IntNode), Props: internal.WithFieldID(1000)},
+	}}
+	partSchema, err := partNode.Schema()
+	require.NoError(t, err)
+	strictSchema, err := internal.NewManifestEntrySchema(partSchema, 2)
+	require.NoError(t, err)
+	entrySchema, err := avro.Parse(strings.Replace(strictSchema.String(), `"placeholder"`, `"`+name+`"`, 1),
+		avro.WithLaxNames(nil))
+	require.NoError(t, err)
+
+	mw := ManifestWriter{version: 2, spec: spec, schema: schema, content: ManifestContentData}
+	metadata, err := mw.meta()
+	require.NoError(t, err)
 	var buf bytes.Buffer
-	file, err := WriteManifest(
-		"s3://bucket/ns/table/metadata/decimal-manifest.avro",
-		&buf,
-		2,
-		partitionSpec,
-		schema,
-		snapshotID,
-		[]ManifestEntry{entry},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
+	writer, err := ocf.NewWriter(&buf, entrySchema, ocf.WithMetadata(metadata))
+	require.NoError(t, err)
+	require.NoError(t, writer.Encode(entry))
+	require.NoError(t, writer.Close())
 
+	file := &manifestFile{version: 2, SpecID: 1, Content: ManifestContentData}
 	entries, err := ReadManifest(file, bytes.NewReader(buf.Bytes()), false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(entries) != 1 {
-		t.Fatalf("ReadManifest returned %d entries, want 1", len(entries))
-	}
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	assert.Equal(t, map[int]any{1000: int32(7)}, entries[0].DataFile().Partition())
 
-	got, ok := entries[0].DataFile().Partition()[1000].(DecimalLiteral)
-	if !ok {
-		t.Fatalf("Partition()[1000] type = %T, want DecimalLiteral", entries[0].DataFile().Partition()[1000])
-	}
-	if want := DecimalLiteral(partitionValue); !got.Equals(want) {
-		t.Fatalf("Partition()[1000] = %v, want %v", got, want)
-	}
+	reader, err := NewManifestReaderWithProjection(file, bytes.NewReader(buf.Bytes()), ManifestEntryProjection{})
+	require.NoError(t, err)
+	projected, err := reader.ReadEntry()
+	require.NoError(t, err)
+	require.NoError(t, reader.Close())
+	assert.Equal(t, map[int]any{1000: int32(7)}, projected.DataFile().Partition())
 }
 
 func TestManifests(t *testing.T) {

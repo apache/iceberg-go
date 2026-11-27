@@ -26,12 +26,7 @@ import (
 
 // validateAvroReadSchema checks unsafe unions and limits schema depth. Nested
 // records, lists and maps are supported by the twmb/avro Arrow conversion.
-func validateAvroReadSchema(schemaJSON string) error {
-	schema, err := avro.Parse(schemaJSON)
-	if err != nil {
-		return fmt.Errorf("%w: parse Avro writer schema: %v", iceberg.ErrInvalidSchema, err)
-	}
-
+func validateAvroReadSchema(schema *avro.Schema) error {
 	return validateAvroReadNode(*schema.Root().ExpandReferences(), false, false)
 }
 

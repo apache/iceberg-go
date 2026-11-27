@@ -19,7 +19,6 @@ package iceberg
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"iter"
 	"slices"
@@ -129,13 +128,11 @@ func projectedManifestEntrySchema(
 	// copy intentionally shares immutable Props and Aliases with the writer.
 	projectedRoot := *root
 	projectedRoot.Fields = slices.Clone(root.Fields)
-	dataFileFound := false
 	for i := range projectedRoot.Fields {
 		if projectedRoot.Fields[i].Name != "data_file" {
 			continue
 		}
 
-		dataFileFound = true
 		dataFile := projectedRoot.Fields[i].Type
 		if dataFile.Type != "record" {
 			return nil, fmt.Errorf("manifest entry data_file has unexpected Avro type %q", dataFile.Type)
@@ -152,11 +149,10 @@ func projectedManifestEntrySchema(
 
 		break
 	}
-	if !dataFileFound {
-		return nil, errors.New("manifest entry schema does not contain a data_file field")
-	}
 
-	projected, err := projectedRoot.Schema()
+	// The writer schema came from a lax parse of the header, so its names
+	// need the same option to parse again.
+	projected, err := projectedRoot.Schema(avro.WithLaxNames(nil))
 	if err != nil {
 		return nil, fmt.Errorf("build projected manifest entry schema: %w", err)
 	}
