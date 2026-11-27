@@ -425,7 +425,7 @@ func (u *UpdateSchema) addColumn(path []string, fieldType iceberg.Type, doc stri
 		return fmt.Errorf("failed to assign field id: %w", err)
 	}
 	u.adds[parentID] = append(u.adds[parentID], sch.Field(0))
-	u.addedNameToID[fullName] = sch.Field(0).ID
+	u.addedNameToID[u.addedNameKey(fullName)] = sch.Field(0).ID
 
 	return nil
 }
@@ -497,9 +497,15 @@ func (u *UpdateSchema) updateColumn(path []string, update ColumnUpdate) error {
 
 	fullName := strings.Join(path, ".")
 
-	field, ok := u.findField(fullName)
+	field, added, ok := u.findFieldForUpdate(fullName)
 	if !ok {
 		return fmt.Errorf("field not found: %s", fullName)
+	}
+
+	// As in Java, a column added in this update can't be renamed in the same
+	// update. This covers both RenameColumn and UpdateColumn with Name set.
+	if added != nil && update.Name.Valid {
+		return fmt.Errorf("cannot rename a column added in the same update: %s", fullName)
 	}
 
 	if u.isDeleted(field.ID) {
@@ -546,8 +552,12 @@ func (u *UpdateSchema) updateColumn(path []string, update ColumnUpdate) error {
 	}
 
 	if update.Required.Valid {
+		// As in Java, a column added in this update with an initial default
+		// can be made required without allowIncompatibleChanges: no existing
+		// row can be null, since existing rows read the default.
+		isDefaultedAdd := added != nil && field.InitialDefault != nil
 		if field.Required != update.Required.Val {
-			if !u.allowIncompatibleChanges && update.Required.Val {
+			if !u.allowIncompatibleChanges && update.Required.Val && !isDefaultedAdd {
 				return fmt.Errorf("cannot change column nullability from optional to required: %s", fullName)
 			}
 		}
@@ -570,13 +580,17 @@ func (u *UpdateSchema) updateColumn(path []string, update ColumnUpdate) error {
 		}
 	}
 
-	if _, ok := u.updates[parentID]; !ok {
-		u.updates[parentID] = make(map[int]iceberg.NestedField)
-	}
-
-	updatedField, ok := u.updates[parentID][field.ID]
-	if !ok {
-		updatedField = field
+	// A field added in this update is changed in place in u.adds: the
+	// visitor appends added fields as they are and never applies u.updates
+	// to them. The field from u.adds already holds any earlier change.
+	updatedField := field
+	if added == nil {
+		if _, ok := u.updates[parentID]; !ok {
+			u.updates[parentID] = make(map[int]iceberg.NestedField)
+		}
+		if upd, ok := u.updates[parentID][field.ID]; ok {
+			updatedField = upd
+		}
 	}
 	if update.Name.Valid {
 		updatedField.Name = update.Name.Val
@@ -599,7 +613,12 @@ func (u *UpdateSchema) updateColumn(path []string, update ColumnUpdate) error {
 	if update.Doc.Valid {
 		updatedField.Doc = update.Doc.Val
 	}
-	u.updates[parentID][field.ID] = updatedField
+
+	if added != nil {
+		u.adds[added.parentID][added.index] = updatedField
+	} else {
+		u.updates[parentID][field.ID] = updatedField
+	}
 
 	return nil
 }
@@ -654,9 +673,56 @@ func (u *UpdateSchema) findFieldForMove(name string) (int, bool) {
 	if ok {
 		return field.ID, true
 	}
-	id, ok := u.addedNameToID[name]
+
+	return u.addedFieldID(name)
+}
+
+// addedNameKey returns the addedNameToID key for a name: the name itself, or
+// its lowercase form when the update is case-insensitive, as Java's
+// caseSensitivityAwareName does.
+func (u *UpdateSchema) addedNameKey(name string) string {
+	if u.caseSensitive {
+		return name
+	}
+
+	return strings.ToLower(name)
+}
+
+// addedFieldID returns the ID of a column added earlier in this update.
+func (u *UpdateSchema) addedFieldID(name string) (int, bool) {
+	id, ok := u.addedNameToID[u.addedNameKey(name)]
 
 	return id, ok
+}
+
+// addedFieldRef locates an added column: u.adds[parentID][index].
+type addedFieldRef struct {
+	parentID int
+	index    int
+}
+
+// findFieldForUpdate finds a field in the original schema, or falls back to a
+// column added earlier in this update. The ref is nil for an original field.
+func (u *UpdateSchema) findFieldForUpdate(name string) (iceberg.NestedField, *addedFieldRef, bool) {
+	if field, ok := u.findField(name); ok {
+		return field, nil, true
+	}
+
+	id, ok := u.addedFieldID(name)
+	if !ok {
+		return iceberg.NestedField{}, nil, false
+	}
+
+	// u.adds is keyed by parent ID, so search every parent's list.
+	for parentID, adds := range u.adds {
+		for i, f := range adds {
+			if f.ID == id {
+				return f, &addedFieldRef{parentID: parentID, index: i}, true
+			}
+		}
+	}
+
+	return iceberg.NestedField{}, nil, false
 }
 
 func (u *UpdateSchema) moveColumn(op MoveOp, path []string, relativeTo []string) error {
@@ -864,7 +930,7 @@ func (u *UpdateSchema) unionAddColumn(path []string, newField iceberg.NestedFiel
 		return fmt.Errorf("failed to assign field id: %w", err)
 	}
 	u.adds[parentID] = append(u.adds[parentID], sch.Field(0))
-	u.addedNameToID[fullName] = sch.Field(0).ID
+	u.addedNameToID[u.addedNameKey(fullName)] = sch.Field(0).ID
 
 	return nil
 }
