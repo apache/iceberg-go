@@ -90,6 +90,7 @@ func TestExternalRestCatalogConformance(t *testing.T) {
 		SupportsNamespaceProperties: true,
 		SupportsRenameTable:         true,
 		SupportsNestedNamespaces:    nestedNamespaces,
+		SupportsCustomTableLocation: true,
 		NewCatalog: func(t *testing.T) catalog.Catalog {
 			cat, err := catalog.Load(context.Background(), "external", props)
 			require.NoError(t, err)

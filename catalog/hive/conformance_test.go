@@ -33,6 +33,7 @@ func TestHiveCatalogConformance(t *testing.T) {
 	catalogtest.RunCatalogTests(t, catalogtest.Config{
 		SupportsNamespaceProperties: true,
 		SupportsRenameTable:         true,
+		SupportsCustomTableLocation: true,
 		NewCatalog: func(t *testing.T) catalog.Catalog {
 			cat, err := NewCatalog(context.Background(), iceberg.Properties{
 				URI:       getTestHiveURI(),

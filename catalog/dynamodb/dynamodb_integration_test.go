@@ -76,6 +76,7 @@ func TestDynamoDBCatalogConformance(t *testing.T) {
 	catalogtest.RunCatalogTests(t, catalogtest.Config{
 		NewCatalog:                  func(t *testing.T) catalog.Catalog { return localCatalog(t) },
 		SupportsNamespaceProperties: true, SupportsRenameTable: true,
+		SupportsCustomTableLocation: true,
 	})
 }
 
