@@ -1489,7 +1489,7 @@ func (m *inclusiveMetricsEval) VisitStartsWith(t iceberg.BoundTerm, lit iceberg.
 			v = v[:lenPrefix]
 		}
 
-		if len(v) > 0 && v > prefix {
+		if v > prefix {
 			return rowsCannotMatch
 		}
 	}
@@ -1507,7 +1507,7 @@ func (m *inclusiveMetricsEval) VisitStartsWith(t iceberg.BoundTerm, lit iceberg.
 			v = v[:lenPrefix]
 		}
 
-		if len(v) > 0 && v < prefix {
+		if v < prefix {
 			return rowsCannotMatch
 		}
 	}
