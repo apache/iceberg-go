@@ -89,6 +89,8 @@ type Transaction struct {
 	// validator (they are safe under any isolation).
 	validators []conflictValidatorFunc
 
+	rewriteNeedsFullHistory bool
+
 	// noReplay marks the commit as non-replayable: on a CAS conflict
 	// doCommit fails instead of refreshing and replaying. Set by
 	// snapshot producers whose staged snapshot carries delete-file removals;
@@ -371,6 +373,41 @@ func (t *Transaction) planningSnapshot(meta *MetadataBuilder) *Snapshot {
 	return meta.currentSnapshotForRef(t.branch)
 }
 
+// checkRewriteParentLocked verifies that the rewrite still has the parent it
+// inspected. The caller holds t.mx.
+func (t *Transaction) checkRewriteParentLocked(expected *Snapshot) error {
+	if err := t.checkUsable(); err != nil {
+		return err
+	}
+	head := t.planningSnapshot(t.meta)
+	if head == nil || head.SnapshotID != expected.SnapshotID {
+		return fmt.Errorf("%w: transaction head changed while staging the rewrite; replan from the target branch", ErrCommitFailed)
+	}
+
+	return nil
+}
+
+// rewritePlanningTransaction gives a rewrite a private metadata builder for
+// validation and manifest writing. The original builder identifies the
+// transaction state to which the rewrite can be applied.
+func (t *Transaction) rewritePlanningTransaction() (*MetadataBuilder, *Transaction, error) {
+	if err := t.checkNotNil(); err != nil {
+		return nil, nil, err
+	}
+	t.mx.Lock()
+	defer t.mx.Unlock()
+
+	meta, err := t.txnMeta()
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := t.checkUsable(); err != nil {
+		return nil, nil, err
+	}
+
+	return meta, &Transaction{tbl: t.tbl, meta: meta.clone(), branch: t.branch}, nil
+}
+
 // transactionRequirements returns the requirements a commit on branch must carry.
 // The result is always a fresh allocation, never aliasing reqs, so callers may append to it
 // while holding the transaction lock.
@@ -437,14 +474,18 @@ func (t *Transaction) updateSnapshot(wfs io.WriteFileIO, props iceberg.Propertie
 }
 
 func (t *Transaction) SetProperties(props iceberg.Properties) error {
-	if _, err := t.txnMeta(); err != nil {
+	if err := t.checkNotNil(); err != nil {
 		return err
 	}
-	if len(props) > 0 {
-		return t.apply([]Update{NewSetPropertiesUpdate(props)}, nil)
+	t.mx.Lock()
+	defer t.mx.Unlock()
+	if len(props) == 0 {
+		_, err := t.txnMeta()
+
+		return err
 	}
 
-	return nil
+	return t.applyLocked([]Update{NewSetPropertiesUpdate(props)}, nil)
 }
 
 // AssertRefSnapshotID records a requirement that the given branch is
@@ -496,14 +537,21 @@ func (t *Transaction) applyPinned(updates []Update, reqs []Requirement, refs []s
 	if err := t.applyLocked(updates, reqs); err != nil {
 		return err
 	}
+	t.recordPinnedRefsLocked(refs)
+
+	return nil
+}
+
+func (t *Transaction) recordPinnedRefsLocked(refs []string) {
+	if len(refs) == 0 {
+		return
+	}
 	if t.pinnedRefs == nil {
 		t.pinnedRefs = make(map[string]struct{}, len(refs))
 	}
 	for _, ref := range refs {
 		t.pinnedRefs[ref] = struct{}{}
 	}
-
-	return nil
 }
 
 // AssertDefaultShape registers requirements pinning the table's default
@@ -852,7 +900,7 @@ func (t *Transaction) ExpireSnapshotsWithContext(ctx context.Context, opts ...Ex
 	}
 	base := t.tbl
 	if base.snapshotHistoryRefsOnly {
-		base, meta, err = loadExpirationHistory(ctx, base, meta)
+		base, meta, err = loadStagedSnapshotHistory(ctx, base, meta, errSnapshotHistoryIncompleteForExpiration, ErrInvalidOperation)
 		if err != nil {
 			return err
 		}
@@ -1619,6 +1667,7 @@ type dataFileCfg struct {
 	skipAutoNameMapping          bool
 	skipDuplicateCheck           bool
 	rewriteSemantics             bool
+	rewriteFromSnapshotID        *int64
 	equalityDeleteToDVConversion bool
 	dataSequenceNumber           *int64
 }
@@ -1833,24 +1882,36 @@ func (t *Transaction) AddDataFiles(ctx context.Context, dataFiles []iceberg.Data
 //   - Avoiding file scanning improves performance or reliability
 //   - Working with storage systems where immediate file reads may be unreliable
 func (t *Transaction) ReplaceDataFiles(ctx context.Context, filesToDelete, filesToAdd []iceberg.DataFile, snapshotProps iceberg.Properties, opts ...WriteOption) error {
-	meta, err := t.txnMeta()
-	if err != nil {
-		return err
-	}
 	if len(filesToDelete) == 0 {
 		if len(filesToAdd) > 0 {
 			return t.AddDataFiles(ctx, filesToAdd, snapshotProps, opts...)
 		}
 
-		return nil
+		if err := t.checkNotNil(); err != nil {
+			return err
+		}
+		t.mx.Lock()
+		defer t.mx.Unlock()
+		_, err := t.txnMeta()
+
+		return err
 	}
 
+	base, planning, err := t.rewritePlanningTransaction()
+	if err != nil {
+		return err
+	}
+	meta := planning.meta
 	var cfg dataFileCfg
 	for _, o := range opts {
 		o(&cfg)
 	}
+	if cfg.dataSequenceNumber != nil && *cfg.dataSequenceNumber > meta.nextSequenceNumber() {
+		return fmt.Errorf("%w: data sequence number %d cannot be greater than new snapshot sequence number %d",
+			ErrInvalidOperation, *cfg.dataSequenceNumber, meta.nextSequenceNumber())
+	}
 
-	setToAdd, err := t.validateDataFilesToAdd(filesToAdd, "ReplaceDataFiles", !cfg.rewriteSemantics)
+	setToAdd, err := planning.validateDataFilesToAdd(filesToAdd, "ReplaceDataFiles", !cfg.rewriteSemantics)
 	if err != nil {
 		return err
 	}
@@ -1872,12 +1933,15 @@ func (t *Transaction) ReplaceDataFiles(ctx context.Context, filesToDelete, files
 		setToDelete[path] = struct{}{}
 	}
 
-	s := t.planningSnapshot(meta)
+	s := planning.planningSnapshot(meta)
 	if s == nil {
 		return fmt.Errorf("%w: cannot replace files in a table without an existing snapshot", ErrInvalidOperation)
 	}
+	if err := planning.validateRewriteFromSnapshot(ctx, meta, s, cfg.rewriteFromSnapshotID, filesToDelete); err != nil {
+		return err
+	}
 
-	fs, err := t.tbl.fsF(ctx)
+	fs, err := planning.tbl.fsF(ctx)
 	if err != nil {
 		return err
 	}
@@ -1909,13 +1973,13 @@ func (t *Transaction) ReplaceDataFiles(ctx context.Context, filesToDelete, files
 	// DVs only exist from v3, so v2 skips the read.
 	var dvs liveDeletionVectors
 	if meta.formatVersion >= 3 {
-		if dvs, err = t.readLiveDeletionVectors(ctx, fs); err != nil {
+		if dvs, err = planning.readLiveDeletionVectors(ctx, fs); err != nil {
 			return err
 		}
 	}
 
 	if !cfg.skipAutoNameMapping {
-		if err := t.ensureNameMapping(); err != nil {
+		if err := planning.ensureNameMapping(); err != nil {
 			return err
 		}
 	}
@@ -1926,7 +1990,7 @@ func (t *Transaction) ReplaceDataFiles(ctx context.Context, filesToDelete, files
 	}
 
 	commitUUID := uuid.New()
-	updater := t.updateSnapshot(wfs, snapshotProps, op).mergeOverwrite(&commitUUID, nil)
+	updater := planning.updateSnapshot(wfs, snapshotProps, op).mergeOverwrite(&commitUUID, nil)
 	if cfg.rewriteSemantics {
 		updater.setSkipDefaultValidator(true)
 	}
@@ -1942,27 +2006,16 @@ func (t *Transaction) ReplaceDataFiles(ctx context.Context, filesToDelete, files
 		updater.appendDataFile(df)
 	}
 
-	updates, reqs, err := updater.commit(ctx)
-	if err != nil {
-		return err
-	}
-
-	// Keep validator registration atomic with staging so Commit cannot run
-	// between the two.
-	t.mx.Lock()
-	defer t.mx.Unlock()
-	if err := t.applyLocked(updates, reqs); err != nil {
-		return err
-	}
+	var validator conflictValidatorFunc
 	if len(filesToAdd) > 0 || cfg.rewriteSemantics {
 		// Replacing data files must preserve deletes committed after the
 		// replacement was planned. This is independent of overwrite isolation:
 		// a newer replacement file would otherwise stop an older equality
 		// delete from applying.
-		t.validators = append(t.validators, rewriteValidator(markedForDeletion))
+		validator = rewriteValidator(markedForDeletion)
 	}
 
-	return nil
+	return t.commitRewrite(ctx, base, s, updater, cfg.rewriteSemantics, validator)
 }
 
 // ReplaceFiles atomically replaces data files and removes associated delete files
@@ -1975,10 +2028,15 @@ func (t *Transaction) ReplaceFiles(ctx context.Context, dataFilesToDelete, dataF
 }
 
 func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataFilesToAdd, deleteFilesToRemove, autoDeleteFilesToRemove []iceberg.DataFile, deleteFilesToAdd []rewriteDeleteFileAddition, snapshotProps iceberg.Properties, opts ...WriteOption) error {
-	meta, err := t.txnMeta()
+	if len(deleteFilesToRemove) == 0 && len(autoDeleteFilesToRemove) == 0 && len(deleteFilesToAdd) == 0 {
+		return t.ReplaceDataFiles(ctx, dataFilesToDelete, dataFilesToAdd, snapshotProps, opts...)
+	}
+
+	base, planning, err := t.rewritePlanningTransaction()
 	if err != nil {
 		return err
 	}
+	meta := planning.meta
 	var cfg dataFileCfg
 	for _, o := range opts {
 		o(&cfg)
@@ -1990,20 +2048,16 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 			ErrInvalidOperation, *cfg.dataSequenceNumber, nextSequenceNumber)
 	}
 
-	// Delegate data file replacement to existing logic.
-	if len(deleteFilesToRemove) == 0 && len(autoDeleteFilesToRemove) == 0 && len(deleteFilesToAdd) == 0 {
-		return t.ReplaceDataFiles(ctx, dataFilesToDelete, dataFilesToAdd, snapshotProps, opts...)
-	}
 	if len(deleteFilesToAdd) > 0 && len(deleteFilesToRemove) == 0 {
 		return fmt.Errorf("%w: adding delete files requires replacing at least one existing delete file",
 			ErrInvalidOperation)
 	}
 
-	setToAdd, err := t.validateDataFilesToAdd(dataFilesToAdd, "ReplaceFiles", !cfg.rewriteSemantics)
+	setToAdd, err := planning.validateDataFilesToAdd(dataFilesToAdd, "ReplaceFiles", !cfg.rewriteSemantics)
 	if err != nil {
 		return err
 	}
-	setDeleteFilesToAdd, err := t.validateDeleteFilesToAdd(deleteFilesToAdd, "ReplaceFiles")
+	setDeleteFilesToAdd, err := planning.validateDeleteFilesToAdd(deleteFilesToAdd, "ReplaceFiles")
 	if err != nil {
 		return err
 	}
@@ -2089,12 +2143,15 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 		autoSetDeleteFilesToRemove[path] = struct{}{}
 	}
 
-	s := t.planningSnapshot(meta)
+	s := planning.planningSnapshot(meta)
 	if s == nil {
 		return fmt.Errorf("%w: cannot replace files in a table without an existing snapshot", ErrInvalidOperation)
 	}
+	if err := planning.validateRewriteFromSnapshot(ctx, meta, s, cfg.rewriteFromSnapshotID, dataFilesToDelete); err != nil {
+		return err
+	}
 
-	fs, err := t.tbl.fsF(ctx)
+	fs, err := planning.tbl.fsF(ctx)
 	if err != nil {
 		return err
 	}
@@ -2318,13 +2375,13 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 			referencedDataFilePaths = append(referencedDataFilePaths, ref)
 		}
 		slices.Sort(referencedDataFilePaths)
-		if referencedDataFilePaths, err = t.headDataFiles(ctx, fs, referencedDataFilePaths, nil); err != nil {
+		if referencedDataFilePaths, err = planning.headDataFiles(ctx, fs, referencedDataFilePaths, nil); err != nil {
 			return err
 		}
 	}
 
 	if !cfg.skipAutoNameMapping {
-		if err := t.ensureNameMapping(); err != nil {
+		if err := planning.ensureNameMapping(); err != nil {
 			return err
 		}
 	}
@@ -2335,7 +2392,7 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 	}
 
 	commitUUID := uuid.New()
-	updater := t.updateSnapshot(wfs, snapshotProps, op).mergeOverwrite(&commitUUID, nil)
+	updater := planning.updateSnapshot(wfs, snapshotProps, op).mergeOverwrite(&commitUUID, nil)
 	if cfg.rewriteSemantics {
 		updater.setSkipDefaultValidator(true)
 	}
@@ -2369,11 +2426,6 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 		updater.removeDeletionVector(df)
 	}
 
-	updates, reqs, err := updater.commit(ctx)
-	if err != nil {
-		return err
-	}
-
 	var validator conflictValidatorFunc
 	if len(rewriteValidationFiles) > 0 {
 		validator = rewriteValidatorWithReferencedDataFiles(rewriteValidationFiles, referencedDataFilePaths)
@@ -2381,18 +2433,7 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 		validator = rewriteValidator(markedDataForDeletion)
 	}
 
-	// Keep validator registration atomic with staging so Commit cannot run
-	// between the two.
-	t.mx.Lock()
-	defer t.mx.Unlock()
-	if err := t.applyLocked(updates, reqs); err != nil {
-		return err
-	}
-	if validator != nil {
-		t.validators = append(t.validators, validator)
-	}
-
-	return nil
+	return t.commitRewrite(ctx, base, s, updater, cfg.rewriteSemantics && len(markedDataForDeletion) > 0, validator)
 }
 
 type AddDataFilesByPathOption func(addFilesOp *addFilesOperation)
@@ -2805,6 +2846,7 @@ func (t *Transaction) Commit(ctx context.Context) (*Table, error) {
 		tbl, err := t.tbl.doCommit(ctx, meta.updates, reqs,
 			withCommitBranch(t.branch),
 			withCommitValidators(t.validators...),
+			withCommitRewriteFullHistory(t.rewriteNeedsFullHistory),
 			withCommitNoReplay(t.noReplay),
 			withCommitPinnedRefs(t.pinnedRefs),
 			withCommitResume(t.failedCommits),

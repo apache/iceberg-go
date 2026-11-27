@@ -74,9 +74,9 @@ type RewriteResult struct {
 	// partial-progress mode.
 	CompletedGroups []CompactionGroupResult
 
-	// FailedGroups contains groups whose batch failed to commit, or was
-	// rejected because a delete for one of its files was committed after
-	// planning. A partial rewrite can return both completed and failed groups.
+	// FailedGroups contains groups whose batch failed with a commit conflict
+	// or was rejected during validation against the planning snapshot.
+	// A partial rewrite can return both completed and failed groups.
 	FailedGroups []CompactionGroupFailure
 }
 
@@ -151,6 +151,11 @@ type CompactionGroupResult struct {
 	// display/logging on the coordinator.
 	PartitionKey string
 
+	// PlanningSnapshotID records which snapshot supplied the worker's scan
+	// tasks. Preserve it when transferring results to a coordinator.
+	// Nil means the tasks did not carry a planning snapshot ID.
+	PlanningSnapshotID *int64
+
 	// OldDataFiles are the data files this group replaces.
 	OldDataFiles []iceberg.DataFile
 
@@ -186,10 +191,10 @@ type RewriteDataFilesOptions struct {
 	// batches. When false (the default), every group is staged in a single
 	// atomic rewrite snapshot.
 	//
-	// Partial progress checks each batch against the delete files committed
-	// since the transaction's starting snapshot, so the groups must be planned
-	// from the transaction's table. Deletes committed between an older
-	// planning snapshot and that starting snapshot are not detected.
+	// Partial progress checks each batch for deletes committed since the
+	// groups' planning snapshot, as recorded by [Scan.PlanFiles]. For manually
+	// constructed tasks without a snapshot ID, plan from the transaction's
+	// table so its starting snapshot is the correct validation boundary.
 	PartialProgress bool
 
 	// MaxCommits bounds the number of catalog snapshots produced in
@@ -469,25 +474,72 @@ func (binPackStrategy) writeOptions() []WriteRecordOption { return nil }
 // here. Distributed coordinators stage worker results via
 // [ExecuteCompactionGroup] and commit them via [Transaction.NewRewrite]
 // + [RewriteFiles.ApplyResult] + [RewriteFiles.Commit] instead.
-func (t *Transaction) RewriteDataFiles(ctx context.Context, groups []CompactionTaskGroup, opts RewriteDataFilesOptions) (*RewriteResult, error) {
-	if _, err := t.txnMeta(); err != nil {
-		return nil, err
-	}
+//
+// Plan all groups from the same snapshot. Tasks from [Scan.PlanFiles] carry
+// this ID so the rewrite can detect deletes committed before the transaction
+// began. If supplying tasks without an ID, plan from the transaction's table.
+func (t *Transaction) RewriteDataFiles(ctx context.Context, groups []CompactionTaskGroup, opts RewriteDataFilesOptions) (_ *RewriteResult, err error) {
 	if opts.PartialProgress {
 		return t.rewriteDataFilesPartial(ctx, groups, opts)
 	}
 	if len(groups) == 0 {
+		if err := t.checkNotNil(); err != nil {
+			return nil, err
+		}
+		t.mx.Lock()
+		defer t.mx.Unlock()
+		if _, err := t.txnMeta(); err != nil {
+			return nil, err
+		}
+
 		return &RewriteResult{}, nil
 	}
 
-	staged, err := t.StagedTable()
+	_, planning, err := t.rewritePlanningTransaction()
+	if err != nil {
+		return nil, err
+	}
+	snapshotID, err := compactionPlanningSnapshotID(groups)
+	if err != nil {
+		return nil, err
+	}
+	snapshotID = planning.rewriteStartSnapshotID(snapshotID)
+	checkedHead := planning.planningSnapshot(planning.meta)
+	if snapshotID != nil {
+		files, err := compactionSourceFiles(groups)
+		if err != nil {
+			return nil, err
+		}
+		if err := planning.validateRewriteFromSnapshot(ctx, planning.meta, checkedHead, snapshotID, files); err != nil {
+			return nil, fmt.Errorf("validate compaction from planning snapshot: %w", err)
+		}
+	}
+
+	staged, err := planning.StagedTable()
 	if err != nil {
 		return nil, err
 	}
 
 	result := &RewriteResult{}
 	rewrite := t.NewRewrite(opts.SnapshotProps)
+	if checkedHead != nil {
+		rewrite.validatedPlanHeadID = &checkedHead.SnapshotID
+	}
 	stagedDeleteFiles := make(map[string]struct{})
+	var outputs []CompactionGroupResult
+	defer func() {
+		if err == nil || len(outputs) == 0 {
+			return
+		}
+		cleanupCtx := context.WithoutCancel(ctx)
+		fs, cleanupErr := staged.fsF(cleanupCtx)
+		if cleanupErr == nil {
+			cleanupErr = cleanupCompactionOutputs(fs, outputs)
+		}
+		if cleanupErr != nil {
+			err = errors.Join(err, fmt.Errorf("clean up atomic rewrite outputs: %w", cleanupErr))
+		}
+	}()
 
 	for _, group := range groups {
 		if err := ctx.Err(); err != nil {
@@ -500,11 +552,18 @@ func (t *Transaction) RewriteDataFiles(ctx context.Context, groups []CompactionT
 
 		gr, err := ExecuteCompactionGroup(ctx, staged.Table, group, opts.GroupOptions...)
 		if err != nil {
+			if len(gr.NewDataFiles) > 0 {
+				outputs = append(outputs, gr)
+			}
+
 			return result, err
 		}
 
 		if len(gr.OldDataFiles) == 0 && len(gr.NewDataFiles) == 0 {
 			continue
+		}
+		if len(gr.NewDataFiles) > 0 {
+			outputs = append(outputs, gr)
 		}
 
 		rewrite.ApplyResult(gr)
@@ -576,6 +635,7 @@ func ExecuteCompactionGroup(ctx context.Context, tbl *Table, group CompactionTas
 	}
 
 	seenFiles := make(map[string]struct{}, len(group.Tasks))
+	var planningSnapshots compactionPlanningSnapshots
 	for _, task := range group.Tasks {
 		if task.File == nil {
 			return CompactionGroupResult{}, fmt.Errorf("%w: compaction task has no data file", ErrInvalidOperation)
@@ -593,6 +653,13 @@ func ExecuteCompactionGroup(ctx context.Context, tbl *Table, group CompactionTas
 		if task.Residual != nil && !task.Residual.Equals(iceberg.AlwaysTrue{}) {
 			return CompactionGroupResult{}, fmt.Errorf("%w: compaction task for %q has a residual row filter", ErrInvalidOperation, path)
 		}
+		if err := planningSnapshots.add(task.PlanningSnapshotID); err != nil {
+			return CompactionGroupResult{}, err
+		}
+	}
+	snapshotID, err := planningSnapshots.resolve(nil)
+	if err != nil {
+		return CompactionGroupResult{}, err
 	}
 
 	cfg := compactionGroupConfig{}
@@ -704,6 +771,7 @@ func ExecuteCompactionGroup(ctx context.Context, tbl *Table, group CompactionTas
 
 	return CompactionGroupResult{
 		PartitionKey:        group.PartitionKey,
+		PlanningSnapshotID:  snapshotID,
 		OldDataFiles:        oldFiles,
 		NewDataFiles:        newFiles,
 		SafePosDeletes:      CollectSafePositionDeletes(group.Tasks),
@@ -783,7 +851,20 @@ func (t *Transaction) rewriteDataFilesPartial(ctx context.Context, groups []Comp
 	groupsPerCommit := (len(pendingGroups)-1)/maxCommits + 1
 	props := maps.Clone(opts.SnapshotProps)
 	current := t.tbl
-	sincePlanning := deletesSincePlanning{checked: t.tbl.Metadata(), branch: t.branch}
+	snapshotID, err := compactionPlanningSnapshotID(pendingGroups)
+	if err != nil {
+		return result, err
+	}
+	snapshotID = t.rewriteStartSnapshotID(snapshotID)
+	sources, err := compactionSourceFiles(pendingGroups)
+	if err != nil {
+		return result, err
+	}
+	sincePlanning := rewriteConflictsSincePlanning{
+		checkedSnapshotID: snapshotID,
+		branch:            t.branch,
+		sourcePaths:       rewriteSourcePaths(sources),
+	}
 	failedCommits := 0
 
 	for batchStart := 0; batchStart < len(pendingGroups); batchStart += groupsPerCommit {
@@ -802,14 +883,11 @@ func (t *Transaction) rewriteDataFilesPartial(ctx context.Context, groups []Comp
 			return result, fmt.Errorf("open table IO for partial rewrite batch: %w", err)
 		}
 
-		// The groups were planned against the starting table, but an earlier
-		// batch's refresh-and-replay retry can commit on top of peer
-		// snapshots. Those snapshots then form this batch's base, so its
-		// commit-time validator never sees them, while its planned tasks lack
-		// any delete files they added. Rewriting anyway would write the deleted
-		// rows back and then drop those deletes as dead.
-		if err := sincePlanning.validate(ctx, current.Metadata(), fs, batchGroups); err != nil {
-			if !errors.Is(err, ErrConflictingDeleteFiles) {
+		// The batch's commit validator starts at the transaction base. Check
+		// history before that point as well, including changes absorbed by an
+		// earlier batch's retry.
+		if err := sincePlanning.validate(ctx, current, fs, batchGroups); err != nil {
+			if !errors.Is(err, ErrCommitFailed) {
 				return result, fmt.Errorf("validate partial rewrite batch %d against its planning snapshot: %w", batchNum, err)
 			}
 
@@ -1036,67 +1114,8 @@ func rewriteValidatorWithReferencedDataFiles(
 			return err
 		}
 
-		return validateNoNewDeletesForRewrittenFiles(cc, rewrittenFiles)
+		return validateRewriteConflicts(cc, rewrittenFiles)
 	}
-}
-
-// deletesSincePlanning collects the delete files committed on a branch since
-// the groups were planned. Each validate call reads only the snapshots
-// committed since the previous call, so a partial rewrite reads every
-// snapshot's manifests once rather than once per batch.
-type deletesSincePlanning struct {
-	// checked is the metadata the collected deletes run up to. It starts as
-	// the metadata the groups were planned from.
-	checked Metadata
-	branch  string
-	deletes []addedDelete
-}
-
-// validate collects the deletes committed between d.checked and current,
-// then returns ErrConflictingDeleteFiles when any delete committed since
-// planning could apply to a data file in groups.
-func (d *deletesSincePlanning) validate(ctx context.Context, current Metadata, fs iceio.IO, groups []CompactionTaskGroup) error {
-	// The rewrite validator binds no filters, so case sensitivity is moot.
-	cc, err := newConflictContext(ctx, d.checked, current, d.branch, fs, true)
-	if err != nil {
-		return err
-	}
-	deletes := d.deletes
-	err = cc.forEachAddedEntry(iceberg.ManifestContentDeletes, func(snap Snapshot, e iceberg.ManifestEntry) error {
-		added, err := newAddedDelete(snap, e.DataFile())
-		if err != nil {
-			return err
-		}
-		deletes = append(deletes, added)
-
-		return nil
-	})
-	if err != nil {
-		return err
-	}
-	d.checked, d.deletes = current, deletes
-
-	if len(d.deletes) == 0 {
-		return nil
-	}
-
-	var files []iceberg.DataFile
-	for _, group := range groups {
-		for _, task := range group.Tasks {
-			files = append(files, task.File)
-		}
-	}
-	rewritten, err := newRewrittenFileSet(files)
-	if err != nil {
-		return err
-	}
-	for _, added := range d.deletes {
-		if err := rewritten.conflict(added); err != nil {
-			return err
-		}
-	}
-
-	return nil
 }
 
 // CollectSafePositionDeletes returns position delete files from the

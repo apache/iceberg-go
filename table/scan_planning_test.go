@@ -57,6 +57,36 @@ func TestScanPlanningRemoteStoresPlanIO(t *testing.T) {
 	assert.Same(t, pio, scan.planIO.io)
 }
 
+func TestScanPlanningRemoteKeepsLoadedEmptyTableEmpty(t *testing.T) {
+	t.Parallel()
+
+	metadata, err := createTestMetadata(nil, nil)
+	require.NoError(t, err)
+	planner := &fakeScanPlanner{
+		err:      errors.New("loaded empty table should not call the server"),
+		supports: true,
+	}
+	tbl := &Table{
+		metadata: metadata,
+		planner:  planner,
+		fsF:      func(context.Context) (icebergio.IO, error) { return icebergio.LocalFS{}, nil },
+	}
+	scan := tbl.Scan(WithScanPlanningMode(ScanPlanningRemote))
+	defer scan.Close()
+
+	tasks, err := scan.PlanFiles(t.Context())
+	require.NoError(t, err)
+	assert.Empty(t, tasks)
+	assert.False(t, planner.called)
+
+	_, records, err := scan.ToArrowRecords(t.Context())
+	require.NoError(t, err)
+	for range records {
+		t.Fatal("loaded empty table returned records")
+	}
+	assert.False(t, planner.called)
+}
+
 func TestScanPlanningRemoteClosesPreviousPlanIO(t *testing.T) {
 	t.Parallel()
 
@@ -244,8 +274,8 @@ func TestReadTasksKeepsRetiredPlanIOAliveForIterator(t *testing.T) {
 		results: []ScanPlanningResult{{IO: first}, {IO: second}},
 	}
 	txn, _ := createTestTransactionWithMemIO(t, *iceberg.UnpartitionedSpec)
-	scan, err := txn.Scan(WithScanPlanningMode(ScanPlanningRemote))
-	require.NoError(t, err)
+	txn.tbl.metadata = withScanPlanningTestSnapshot(t, txn.tbl.metadata)
+	scan := txn.tbl.Scan(WithScanPlanningMode(ScanPlanningRemote))
 	scan.planner = planner
 
 	tasks, err := scan.PlanFiles(context.Background())
@@ -397,6 +427,7 @@ func TestScanPlanningRemoteResolvesDefaultProjectionAndSchema(t *testing.T) {
 
 	metadata, err := createTestMetadata(nil, nil)
 	require.NoError(t, err)
+	metadata = withScanPlanningTestSnapshot(t, metadata)
 	planner := &fakeScanPlanner{supports: true}
 	scan := (&Table{metadata: metadata}).Scan(
 		WithScanPlanningMode(ScanPlanningRemote),
@@ -449,6 +480,7 @@ func TestScanPlanningRemotePropagatesSnapshotSchemaSemantics(t *testing.T) {
 	)
 	require.NoError(t, builder.AddSchema(currentSchema))
 	require.NoError(t, builder.SetCurrentSchemaID(-1))
+	require.NoError(t, builder.SetSnapshotRef(MainBranch, 10, BranchRef))
 	require.NoError(t, builder.SetSnapshotRef("branch", 10, BranchRef))
 	require.NoError(t, builder.SetSnapshotRef("tag", 10, TagRef))
 	metadata, err = builder.Build()
@@ -466,10 +498,15 @@ func TestScanPlanningRemotePropagatesSnapshotSchemaSemantics(t *testing.T) {
 	require.False(t, snapshotSchema.Equals(metadata.CurrentSchema()))
 
 	base := (&Table{metadata: metadata}).Scan(WithScanPlanningMode(ScanPlanningRemote))
-	livePlanner := &fakeScanPlanner{supports: true}
+	livePlanner := &fakeScanPlanner{supports: true, result: ScanPlanningResult{Tasks: []FileScanTask{{}}}}
 	base.planner = livePlanner
-	_, err = base.PlanFiles(context.Background())
+	liveTasks, err := base.PlanFiles(context.Background())
 	require.NoError(t, err)
+	require.Len(t, liveTasks, 1)
+	require.NotNil(t, livePlanner.receivedRequest.SnapshotID)
+	require.NotNil(t, liveTasks[0].PlanningSnapshotID)
+	assert.Equal(t, int64(10), *livePlanner.receivedRequest.SnapshotID)
+	assert.Equal(t, int64(10), *liveTasks[0].PlanningSnapshotID)
 	assert.True(t, livePlanner.receivedRequest.Schema.Equals(metadata.CurrentSchema()))
 	assert.Equal(t, []string{"id", "category"}, livePlanner.receivedRequest.SelectedFields)
 
@@ -564,6 +601,7 @@ func TestScanPlanningRemotePassesFileIOProperties(t *testing.T) {
 
 	metadata, err := createTestMetadata(nil, nil)
 	require.NoError(t, err)
+	metadata = withScanPlanningTestSnapshot(t, metadata)
 	props := iceberg.Properties{"s3.endpoint": "https://table.local"}
 	planner := &fakeScanPlanner{supports: true}
 	tbl := New(
@@ -861,6 +899,7 @@ func TestScanEnforcesPlanningDirective(t *testing.T) {
 
 			txn, _ := createTestTransactionWithMemIO(t, *iceberg.UnpartitionedSpec)
 			tbl := txn.tbl
+			tbl.metadata = withScanPlanningTestSnapshot(t, tbl.metadata)
 			planner := &fakeScanPlanner{result: remoteTasks, supports: tt.supports}
 			tbl.planner = planner
 			if tt.directive != nil {
@@ -885,6 +924,20 @@ func TestScanEnforcesPlanningDirective(t *testing.T) {
 			}
 		})
 	}
+}
+
+func withScanPlanningTestSnapshot(t *testing.T, metadata Metadata) Metadata {
+	t.Helper()
+
+	b, err := MetadataBuilderFromBase(metadata, "")
+	require.NoError(t, err)
+	snapshot := &Snapshot{SnapshotID: 10, SequenceNumber: 1, TimestampMs: time.Now().UnixMilli()}
+	require.NoError(t, b.AddSnapshot(snapshot))
+	require.NoError(t, b.SetSnapshotRef(MainBranch, snapshot.SnapshotID, BranchRef))
+	metadata, err = b.Build()
+	require.NoError(t, err)
+
+	return metadata
 }
 
 func TestTransactionScanIgnoresPlanningDirective(t *testing.T) {

@@ -57,6 +57,10 @@ import (
 // Commit has been called, a second call returns an error regardless
 // of whether the first call succeeded.
 type RewriteFiles struct {
+	planningSnapshotID  *int64
+	workerSnapshots     compactionPlanningSnapshots
+	validatedPlanHeadID *int64 // Set after preflight, to check only subsequent staged changes.
+
 	txn                     *Transaction
 	dataFilesToDelete       []iceberg.DataFile
 	dataFilesToAdd          []iceberg.DataFile
@@ -88,6 +92,20 @@ type rewriteDeleteFileAddition struct {
 //	committed, err := tx.Commit(ctx)
 func (t *Transaction) NewRewrite(snapshotProps iceberg.Properties) *RewriteFiles {
 	return &RewriteFiles{txn: t, snapshotProps: maps.Clone(snapshotProps)}
+}
+
+// ValidateFromSnapshot sets the snapshot used to read the files being
+// rewritten. A rewrite rejects conflicting deletes and source-file removals
+// committed after this snapshot. Worker results supplied through
+// [RewriteFiles.ApplyResult] must agree with the snapshot when they carry
+// their own planning snapshot ID.
+// Legacy worker results without an ID are validated from the transaction's
+// base. Supply an explicit snapshot for results planned at a different point,
+// or for rewrites assembled from individual files that need this check.
+func (r *RewriteFiles) ValidateFromSnapshot(snapshotID int64) *RewriteFiles {
+	r.planningSnapshotID = &snapshotID
+
+	return r
 }
 
 // DeleteFile marks a file for removal in this rewrite. Routes by
@@ -284,6 +302,10 @@ func (r *RewriteFiles) AddFile(df iceberg.DataFile) *RewriteFiles {
 //	}
 //	if err := rewrite.Commit(ctx); err != nil { ... }
 func (r *RewriteFiles) ApplyResult(gr CompactionGroupResult) *RewriteFiles {
+	if r.err == nil && len(gr.OldDataFiles) > 0 {
+		r.err = r.workerSnapshots.add(gr.PlanningSnapshotID)
+	}
+
 	for _, df := range gr.OldDataFiles {
 		r.DeleteFile(df)
 	}
@@ -335,7 +357,27 @@ func (r *RewriteFiles) Commit(ctx context.Context) error {
 		return fmt.Errorf("%w: rewrite must delete at least one data file when adding data files", ErrInvalidOperation)
 	}
 
-	opts := []WriteOption{withRewriteSemantics()}
+	snapshotID, err := r.workerSnapshots.resolve(r.planningSnapshotID)
+	if err != nil {
+		return err
+	}
+	if r.validatedPlanHeadID != nil {
+		snapshotID = r.validatedPlanHeadID
+	} else if snapshotID == nil && r.workerSnapshots.missing {
+		if err := r.txn.checkNotNil(); err != nil {
+			return err
+		}
+		r.txn.mx.Lock()
+		_, err := r.txn.txnMeta()
+		if err == nil {
+			snapshotID = r.txn.rewriteStartSnapshotID(nil)
+		}
+		r.txn.mx.Unlock()
+		if err != nil {
+			return err
+		}
+	}
+	opts := []WriteOption{withRewriteSemantics(), func(cfg *dataFileCfg) { cfg.rewriteFromSnapshotID = snapshotID }}
 	if r.dataSequenceNumber != nil {
 		opts = append(opts, withDataSequenceNumber(*r.dataSequenceNumber))
 	}

@@ -52,11 +52,12 @@ import (
 // CommitTable, so a test can land a peer commit inside an operation
 // that commits more than once.
 type concurrentTestCatalog struct {
-	metadata     table.Metadata
-	location     string
-	fsF          table.FSysF
-	attempts     atomic.Int32
-	beforeCommit func()
+	metadata                table.Metadata
+	location                string
+	fsF                     table.FSysF
+	attempts                atomic.Int32
+	beforeCommit            func()
+	advanceMetadataLocation bool
 }
 
 func (c *concurrentTestCatalog) LoadTable(_ context.Context, ident table.Identifier) (*table.Table, error) {
@@ -80,9 +81,10 @@ func (c *concurrentTestCatalog) CommitTable(_ context.Context, _ table.Identifie
 	}
 	c.metadata = meta
 
-	// Returning the seed location is enough to keep subsequent
-	// NewTransaction calls from adding AssertCreate; the value is not
-	// re-read by the table machinery between commits in this stub.
+	if c.advanceMetadataLocation {
+		c.location = fmt.Sprintf("%s/metadata/v%d.metadata.json", meta.Location(), c.attempts.Load()+1)
+	}
+
 	return meta, c.location, nil
 }
 
