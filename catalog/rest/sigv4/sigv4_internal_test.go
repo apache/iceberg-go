@@ -450,3 +450,38 @@ func TestSigV4SignsWithPropsCredentials(t *testing.T) {
 	require.Contains(t, gotAuth, "Credential=AKIDEXAMPLEPROPS/",
 		"SigV4 must sign with the credentials from catalog properties, not the default chain")
 }
+
+func TestSignedKeyedFirstSendWithClosedWindow(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "test-access-key")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "test-secret-key")
+	t.Setenv("AWS_REGION", "us-east-1")
+
+	for _, lifetime := range []string{"PT0S", "-PT1S", "invalid"} {
+		t.Run(lifetime, func(t *testing.T) {
+			var calls atomic.Int32
+			var unsigned atomic.Bool
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/v1/config" {
+					_ = json.NewEncoder(w).Encode(map[string]any{"defaults": map[string]any{}, "overrides": map[string]any{}, "idempotency-key-lifetime": lifetime})
+
+					return
+				}
+				calls.Add(1)
+				if r.Header.Get("Idempotency-Key") == "" || !strings.HasPrefix(r.Header.Get("Authorization"), "AWS4-HMAC-SHA256") {
+					unsigned.Store(true)
+				}
+				w.WriteHeader(http.StatusBadRequest)
+			}))
+			defer srv.Close()
+			cat, err := rest.NewCatalog(t.Context(), "rest", srv.URL, rest.WithSigV4RegionSvc("us-east-1", "s3"))
+			require.NoError(t, err)
+			defer cat.Close()
+			require.Error(t, cat.CreateNamespace(t.Context(), []string{"ns"}, nil))
+			_, _, err = cat.CommitTable(t.Context(), []string{"ns", "name"}, nil, nil)
+			require.Error(t, err)
+			require.NotErrorIs(t, err, rest.ErrCommitStateUnknown)
+			require.EqualValues(t, 2, calls.Load())
+			require.False(t, unsigned.Load())
+		})
+	}
+}

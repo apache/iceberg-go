@@ -64,7 +64,7 @@ func TestScanPlanningTelemetryWiring(t *testing.T) {
 	})
 
 	var plans, polls, tasks atomic.Int32
-	cat := newScanPlanningTestCatalog(t, []endpoint{endpointPlanTableScan, endpointFetchPlanResult, endpointFetchScanTasks, endpointCancelPlanning}, func(mux *http.ServeMux) {
+	cat := newKeyedScanPlanningTestCatalog(t, "PT30M", []endpoint{endpointPlanTableScan, endpointFetchPlanResult, endpointFetchScanTasks, endpointCancelPlanning}, func(mux *http.ServeMux) {
 		mux.HandleFunc("POST /v1/namespaces/db/tables/tbl/plan", func(w http.ResponseWriter, _ *http.Request) {
 			if plans.Add(1) == 1 {
 				w.WriteHeader(http.StatusServiceUnavailable)

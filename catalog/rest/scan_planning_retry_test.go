@@ -20,10 +20,10 @@ package rest
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -36,74 +36,100 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+var scanPostEndpoints = []endpoint{endpointPlanTableScan, endpointFetchScanTasks}
+
+// scanPOST calls PlanTableScan or FetchScanTasks, whichever operation names.
+func scanPOST(t *testing.T, cat *Catalog, operation string, key *string) error {
+	t.Helper()
+	ident := table.Identifier{"db", "tbl"}
+	if operation == "plan" {
+		_, err := cat.PlanTableScan(t.Context(), ident, PlanTableScanRequest{IdempotencyKey: key})
+
+		return err
+	}
+	_, err := cat.FetchScanTasks(t.Context(), ident, FetchScanTasksRequest{PlanTask: "opaque", IdempotencyKey: key})
+
+	return err
+}
+
+func scanOK(w http.ResponseWriter, operation string) {
+	if operation == "plan" {
+		_, _ = w.Write([]byte(`{"status":"completed","plan-id":"p"}`))
+	} else {
+		_, _ = w.Write([]byte(`{}`))
+	}
+}
+
+// scanRecorder is a plan/tasks handler that records each attempt's key and body
+// and answers with respond(n), the 1-based attempt number.
+type scanRecorder struct {
+	mu   sync.Mutex
+	got  []keyedAttempt
+	resp func(n int, w http.ResponseWriter)
+}
+
+func (s *scanRecorder) register(operation string) func(*http.ServeMux) {
+	return func(mux *http.ServeMux) {
+		mux.HandleFunc("POST /v1/namespaces/db/tables/tbl/"+operation, func(w http.ResponseWriter, req *http.Request) {
+			body, _ := io.ReadAll(req.Body)
+			s.mu.Lock()
+			s.got = append(s.got, keyedAttempt{req.Method, req.URL.Path, req.Header.Get(headerIdempotencyKey), string(body)})
+			n := len(s.got)
+			s.mu.Unlock()
+			s.resp(n, w)
+		})
+	}
+}
+
+func (s *scanRecorder) attempts() []keyedAttempt {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return append([]keyedAttempt(nil), s.got...)
+}
+
 func TestScanPlanningPOSTRetriesPreserveIdempotency(t *testing.T) {
 	t.Parallel()
 	for _, operation := range []string{"plan", "tasks"} {
-		for _, status := range []int{408, 429, 500, 502, 503, 504} {
-			t.Run(fmt.Sprintf("%s/%d", operation, status), func(t *testing.T) {
+		for _, status := range []int{500, 502, 503, 504} {
+			t.Run(operation+"/"+strconv.Itoa(status), func(t *testing.T) {
 				t.Parallel()
-				var attempts atomic.Int32
-				var firstKey, firstBody string
-				var mu sync.Mutex
-				cat := newScanPlanningTestCatalog(t, []endpoint{endpointPlanTableScan, endpointFetchScanTasks}, func(mux *http.ServeMux) {
-					mux.HandleFunc("/v1/namespaces/db/tables/tbl/"+operation, func(w http.ResponseWriter, req *http.Request) {
-						mu.Lock()
-						defer mu.Unlock()
-						key := req.Header.Get(headerIdempotencyKey)
-						body, err := io.ReadAll(req.Body)
-						if !assert.NoError(t, err) {
-							return
-						}
-						parsed, err := uuid.Parse(key)
-						if !assert.NoError(t, err) {
-							return
-						}
-						assert.Equal(t, uuid.Version(7), parsed.Version())
-						if attempts.Add(1) == 1 {
-							firstKey, firstBody = key, string(body)
-							w.WriteHeader(status)
+				rec := &scanRecorder{resp: func(n int, w http.ResponseWriter) {
+					if n == 1 {
+						w.WriteHeader(status)
 
-							return
-						}
-						assert.Equal(t, firstKey, key)
-						assert.Equal(t, firstBody, string(body))
-						if operation == "plan" {
-							_, _ = w.Write([]byte(`{"status":"completed","plan-id":"p"}`))
-						} else {
-							_, _ = w.Write([]byte(`{}`))
-						}
-					})
-				})
-				var err error
-				if operation == "plan" {
-					_, err = cat.PlanTableScan(t.Context(), table.Identifier{"db", "tbl"}, PlanTableScanRequest{})
-				} else {
-					_, err = cat.FetchScanTasks(t.Context(), table.Identifier{"db", "tbl"}, FetchScanTasksRequest{PlanTask: "opaque"})
-				}
+						return
+					}
+					scanOK(w, operation)
+				}}
+				cat := newKeyedScanPlanningTestCatalog(t, "PT30M", scanPostEndpoints, rec.register(operation))
+				require.NoError(t, scanPOST(t, cat, operation, nil))
+				got := rec.attempts()
+				require.Len(t, got, 2)
+				parsed, err := uuid.Parse(got[0].key)
 				require.NoError(t, err)
-				assert.Equal(t, int32(2), attempts.Load())
+				assert.Equal(t, uuid.Version(7), parsed.Version())
+				assert.Equal(t, got[0], got[1])
 			})
 		}
 	}
 }
 
-func TestScanPlanningPOSTDoesNotRetryTerminalResponses(t *testing.T) {
+func TestScanPlanningPOSTDoesNotResendClientErrorsOrTerminalResponses(t *testing.T) {
 	t.Parallel()
-	for _, status := range []int{400, 401, 403, 404, 501} {
-		t.Run(strconv.Itoa(status), func(t *testing.T) {
-			t.Parallel()
-			var attempts atomic.Int32
-			cat := newScanPlanningTestCatalog(t, []endpoint{endpointPlanTableScan}, func(mux *http.ServeMux) {
-				mux.HandleFunc("/v1/namespaces/db/tables/tbl/plan", func(w http.ResponseWriter, req *http.Request) {
-					attempts.Add(1)
+	for _, operation := range []string{"plan", "tasks"} {
+		for _, status := range []int{400, 401, 403, 404, 408, 429, 501} {
+			t.Run(operation+"/"+strconv.Itoa(status), func(t *testing.T) {
+				t.Parallel()
+				rec := &scanRecorder{resp: func(_ int, w http.ResponseWriter) {
 					w.WriteHeader(status)
 					_, _ = w.Write([]byte(`invalid json`))
-				})
+				}}
+				cat := newKeyedScanPlanningTestCatalog(t, "PT30M", scanPostEndpoints, rec.register(operation))
+				require.Error(t, scanPOST(t, cat, operation, nil))
+				assert.Len(t, rec.attempts(), 1)
 			})
-			_, err := cat.PlanTableScan(t.Context(), table.Identifier{"db", "tbl"}, PlanTableScanRequest{})
-			require.Error(t, err)
-			assert.Equal(t, int32(1), attempts.Load())
-		})
+		}
 	}
 }
 
@@ -112,67 +138,115 @@ func TestScanPlanningPOSTDoesNotRetryMalformedSuccess(t *testing.T) {
 	for _, operation := range []string{"plan", "tasks"} {
 		t.Run(operation, func(t *testing.T) {
 			t.Parallel()
-			var attempts atomic.Int32
-			cat := newScanPlanningTestCatalog(t, []endpoint{endpointPlanTableScan, endpointFetchScanTasks}, func(mux *http.ServeMux) {
-				mux.HandleFunc("POST /v1/namespaces/db/tables/tbl/"+operation, func(w http.ResponseWriter, _ *http.Request) {
-					attempts.Add(1)
-					_, _ = w.Write([]byte(`invalid json`))
-				})
-			})
-			var err error
-			if operation == "plan" {
-				_, err = cat.PlanTableScan(t.Context(), table.Identifier{"db", "tbl"}, PlanTableScanRequest{})
-			} else {
-				_, err = cat.FetchScanTasks(t.Context(), table.Identifier{"db", "tbl"}, FetchScanTasksRequest{PlanTask: "opaque"})
-			}
+			rec := &scanRecorder{resp: func(_ int, w http.ResponseWriter) { _, _ = w.Write([]byte(`invalid json`)) }}
+			cat := newKeyedScanPlanningTestCatalog(t, "PT30M", scanPostEndpoints, rec.register(operation))
+			err := scanPOST(t, cat, operation, nil)
 			require.ErrorIs(t, err, ErrRESTError)
 			require.ErrorContains(t, err, "error decoding json payload")
 			var responseError errorResponse
 			assert.False(t, errors.As(err, &responseError))
-			assert.Equal(t, int32(1), attempts.Load())
+			assert.Len(t, rec.attempts(), 1)
 		})
 	}
+}
+
+func TestScanPlanningPOSTKeyWithoutAdvertisedLifetime(t *testing.T) {
+	t.Parallel()
+	for _, operation := range []string{"plan", "tasks"} {
+		t.Run(operation+"/generated key is not sent", func(t *testing.T) {
+			t.Parallel()
+			rec := &scanRecorder{resp: func(_ int, w http.ResponseWriter) { w.WriteHeader(http.StatusServiceUnavailable) }}
+			cat := newScanPlanningTestCatalog(t, scanPostEndpoints, rec.register(operation))
+			require.Error(t, scanPOST(t, cat, operation, nil))
+			got := rec.attempts()
+			require.Len(t, got, 1)
+			assert.Empty(t, got[0].key)
+		})
+		t.Run(operation+"/caller key is sent once", func(t *testing.T) {
+			t.Parallel()
+			key := uuidV7At(time.Now())
+			rec := &scanRecorder{resp: func(_ int, w http.ResponseWriter) { w.WriteHeader(http.StatusServiceUnavailable) }}
+			cat := newScanPlanningTestCatalog(t, scanPostEndpoints, rec.register(operation))
+			require.Error(t, scanPOST(t, cat, operation, &key))
+			got := rec.attempts()
+			require.Len(t, got, 1)
+			assert.Equal(t, key, got[0].key)
+		})
+	}
+}
+
+func TestScanPlanningPOSTCallerKeyAgeCountsAgainstLifetime(t *testing.T) {
+	t.Parallel()
+	for _, operation := range []string{"plan", "tasks"} {
+		for _, tc := range []struct {
+			name    string
+			created time.Duration // offset from now
+			resends bool
+		}{
+			{"fresh key", 0, true},
+			{"key older than the lifetime", -2 * time.Hour, false},
+			{"future timestamp does not lengthen the window", time.Hour, true},
+		} {
+			t.Run(operation+"/"+tc.name, func(t *testing.T) {
+				t.Parallel()
+				key := uuidV7At(time.Now().Add(tc.created))
+				rec := &scanRecorder{resp: func(n int, w http.ResponseWriter) {
+					if n == 1 {
+						w.WriteHeader(http.StatusServiceUnavailable)
+
+						return
+					}
+					scanOK(w, operation)
+				}}
+				cat := newKeyedScanPlanningTestCatalog(t, "PT30M", scanPostEndpoints, rec.register(operation))
+				err := scanPOST(t, cat, operation, &key)
+				got := rec.attempts()
+				require.NotEmpty(t, got)
+				assert.Equal(t, key, got[0].key)
+				if tc.resends {
+					require.NoError(t, err)
+					assert.Len(t, got, 2)
+				} else {
+					require.Error(t, err)
+					assert.Len(t, got, 1)
+				}
+			})
+		}
+	}
+}
+
+func TestScanPlanningPOSTResendsConnectionError(t *testing.T) {
+	t.Parallel()
+	rec := &scanRecorder{resp: func(n int, w http.ResponseWriter) {
+		if n == 1 {
+			dropConnection(w)
+
+			return
+		}
+		scanOK(w, "plan")
+	}}
+	cat := newKeyedScanPlanningTestCatalog(t, "PT30M", scanPostEndpoints, rec.register("plan"))
+	require.NoError(t, scanPOST(t, cat, "plan", nil))
+	got := rec.attempts()
+	require.Len(t, got, 2)
+	assert.Equal(t, got[0], got[1])
 }
 
 func TestScanPlanningRetryBoundsAndCancellation(t *testing.T) {
 	t.Parallel()
 	t.Run("bounded", func(t *testing.T) {
 		t.Parallel()
-		attempts := 0
-		_, err := retryScanPlanning(t.Context(), "plan", func() (int, error) {
-			attempts++
-
-			return 0, errorResponse{statusCode: http.StatusServiceUnavailable, wrapping: ErrServiceUnavailable}
-		})
-		require.ErrorIs(t, err, ErrServiceUnavailable)
-		assert.Equal(t, 4, attempts)
-	})
-	t.Run("transport failure", func(t *testing.T) {
-		attempts := 0
-		want := errors.New("connection reset after submission")
-		_, err := retryScanPlanning(t.Context(), "plan", func() (int, error) {
-			attempts++
-
-			return 0, want
-		})
-		require.ErrorIs(t, err, want)
-		assert.Equal(t, 1, attempts)
-	})
-	t.Run("transport sentinel without HTTP response", func(t *testing.T) {
-		attempts := 0
-		_, err := retryScanPlanning(t.Context(), "plan", func() (int, error) {
-			attempts++
-
-			return 0, ErrServiceUnavailable
-		})
-		require.ErrorIs(t, err, ErrServiceUnavailable)
-		assert.Equal(t, 1, attempts)
+		rec := &scanRecorder{resp: func(_ int, w http.ResponseWriter) { w.WriteHeader(http.StatusServiceUnavailable) }}
+		cat := newKeyedScanPlanningTestCatalog(t, "PT30M", scanPostEndpoints, rec.register("plan"))
+		require.ErrorIs(t, scanPOST(t, cat, "plan", nil), ErrServiceUnavailable)
+		assert.Len(t, rec.attempts(), 4)
 	})
 	t.Run("cancel during retry after", func(t *testing.T) {
+		t.Parallel()
 		ctx, cancel := context.WithCancel(t.Context())
 		defer cancel()
 		var attempts atomic.Int32
-		cat := newScanPlanningTestCatalog(t, []endpoint{endpointPlanTableScan}, func(mux *http.ServeMux) {
+		cat := newKeyedScanPlanningTestCatalog(t, "PT2H", scanPostEndpoints, func(mux *http.ServeMux) {
 			mux.HandleFunc("/v1/namespaces/db/tables/tbl/plan", func(w http.ResponseWriter, req *http.Request) {
 				attempts.Add(1)
 				w.Header().Set("Retry-After", "3600")
@@ -187,13 +261,15 @@ func TestScanPlanningRetryBoundsAndCancellation(t *testing.T) {
 		assert.Equal(t, int32(1), attempts.Load())
 	})
 	t.Run("already cancelled", func(t *testing.T) {
+		t.Parallel()
 		ctx, cancel := context.WithCancel(t.Context())
 		cancel()
-		_, err := retryScanPlanning(ctx, "plan", func() (int, error) {
-			t.Fatal("request after cancellation")
-
-			return 0, nil
+		cat := newKeyedScanPlanningTestCatalog(t, "PT30M", scanPostEndpoints, func(mux *http.ServeMux) {
+			mux.HandleFunc("/v1/namespaces/db/tables/tbl/plan", func(http.ResponseWriter, *http.Request) {
+				t.Error("request after cancellation")
+			})
 		})
+		_, err := cat.PlanTableScan(ctx, table.Identifier{"db", "tbl"}, PlanTableScanRequest{})
 		require.ErrorIs(t, err, context.Canceled)
 	})
 }
@@ -217,25 +293,34 @@ func TestScanPlanningRetryAfterTiming(t *testing.T) {
 					ctx, cancel = context.WithTimeout(ctx, tc.deadline)
 					defer cancel()
 				}
-				started := time.Now()
+				// An in-memory transport: synctest cannot advance time over real sockets.
 				attempts := 0
-				result, err := retryScanPlanning(ctx, "plan", func() (int, error) {
-					attempts++
-					if attempts == 1 {
-						return 0, errorResponse{statusCode: http.StatusTooManyRequests, retryAfter: "8"}
+				reply := func(status int, header http.Header, body string) (*http.Response, error) {
+					return &http.Response{
+						StatusCode: status, Header: header, Body: io.NopCloser(strings.NewReader(body)),
+						ContentLength: int64(len(body)),
+					}, nil
+				}
+				cat, err := NewCatalog(ctx, "rest", "http://catalog.test", WithCustomTransport(roundTripFunc(func(r *http.Request) (*http.Response, error) {
+					if r.URL.Path == "/v1/config" {
+						return reply(http.StatusOK, nil, `{"endpoints":["POST /v1/{prefix}/namespaces/{namespace}/tables/{table}/plan"],"idempotency-key-lifetime":"PT1H"}`)
+					}
+					if attempts++; attempts == 1 {
+						return reply(http.StatusServiceUnavailable, http.Header{"Retry-After": {"8"}}, "")
 					}
 
-					return 42, nil
-				})
+					return reply(http.StatusOK, nil, `{"status":"completed","plan-id":"p"}`)
+				})))
+				require.NoError(t, err)
+				started := time.Now()
+				_, err = cat.PlanTableScan(ctx, table.Identifier{"db", "tbl"}, PlanTableScanRequest{})
 				assert.Equal(t, tc.wait, time.Since(started))
 				if tc.deadline != 0 && tc.deadline < 8*time.Second {
 					require.ErrorIs(t, err, context.DeadlineExceeded)
 					assert.Equal(t, 1, attempts)
-					assert.Zero(t, result)
 				} else {
 					require.NoError(t, err)
 					assert.Equal(t, 2, attempts)
-					assert.Equal(t, 42, result)
 				}
 			})
 		})

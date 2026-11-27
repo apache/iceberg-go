@@ -20,12 +20,17 @@ package rest
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	iceberg "github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/table"
@@ -182,10 +187,12 @@ func TestMutationTransportReplay(t *testing.T) {
 	for _, tc := range []struct {
 		name, config string
 		advertised   bool
+		replays      bool
 	}{
-		{"advertised", `{"idempotency-key-lifetime":"PT30M"}`, true},
-		{"zero lifetime", `{"idempotency-key-lifetime":"PT0S"}`, true},
-		{"absent", `{}`, false},
+		{"advertised", `{"idempotency-key-lifetime":"PT30M"}`, true, true},
+		{"zero lifetime", `{"idempotency-key-lifetime":"PT0S"}`, true, false},
+		{"malformed lifetime", `{"idempotency-key-lifetime":"soon"}`, true, false},
+		{"absent", `{}`, false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			type attempt struct {
@@ -229,11 +236,11 @@ func TestMutationTransportReplay(t *testing.T) {
 			mu.Lock()
 			got := append([]attempt(nil), attempts...)
 			mu.Unlock()
-			if !tc.advertised {
+			if !tc.replays {
 				require.Error(t, err)
 				require.Len(t, got, 1)
 				require.NoError(t, got[0].err)
-				require.Empty(t, got[0].key)
+				require.Equal(t, tc.advertised, got[0].key != "")
 				require.NotEmpty(t, got[0].body)
 
 				return
@@ -248,4 +255,620 @@ func TestMutationTransportReplay(t *testing.T) {
 			require.Equal(t, got[0].body, got[1].body)
 		})
 	}
+}
+
+type keyedAttempt struct {
+	method, path, key, body string
+}
+
+// newKeyedTestCatalog serves /v1/config with every endpoint plus config (a JSON
+// object fragment such as `"idempotency-key-lifetime":"PT30M"`) and sends all
+// other requests to h with their 1-based count.
+func newKeyedTestCatalog(t *testing.T, config string, h func(n int, w http.ResponseWriter, r *http.Request)) (*Catalog, func() []keyedAttempt) {
+	t.Helper()
+	var endpoints []string
+	for _, ep := range allEndpoints {
+		endpoints = append(endpoints, ep.String())
+	}
+	eps, err := json.Marshal(endpoints)
+	require.NoError(t, err)
+	if config != "" {
+		config = "," + config
+	}
+	var mu sync.Mutex
+	var got []keyedAttempt
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/config" {
+			_, _ = io.WriteString(w, `{"endpoints":`+string(eps)+config+`}`)
+
+			return
+		}
+		body, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		got = append(got, keyedAttempt{r.Method, r.URL.Path, r.Header.Get(headerIdempotencyKey), string(body)})
+		n := len(got)
+		mu.Unlock()
+		h(n, w, r)
+	}))
+	t.Cleanup(server.Close)
+	c, err := newCatalogFromProps(t.Context(), "test", server.URL, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = c.Close() })
+
+	return c, func() []keyedAttempt {
+		mu.Lock()
+		defer mu.Unlock()
+
+		return append([]keyedAttempt(nil), got...)
+	}
+}
+
+func lifetimeConfig(v string) string { return `"idempotency-key-lifetime":"` + v + `"` }
+
+func dropConnection(w http.ResponseWriter) {
+	if conn, _, err := w.(http.Hijacker).Hijack(); err == nil {
+		_ = conn.Close()
+	}
+}
+
+func uuidV7At(created time.Time) string {
+	var id uuid.UUID
+	ms := created.UnixMilli()
+	for i := range 6 {
+		id[i] = byte(ms >> (8 * (5 - i)))
+	}
+	id[6], id[8] = 0x70, 0x80
+
+	return id.String()
+}
+
+func TestKeyedResendReusesKeyAndBody(t *testing.T) {
+	t.Parallel()
+	ns := table.Identifier{"ns"}
+	for _, status := range []int{500, 502, 503, 504} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			t.Parallel()
+			c, attempts := newKeyedTestCatalog(t, lifetimeConfig("PT30M"), func(n int, w http.ResponseWriter, _ *http.Request) {
+				if n == 1 {
+					w.WriteHeader(status)
+
+					return
+				}
+				_, _ = io.WriteString(w, `{}`)
+			})
+			require.NoError(t, c.CreateNamespace(t.Context(), ns, nil))
+			got := attempts()
+			require.Len(t, got, 2)
+			require.NotEmpty(t, got[0].key)
+			require.Equal(t, got[0], got[1])
+			require.NotEmpty(t, got[0].body)
+		})
+	}
+	t.Run("delete", func(t *testing.T) {
+		t.Parallel()
+		c, attempts := newKeyedTestCatalog(t, lifetimeConfig("PT30M"), func(n int, w http.ResponseWriter, _ *http.Request) {
+			if n == 1 {
+				w.WriteHeader(http.StatusServiceUnavailable)
+
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+		})
+		require.NoError(t, c.DropNamespace(t.Context(), ns))
+		got := attempts()
+		require.Len(t, got, 2)
+		require.NotEmpty(t, got[0].key)
+		require.Equal(t, got[0], got[1])
+	})
+	t.Run("connection error", func(t *testing.T) {
+		t.Parallel()
+		// No warm connection, so net/http does not replay: this is the explicit resend.
+		c, attempts := newKeyedTestCatalog(t, lifetimeConfig("PT30M"), func(n int, w http.ResponseWriter, _ *http.Request) {
+			if n == 1 {
+				dropConnection(w)
+
+				return
+			}
+			_, _ = io.WriteString(w, `{}`)
+		})
+		require.NoError(t, c.CreateNamespace(t.Context(), ns, nil))
+		got := attempts()
+		require.Len(t, got, 2)
+		require.NotEmpty(t, got[0].key)
+		require.Equal(t, got[0], got[1])
+	})
+}
+
+func TestKeyedSeparateCallsUseNewKeys(t *testing.T) {
+	t.Parallel()
+	id := table.Identifier{"ns", "name"}
+	c, attempts := newKeyedTestCatalog(t, lifetimeConfig("PT30M"), func(_ int, w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusConflict)
+	})
+	// A transaction refreshed after a 409 is a new call: it must not reuse the key.
+	for range 2 {
+		_, _, err := c.CommitTable(t.Context(), id, nil, nil)
+		require.ErrorIs(t, err, ErrCommitFailed)
+	}
+	got := attempts()
+	require.Len(t, got, 2)
+	require.NotEmpty(t, got[0].key)
+	require.NotEqual(t, got[0].key, got[1].key)
+}
+
+func TestCommitResendConflictAfterExpiry(t *testing.T) {
+	for _, tc := range []struct {
+		status int
+		body   string
+	}{
+		{http.StatusConflict, `{"error":{"message":"requirement failed","type":"CommitFailedException","code":409}}`},
+		{http.StatusBadRequest, `{"error":{"message":"requirement failed","type":"BadRequestException","code":400}}`},
+	} {
+		var applied atomic.Int32
+		c, attempts := newKeyedTestCatalog(t, lifetimeConfig("PT1S"), func(n int, w http.ResponseWriter, _ *http.Request) {
+			if n == 1 {
+				applied.Add(1)
+				dropConnection(w)
+
+				return
+			}
+			w.WriteHeader(tc.status)
+			_, _ = io.WriteString(w, tc.body)
+		})
+		transport := c.cl.Transport
+		sends := 0
+		c.cl.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			sends++
+			if sends == 2 {
+				time.Sleep(time.Second)
+			}
+
+			return transport.RoundTrip(r)
+		})
+		_, _, err := c.CommitTable(t.Context(), table.Identifier{"ns", "name"}, nil, nil)
+		require.ErrorIs(t, err, ErrCommitStateUnknown, tc.status)
+		// else the table commit loop replays the commit or cleans up its files
+		require.NotErrorIs(t, err, table.ErrCommitFailed, tc.status)
+		require.NotErrorIs(t, err, table.ErrCommitRejected, tc.status)
+		require.ErrorContains(t, err, "requirement failed")
+		got := attempts()
+		require.Len(t, got, 2)
+		require.EqualValues(t, 1, applied.Load())
+		require.NotEmpty(t, got[0].key)
+		require.Equal(t, got[0], got[1])
+	}
+}
+
+func TestKeyedResendTimerRechecksExpiry(t *testing.T) {
+	for _, commit := range []bool{true, false} {
+		start := time.Now()
+		clockReads := 0
+		kc := &keyedCall{
+			policy: &idempotencyPolicy{}, commit: commit, key: "key", start: start, lifetime: time.Second,
+			now: func() time.Time {
+				clockReads++
+				if clockReads > 1 {
+					return start.Add(time.Second)
+				}
+
+				return start
+			},
+		}
+		attempts := 0
+		cl := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			attempts++
+
+			return nil, io.EOF
+		})}
+		_, err := send(t.Context(), cl, kc, &reqConfig{}, nil, func() (*http.Request, error) {
+			return http.NewRequestWithContext(t.Context(), http.MethodPost, "http://catalog.test", nil)
+		})
+		require.ErrorIs(t, err, io.EOF)
+		if commit {
+			require.ErrorIs(t, err, ErrCommitStateUnknown)
+		} else {
+			require.NotErrorIs(t, err, ErrCommitStateUnknown)
+		}
+		require.Equal(t, 1, attempts, "commit=%v", commit)
+		require.Equal(t, 2, clockReads)
+	}
+}
+
+func TestKeyedNoResendOn4xx(t *testing.T) {
+	t.Parallel()
+	for _, status := range []int{400, 401, 403, 404, 408, 409, 429} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			t.Parallel()
+			c, attempts := newKeyedTestCatalog(t, lifetimeConfig("PT30M"), func(_ int, w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(status)
+			})
+			require.Error(t, c.CreateNamespace(t.Context(), table.Identifier{"ns"}, nil))
+			require.Len(t, attempts(), 1)
+		})
+	}
+}
+
+func TestKeyedNoResendWithoutUsableLifetime(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name, config string
+		keyed        bool
+	}{
+		{"absent", ``, false},
+		{"null", `"idempotency-key-lifetime":null`, false},
+		{"zero", lifetimeConfig("PT0S"), true},
+		{"negative", lifetimeConfig("-PT1S"), true},
+		{"malformed", lifetimeConfig("soon"), true},
+		{"out of range", lifetimeConfig("PT9223372036854775808S"), true},
+		{"empty", lifetimeConfig(""), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			c, attempts := newKeyedTestCatalog(t, tc.config, func(_ int, w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusServiceUnavailable)
+			})
+			require.Error(t, c.CreateNamespace(t.Context(), table.Identifier{"ns"}, nil))
+			got := attempts()
+			require.Len(t, got, 1)
+			require.Equal(t, tc.keyed, got[0].key != "")
+		})
+	}
+}
+
+func TestKeyedResendBudget(t *testing.T) {
+	t.Parallel()
+	c, attempts := newKeyedTestCatalog(t, lifetimeConfig("PT30M"), func(_ int, w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	})
+	err := c.CreateNamespace(t.Context(), table.Identifier{"ns"}, nil)
+	require.ErrorIs(t, err, ErrServiceUnavailable)
+	require.Len(t, attempts(), 1+keyedMaxRetries)
+}
+
+func TestKeyedResendStopsAtExpiry(t *testing.T) {
+	t.Parallel()
+	ns, id := table.Identifier{"ns"}, table.Identifier{"ns", "name"}
+	t.Run("next delay would exceed the window", func(t *testing.T) {
+		t.Parallel()
+		c, attempts := newKeyedTestCatalog(t, lifetimeConfig("PT1S"), func(_ int, w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Retry-After", "2")
+			w.WriteHeader(http.StatusServiceUnavailable)
+		})
+		start := time.Now()
+		err := c.CreateNamespace(t.Context(), ns, nil)
+		require.ErrorIs(t, err, ErrServiceUnavailable)
+		require.Len(t, attempts(), 1)
+		require.Less(t, time.Since(start), time.Second)
+	})
+	t.Run("slow first attempt", func(t *testing.T) {
+		t.Parallel()
+		c, attempts := newKeyedTestCatalog(t, lifetimeConfig("PT1S"), func(_ int, w http.ResponseWriter, _ *http.Request) {
+			time.Sleep(1100 * time.Millisecond)
+			w.WriteHeader(http.StatusServiceUnavailable)
+		})
+		err := c.CreateNamespace(t.Context(), ns, nil)
+		require.ErrorIs(t, err, ErrServiceUnavailable)
+		require.Len(t, attempts(), 1)
+	})
+	t.Run("commit reports unknown state", func(t *testing.T) {
+		t.Parallel()
+		c, attempts := newKeyedTestCatalog(t, lifetimeConfig("PT1S"), func(_ int, w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Retry-After", "2")
+			w.WriteHeader(http.StatusServiceUnavailable)
+		})
+		_, _, err := c.CommitTable(t.Context(), id, nil, nil)
+		require.ErrorIs(t, err, ErrCommitStateUnknown)
+		require.Len(t, attempts(), 1)
+	})
+	t.Run("commit connection error reports unknown state", func(t *testing.T) {
+		t.Parallel()
+		for _, config := range []string{lifetimeConfig("PT0S"), lifetimeConfig("PT1S")} {
+			c, attempts := newKeyedTestCatalog(t, config, func(_ int, w http.ResponseWriter, _ *http.Request) {
+				dropConnection(w)
+			})
+			_, _, err := c.CommitTable(t.Context(), id, nil, nil)
+			require.ErrorIs(t, err, ErrCommitStateUnknown)
+			require.NotEmpty(t, attempts()[0].key)
+		}
+	})
+	t.Run("unkeyed commit connection error is unchanged", func(t *testing.T) {
+		t.Parallel()
+		c, attempts := newKeyedTestCatalog(t, ``, func(_ int, w http.ResponseWriter, _ *http.Request) {
+			dropConnection(w)
+		})
+		_, _, err := c.CommitTable(t.Context(), id, nil, nil)
+		require.Error(t, err)
+		require.NotErrorIs(t, err, ErrCommitStateUnknown)
+		require.Len(t, attempts(), 1)
+	})
+}
+
+func TestKeyedResendHonorsCancellation(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	c, attempts := newKeyedTestCatalog(t, lifetimeConfig("PT2H"), func(_ int, w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", "3600")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		cancel()
+	})
+	start := time.Now()
+	require.ErrorIs(t, c.CreateNamespace(ctx, table.Identifier{"ns"}, nil), context.Canceled)
+	require.Less(t, time.Since(start), time.Second)
+	require.Len(t, attempts(), 1)
+}
+
+func TestKeyedTransportReplayWindow(t *testing.T) {
+	t.Parallel()
+	ns := table.Identifier{"ns"}
+	// replayHandler drops the first POST on a warmed connection, which net/http
+	// replays by itself unless GetBody refuses.
+	replayHandler := func(delay time.Duration) func(int, http.ResponseWriter, *http.Request) {
+		return func(n int, w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodGet {
+				_, _ = io.WriteString(w, `{"namespaces":[]}`)
+
+				return
+			}
+			if n == 2 { // n counts the warm-up GET
+				time.Sleep(delay)
+				dropConnection(w)
+
+				return
+			}
+			_, _ = io.WriteString(w, `{}`)
+		}
+	}
+	run := func(t *testing.T, lifetime string, delay time.Duration) ([]keyedAttempt, error) {
+		c, attempts := newKeyedTestCatalog(t, lifetimeConfig(lifetime), replayHandler(delay))
+		_, err := c.ListNamespaces(t.Context(), nil)
+		require.NoError(t, err)
+
+		err = c.CreateNamespace(t.Context(), ns, nil)
+
+		return attempts()[1:], err
+	}
+	t.Run("inside the window", func(t *testing.T) {
+		t.Parallel()
+		got, err := run(t, "PT30M", 0)
+		require.NoError(t, err)
+		require.Len(t, got, 2)
+		require.Equal(t, got[0], got[1])
+	})
+	t.Run("after a slow first attempt", func(t *testing.T) {
+		t.Parallel()
+		got, err := run(t, "PT1S", 1100*time.Millisecond)
+		require.Error(t, err)
+		require.Len(t, got, 1)
+	})
+	t.Run("zero lifetime", func(t *testing.T) {
+		t.Parallel()
+		got, err := run(t, "PT0S", 0)
+		require.Error(t, err)
+		require.Len(t, got, 1)
+	})
+}
+
+func TestKeyedRedirectReplayWindow(t *testing.T) {
+	t.Parallel()
+	for _, status := range []int{http.StatusTemporaryRedirect, http.StatusPermanentRedirect} {
+		for _, lifetime := range []string{"PT30M", "PT0S"} {
+			t.Run(fmt.Sprintf("%d/%s", status, lifetime), func(t *testing.T) {
+				t.Parallel()
+				c, attempts := newKeyedTestCatalog(t, lifetimeConfig(lifetime), func(_ int, w http.ResponseWriter, r *http.Request) {
+					if r.URL.Path == "/v1/namespaces" {
+						w.Header().Set("Location", "/v1/namespaces/moved")
+						w.WriteHeader(status)
+
+						return
+					}
+					_, _ = io.WriteString(w, `{}`)
+				})
+				err := c.CreateNamespace(t.Context(), table.Identifier{"ns"}, nil)
+				require.NoError(t, err)
+				got := attempts()
+				require.Len(t, got, 2)
+				require.Equal(t, "/v1/namespaces/moved", got[1].path)
+				require.NotEmpty(t, got[0].body)
+				require.Equal(t, got[0].key, got[1].key)
+				require.Equal(t, got[0].body, got[1].body)
+			})
+		}
+	}
+}
+
+func TestKeyedRedirectStatePerRequest(t *testing.T) {
+	t.Parallel()
+	kc := &keyedCall{key: "key", start: time.Now(), now: time.Now}
+	first, err := http.NewRequestWithContext(t.Context(), http.MethodPost, "http://example.com", strings.NewReader("first"))
+	require.NoError(t, err)
+	second, err := http.NewRequestWithContext(t.Context(), http.MethodPost, "http://example.com", strings.NewReader("second"))
+	require.NoError(t, err)
+	kc.prepare(first)
+	kc.prepare(second)
+	_, err = io.ReadAll(second.Body)
+	require.NoError(t, err)
+	session := &sessionTransport{RoundTripper: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		_, err := io.ReadAll(r.Body)
+		require.NoError(t, err)
+
+		return &http.Response{StatusCode: http.StatusTemporaryRedirect, Body: http.NoBody}, nil
+	})}
+	_, err = session.RoundTrip(first)
+	require.NoError(t, err)
+	body, err := first.GetBody()
+	require.NoError(t, err)
+	require.NoError(t, body.Close())
+	_, err = second.GetBody()
+	require.ErrorIs(t, err, errReplayWindowClosed)
+}
+
+// A redirect must not allow a later transport replay after the window closes.
+func TestKeyedRedirectThenTransportReplay(t *testing.T) {
+	t.Parallel()
+	c, attempts := newKeyedTestCatalog(t, lifetimeConfig("PT0S"), func(_ int, w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/namespaces" {
+			w.Header().Set("Location", "/v1/namespaces/moved")
+			w.WriteHeader(http.StatusTemporaryRedirect)
+
+			return
+		}
+		dropConnection(w)
+	})
+	err := c.CreateNamespace(t.Context(), table.Identifier{"ns"}, nil)
+	require.Error(t, err)
+	got := attempts()
+	require.Len(t, got, 2)
+	require.Equal(t, "/v1/namespaces/moved", got[1].path)
+}
+
+// A keyed DELETE has no body, so net/http replays it on a warmed connection
+// without consulting GetBody and the window cannot bound it. This test records
+// that documented gap.
+func TestKeyedDeleteTransportReplayIsNotBounded(t *testing.T) {
+	t.Parallel()
+	c, attempts := newKeyedTestCatalog(t, lifetimeConfig("PT0S"), func(n int, w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet:
+			_, _ = io.WriteString(w, `{"namespaces":[]}`)
+		case n == 2:
+			dropConnection(w)
+		default:
+			w.WriteHeader(http.StatusNoContent)
+		}
+	})
+	_, err := c.ListNamespaces(t.Context(), nil)
+	require.NoError(t, err)
+	require.NoError(t, c.DropNamespace(t.Context(), table.Identifier{"ns"}))
+	require.Len(t, attempts()[1:], 2)
+}
+
+func TestParseKeyLifetime(t *testing.T) {
+	t.Parallel()
+	for in, want := range map[string]time.Duration{
+		"PT30M":                            30 * time.Minute,
+		"pt30m":                            30 * time.Minute,
+		"+PT1,5S":                          1500 * time.Millisecond,
+		"PT2M-30S":                         90 * time.Second,
+		"-PT-1S":                           time.Second,
+		"PT0.000000001S":                   time.Nanosecond,
+		"PT1H30M":                          90 * time.Minute,
+		"P1DT2H3M4.5S":                     26*time.Hour + 3*time.Minute + 4500*time.Millisecond,
+		"P2D":                              48 * time.Hour,
+		"PT0.25S":                          250 * time.Millisecond,
+		"PT9223372036854775807.999999999S": math.MaxInt64,
+	} {
+		got, ok := parseKeyLifetime(in)
+		require.True(t, ok, in)
+		require.Equal(t, want, got, in)
+	}
+	for _, in := range []string{"", "P", "PT", "P1DT", "PT0S", "P0D", "-PT1S", "PT-1S", "30m", "PT1.5H", "PT0.1234567890S", "PT9223372036854775808S", "-PT-9223372036854775808S", "-PT-9223372036854775808.000000001S", "PT153722867280912930M8S", "PT999999999999999999H", "PT2562047788015216H-1S", "PT30", "PT1ſ", "soon"} {
+		_, ok := parseKeyLifetime(in)
+		require.False(t, ok, in)
+	}
+}
+
+func TestKeyedSignerReadsBodyBeforeFirstSend(t *testing.T) {
+	for _, lifetime := range []string{"PT0S", "-PT1S", "invalid"} {
+		t.Run(lifetime, func(t *testing.T) {
+			c, attempts := newKeyedTestCatalog(t, lifetimeConfig(lifetime), func(_ int, w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusBadRequest) })
+			c.cl.Transport.(*sessionTransport).signer = signerFunc(func(r *http.Request) error {
+				if r.GetBody != nil {
+					body, err := r.GetBody()
+					if err != nil {
+						return err
+					}
+					defer body.Close()
+					_, err = io.Copy(io.Discard, body)
+
+					return err
+				}
+
+				return nil
+			})
+			require.Error(t, c.CreateNamespace(t.Context(), table.Identifier{"ns"}, nil))
+			_, _, err := c.CommitTable(t.Context(), table.Identifier{"ns", "name"}, nil, nil)
+			require.Error(t, err)
+			require.NotErrorIs(t, err, ErrCommitStateUnknown)
+			require.Len(t, attempts(), 2)
+		})
+	}
+}
+
+func TestCommitCancellationDuringFirstBackoff(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	c, attempts := newKeyedTestCatalog(t, lifetimeConfig("PT2H"), func(_ int, w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		time.AfterFunc(20*time.Millisecond, cancel)
+	})
+	_, _, err := c.CommitTable(ctx, table.Identifier{"ns", "name"}, nil, nil)
+	require.ErrorIs(t, err, context.Canceled)
+	require.ErrorIs(t, err, ErrCommitStateUnknown)
+	require.Len(t, attempts(), 1)
+}
+
+func TestKeyedCancellationDuringFirstSend(t *testing.T) {
+	for _, commit := range []bool{false, true} {
+		for _, beforeSend := range []bool{false, true} {
+			ctx, cancel := context.WithCancel(t.Context())
+			called := false
+			cl := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				called = true
+				cancel()
+
+				return nil, context.Canceled
+			})}
+			if beforeSend {
+				cancel()
+			}
+			kc := &keyedCall{policy: &idempotencyPolicy{}, commit: commit, key: "key", start: time.Now(), lifetime: time.Hour, now: time.Now}
+			_, err := send(ctx, cl, kc, &reqConfig{}, nil, func() (*http.Request, error) {
+				return http.NewRequestWithContext(ctx, http.MethodPost, "http://catalog.test", strings.NewReader("{}"))
+			})
+			require.ErrorIs(t, err, context.Canceled)
+			require.Equal(t, !beforeSend, called)
+			if commit && !beforeSend {
+				require.ErrorIs(t, err, ErrCommitStateUnknown)
+			} else {
+				require.NotErrorIs(t, err, ErrCommitStateUnknown)
+			}
+			cancel()
+		}
+	}
+}
+
+func TestCommitCancellationAfterBackoff(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	calls := 0
+	cl := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		calls++
+
+		return nil, io.EOF
+	})}
+	kc := &keyedCall{policy: &idempotencyPolicy{onRetry: cancel}, commit: true, key: "key", start: time.Now(), lifetime: time.Hour, now: time.Now}
+	_, err := send(ctx, cl, kc, &reqConfig{}, nil, func() (*http.Request, error) {
+		return http.NewRequestWithContext(ctx, http.MethodPost, "http://catalog.test", strings.NewReader("{}"))
+	})
+	require.ErrorIs(t, err, context.Canceled)
+	require.ErrorIs(t, err, ErrCommitStateUnknown)
+	require.Equal(t, 1, calls)
+}
+
+func TestCommitCancellationPreservesTransportError(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	cl := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		cancel()
+
+		return nil, io.ErrUnexpectedEOF
+	})}
+	kc := &keyedCall{policy: &idempotencyPolicy{}, commit: true, key: "key", start: time.Now(), lifetime: time.Hour, now: time.Now}
+	_, err := send(ctx, cl, kc, &reqConfig{}, nil, func() (*http.Request, error) {
+		return http.NewRequestWithContext(ctx, http.MethodPost, "http://catalog.test", strings.NewReader("{}"))
+	})
+	require.ErrorIs(t, err, ErrCommitStateUnknown)
+	require.ErrorIs(t, err, context.Canceled)
+	require.ErrorIs(t, err, io.ErrUnexpectedEOF)
 }

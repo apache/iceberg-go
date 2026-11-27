@@ -233,7 +233,7 @@ func TestPlanFakeAsynchronousPlanningWaitsThroughRetry(t *testing.T) {
 	t.Parallel()
 
 	srv := planfake.New(t, planfake.Scenario{
-		ConfigResponse: fullPlanningConfigResponse(),
+		ConfigResponse: keyedPlanningConfigResponse(),
 		ExpectedTarget: standardPlanFakeTarget(),
 		PlanResponse:   planFakeJSONResponse(`{"status":"submitted","plan-id":"plan-async"}`),
 		PollResponses: map[string]planfake.ResponseSequence{
@@ -518,7 +518,7 @@ func TestPlanFakeSupportsNestedAndReissuedTaskHandles(t *testing.T) {
 	t.Parallel()
 
 	srv := planfake.New(t, planfake.Scenario{
-		ConfigResponse: fullPlanningConfigResponse(),
+		ConfigResponse: keyedPlanningConfigResponse(),
 		ExpectedTarget: standardPlanFakeTarget(),
 		TaskResponses: map[string]planfake.ResponseSequence{
 			"root-task": {
@@ -758,6 +758,24 @@ func assertEnvelopeLocalFixture(
 	assert.Equal(t, wantDeletePath, fixture.DeleteFiles[0].FilePath)
 	assert.NotNil(t, fixture.DeleteFiles[0].Partition)
 	assert.Empty(t, fixture.DeleteFiles[0].Partition)
+}
+
+// keyedPlanningConfigResponse is fullPlanningConfigResponse with the server
+// advertising idempotency-key-lifetime, so plan and task POSTs carry a key.
+func keyedPlanningConfigResponse() planfake.Response {
+	resp := fullPlanningConfigResponse()
+	var config map[string]any
+	if err := json.Unmarshal(resp.Body, &config); err != nil {
+		panic(err)
+	}
+	config["idempotency-key-lifetime"] = "PT30M"
+	body, err := json.Marshal(config)
+	if err != nil {
+		panic(err)
+	}
+	resp.Body = body
+
+	return resp
 }
 
 func fullPlanningConfigResponse() planfake.Response {
