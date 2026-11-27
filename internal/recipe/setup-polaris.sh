@@ -89,6 +89,8 @@ token=$(call -X POST "$api/catalog/v1/oauth/tokens" \
   -d client_secret="$client_secret" -d scope=PRINCIPAL_ROLE:ALL |
   jq -er .access_token)
 
+# Polaris rejects purgeRequested=true unless drop-with-purge.enabled is set,
+# which the PurgeTable conformance tests need.
 call -X POST "$api/management/v1/catalogs" \
   -H "Authorization: Bearer $token" -H 'Content-Type: application/json' \
   -d "{\"catalog\":{\"name\":\"$warehouse\",\"type\":\"INTERNAL\",

@@ -19,8 +19,10 @@ package catalogtest
 
 import (
 	"context"
+	"errors"
 	"testing"
 
+	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -28,7 +30,8 @@ import (
 
 // newRegisterableCatalog returns a fresh catalog from cfg and its register
 // capability. It skips the test when the catalog cannot register tables, as
-// the SQL and Hadoop catalogs cannot.
+// the SQL and Hadoop catalogs cannot, or when it reports register as not
+// implemented, as a REST server that does not advertise the endpoint does.
 func newRegisterableCatalog(t *testing.T, cfg Config) (catalog.Catalog, catalog.RegisterableCatalog) {
 	t.Helper()
 
@@ -36,6 +39,12 @@ func newRegisterableCatalog(t *testing.T, cfg Config) (catalog.Catalog, catalog.
 	registerable, ok := catalog.As[catalog.RegisterableCatalog](cat)
 	if !ok {
 		t.Skip("catalog does not implement catalog.RegisterableCatalog")
+	}
+
+	// The namespace does not exist, so this registers nothing.
+	_, ident := newIdentifiers()
+	if _, err := registerable.RegisterTable(context.Background(), ident, "missing.metadata.json"); errors.Is(err, iceberg.ErrNotImplemented) {
+		t.Skipf("catalog does not support register: %v", err)
 	}
 
 	return cat, registerable
@@ -54,6 +63,7 @@ func testRegisterTable(t *testing.T, cfg Config) {
 	created, err := cat.CreateTable(ctx, ident, Schema)
 	require.NoError(t, err)
 	metadataLocation := created.MetadataLocation()
+	originalUUID := created.Metadata().TableUUID()
 
 	require.NoError(t, cat.DropTable(ctx, ident))
 
@@ -70,6 +80,7 @@ func testRegisterTable(t *testing.T, cfg Config) {
 	assert.Equal(t, ident, tbl.Identifier(), "registered table should report the identifier it was registered under")
 	assert.Equal(t, metadataLocation, tbl.MetadataLocation(), "registered table should point at the registered metadata file")
 	assert.Equal(t, TableSchema.AsStruct(), tbl.Schema().AsStruct(), "registered table should keep its schema")
+	assert.Equal(t, originalUUID, tbl.Metadata().TableUUID(), "registered table should keep its identity")
 }
 
 // testRegisterExistingTable asserts that registering over an existing table is
