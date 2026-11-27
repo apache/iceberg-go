@@ -128,6 +128,7 @@ func TestEmptyStringBoundsPruneScans(t *testing.T) {
 		{name: "equal to empty", expr: iceberg.EqualTo(iceberg.Reference("s"), ""), files: 1},
 		{name: "equal to other", expr: iceberg.EqualTo(iceberg.Reference("s"), "zz"), files: 0},
 		{name: "greater than", expr: iceberg.GreaterThan(iceberg.Reference("s"), "a"), files: 0},
+		{name: "starts with", expr: iceberg.StartsWith(iceberg.Reference("s"), "a"), files: 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tasks, err := tbl.Scan(table.WithRowFilter(tc.expr)).PlanFiles(ctx)
