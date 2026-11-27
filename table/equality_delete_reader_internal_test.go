@@ -22,6 +22,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"os"
 	"path/filepath"
@@ -508,7 +509,7 @@ func TestLazyEqualityDeleteLoaderLoadsFilesOnDemand(t *testing.T) {
 	combined, err := loader.load(t.Context(), tasks[1])
 	require.NoError(t, err)
 	require.Len(t, combined, 1)
-	assert.Len(t, combined[0].keys, 4)
+	assert.Len(t, allEqualityDeleteKeys(combined[0]), 4)
 	assert.Equal(t, int64(2), fs.opens.Load())
 	assert.Equal(t, int64(2), fs.attempts.Load())
 
@@ -1463,11 +1464,11 @@ func TestBuildEqualityDeleteSetsPerTaskSharesIdenticalSets(t *testing.T) {
 	assert.Same(t, perTask[2][0], perTask[3][0])
 	assert.Same(t, perTask[2][0], perTask[4][0])
 	assert.NotSame(t, perTask[2][0], perTask[5][0])
-	assert.Equal(t, set[string]{"a": {}, "b": {}}, perTask[2][0].keys)
-	assert.Equal(t, set[string]{"a": {}, "c": {}}, perTask[5][0].keys)
+	assert.Equal(t, set[string]{"a": {}, "b": {}}, allEqualityDeleteKeys(perTask[2][0]))
+	assert.Equal(t, set[string]{"a": {}, "c": {}}, allEqualityDeleteKeys(perTask[5][0]))
 }
 
-func TestMergeEqualityDeleteSetsClonesLargestInput(t *testing.T) {
+func TestMergeEqualityDeleteSetsSharesFileSets(t *testing.T) {
 	largest := &equalityDeleteFileSet{equalityDeleteSet: &equalityDeleteSet{
 		keys:       set[string]{"a": {}, "b": {}, "c": {}},
 		fieldIDs:   []int{1},
@@ -1481,11 +1482,99 @@ func TestMergeEqualityDeleteSetsClonesLargestInput(t *testing.T) {
 		fieldTypes: []iceberg.Type{iceberg.PrimitiveTypes.Int64},
 	}}
 
-	merged := mergeEqualityDeleteSets([]*equalityDeleteFileSet{smaller, largest})
-	assert.Equal(t, set[string]{"a": {}, "b": {}, "c": {}, "d": {}}, merged.keys)
+	empty := &equalityDeleteFileSet{equalityDeleteSet: &equalityDeleteSet{
+		keys:       set[string]{},
+		fieldIDs:   []int{1},
+		colNames:   []string{"id"},
+		fieldTypes: []iceberg.Type{iceberg.PrimitiveTypes.Int64},
+	}}
 
-	merged.keys["new"] = struct{}{}
-	assert.NotContains(t, largest.keys, "new")
+	merged := mergeEqualityDeleteSets([]*equalityDeleteFileSet{smaller, empty, largest})
+	assert.Equal(t, []*equalityDeleteSet{largest.equalityDeleteSet, smaller.equalityDeleteSet}, merged.fileSets)
+	assert.Nil(t, merged.keys)
+	assert.False(t, merged.empty())
+}
+
+func TestBuildEqualityDeleteSetsPerTaskDoesNotCopyKeysPerGroup(t *testing.T) {
+	// Each data file sees only the deletes committed after it, so every task has a different group of delete files.
+	const commits = 20
+	perFile := map[string]*equalityDeleteFileSet{}
+	deleteFiles := make([]iceberg.DataFile, commits)
+	for i := range commits {
+		deleteFiles[i] = newEqualityDeleteSetAssemblyTestFile(t, fmt.Sprintf("delete-%d.parquet", i), []int{1})
+		perFile[deleteFiles[i].FilePath()] = newEqualityDeleteFileSet(i, &equalityDeleteSet{
+			keys:       set[string]{fmt.Sprintf("key-%d", i): {}},
+			fieldIDs:   []int{1},
+			colNames:   []string{"id"},
+			fieldTypes: []iceberg.Type{iceberg.PrimitiveTypes.Int64},
+		})
+	}
+
+	tasks := make([]FileScanTask, commits)
+	for i := range commits {
+		tasks[i] = FileScanTask{EqualityDeleteFiles: deleteFiles[i:]}
+	}
+
+	fileSets := make(map[*equalityDeleteSet]bool, commits)
+	for _, fileSet := range perFile {
+		fileSets[fileSet.equalityDeleteSet] = true
+	}
+
+	perTask := buildEqualityDeleteSetsPerTask(tasks, perFile)
+	require.Len(t, perTask, commits)
+	for i := range commits {
+		require.Len(t, perTask[i], 1)
+		expanded := expandEqualityDeleteSets(perTask[i])
+		assert.Len(t, expanded, commits-i)
+		for _, deleteSet := range expanded {
+			assert.True(t, fileSets[deleteSet], "task %d must use the delete files' own sets", i)
+		}
+	}
+}
+
+func TestProcessEqualityDeletesAppliesEveryFileOfCombinedSet(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+	ctx := compute.WithAllocator(t.Context(), mem)
+
+	files := []*equalityDeleteFileSet{
+		newEqualityDeleteFileSet(0, int64EqualityDeleteSet(1)),
+		newEqualityDeleteFileSet(1, int64EqualityDeleteSet(2, 3)),
+		newEqualityDeleteFileSet(2, int64EqualityDeleteSet(4)),
+	}
+	combined := mergeEqualityDeleteSets(files)
+
+	values := array.NewInt64Builder(mem)
+	values.AppendValues([]int64{1, 2, 3, 4, 5, 6}, nil)
+	column := values.NewArray()
+	values.Release()
+	record := array.NewRecordBatch(
+		arrow.NewSchema([]arrow.Field{{Name: "id", Type: arrow.PrimitiveTypes.Int64}}, nil),
+		[]arrow.Array{column}, int64(column.Len()))
+	column.Release()
+
+	fileSchema := iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64})
+	process, err := processEqualityDeletesColumnarForFile(ctx, []*equalityDeleteSet{combined}, fileSchema, "data.parquet")
+	require.NoError(t, err)
+	got, err := process(record)
+	require.NoError(t, err)
+	defer got.Release()
+
+	assert.Equal(t, []int64{5, 6}, got.Column(0).(*array.Int64).Int64Values())
+	for _, file := range files {
+		assert.NotNil(t, file.singleInt64, "each file's own int64 index must be used")
+	}
+	assert.Nil(t, combined.singleInt64)
+}
+
+// allEqualityDeleteKeys returns the keys of every delete file in s.
+func allEqualityDeleteKeys(s *equalityDeleteSet) set[string] {
+	keys := set[string]{}
+	for _, fileSet := range expandEqualityDeleteSets([]*equalityDeleteSet{s}) {
+		maps.Copy(keys, fileSet.keys)
+	}
+
+	return keys
 }
 
 func TestBuildEqualityDeleteSetsPerTaskKeepsFieldGroupsSeparate(t *testing.T) {
@@ -1534,8 +1623,8 @@ func TestBuildEqualityDeleteSetsPerTaskKeepsFieldGroupsSeparate(t *testing.T) {
 			setsByFieldID[deleteSet.fieldIDs[0]] = deleteSet
 		}
 
-		assert.Equal(t, wantIDs, setsByFieldID[1].keys)
-		assert.Equal(t, set[string]{"category": {}}, setsByFieldID[2].keys)
+		assert.Equal(t, wantIDs, allEqualityDeleteKeys(setsByFieldID[1]))
+		assert.Equal(t, set[string]{"category": {}}, allEqualityDeleteKeys(setsByFieldID[2]))
 	}
 }
 
