@@ -2177,6 +2177,73 @@ func (suite *InclusiveMetricsTestSuite) TestNotInMetrics() {
 	}
 }
 
+func (suite *InclusiveMetricsTestSuite) TestNotEqualAndNotInSingleValue() {
+	bound := func(lit iceberg.Literal) []byte {
+		b, err := lit.MarshalBinary()
+		suite.Require().NoError(err)
+
+		return b
+	}
+	singleValue := func(id int, value []byte, nulls int64, nans map[int]int64) iceberg.DataFile {
+		return &mockDataFile{
+			path:        "single_value.parquet",
+			format:      iceberg.ParquetFile,
+			count:       10,
+			valueCounts: map[int]int64{id: 10},
+			nullCounts:  map[int]int64{id: nulls},
+			nanCounts:   nans,
+			lowerBounds: map[int][]byte{id: value},
+			upperBounds: map[int][]byte{id: value},
+		}
+	}
+
+	abc := bound(iceberg.StringLiteral("abc"))
+	rangeOfValues := &mockDataFile{
+		path:        "range_of_values.parquet",
+		format:      iceberg.ParquetFile,
+		count:       10,
+		valueCounts: map[int]int64{3: 10},
+		nullCounts:  map[int]int64{3: 0},
+		lowerBounds: map[int][]byte{3: bound(iceberg.StringLiteral("aaa"))},
+		upperBounds: map[int][]byte{3: abc},
+	}
+	one := bound(iceberg.Float32Literal(1))
+	zero := bound(iceberg.Float32Literal(0))
+	nan := bound(iceberg.Float32Literal(float32(math.NaN())))
+
+	tests := []struct {
+		expr     iceberg.BooleanExpression
+		file     iceberg.DataFile
+		expected bool
+		msg      string
+	}{
+		{iceberg.NotEqualTo(iceberg.Reference("required"), "aaa"), rangeOfValues, true, "should read: range of values"},
+		{iceberg.NotEqualTo(iceberg.Reference("required"), "abc"), singleValue(3, abc, 0, nil), false, "should skip: single value equals literal"},
+		{iceberg.NotEqualTo(iceberg.Reference("required"), "def"), singleValue(3, abc, 0, nil), true, "should read: single value differs from literal"},
+		{iceberg.NotEqualTo(iceberg.Reference("some_empty"), "abc"), singleValue(14, abc, 2, nil), true, "should read: nulls match !="},
+		{iceberg.NotEqualTo(iceberg.Reference("no_nans"), float32(1)), singleValue(9, one, 0, map[int]int64{9: 0}), false, "should skip: single float equals literal"},
+		{iceberg.NotEqualTo(iceberg.Reference("no_nans"), float32(1)), singleValue(9, one, 0, map[int]int64{9: 3}), true, "should read: NaNs match !="},
+		{iceberg.NotEqualTo(iceberg.Reference("no_nans"), float32(1)), singleValue(9, one, 0, nil), true, "should read: unknown NaN count"},
+		{iceberg.NotEqualTo(iceberg.Reference("no_nans"), float32(0)), singleValue(9, zero, 0, map[int]int64{9: 0}), true, "should read: zero may be signed"},
+		{iceberg.NotEqualTo(iceberg.Reference("no_nans"), float32(1)), singleValue(9, nan, 0, map[int]int64{9: 0}), true, "should read: NaN bounds"},
+		{iceberg.NotIn(iceberg.Reference("required"), "aaa", "abc"), rangeOfValues, true, "should read: range of values"},
+		{iceberg.NotIn(iceberg.Reference("required"), "abc", "def"), singleValue(3, abc, 0, nil), false, "should skip: single value in exclusion list"},
+		{iceberg.NotIn(iceberg.Reference("required"), "def", "ghi"), singleValue(3, abc, 0, nil), true, "should read: single value not in exclusion list"},
+		{iceberg.NotIn(iceberg.Reference("some_empty"), "abc", "def"), singleValue(14, abc, 2, nil), true, "should read: nulls match NOT IN"},
+		{iceberg.NotIn(iceberg.Reference("no_nans"), float32(1), float32(5)), singleValue(9, one, 0, map[int]int64{9: 3}), true, "should read: NaNs match NOT IN"},
+	}
+
+	for _, tt := range tests {
+		suite.Run(tt.msg, func() {
+			eval, err := newInclusiveMetricsEvaluator(suite.schemaDataFile, tt.expr, true, true)
+			suite.Require().NoError(err)
+			shouldRead, err := eval(tt.file)
+			suite.Require().NoError(err)
+			suite.Equal(tt.expected, shouldRead, tt.msg)
+		})
+	}
+}
+
 func (suite *InclusiveMetricsTestSuite) TestLessAndLessEqualNans() {
 	type Op func(iceberg.UnboundTerm, int32) iceberg.UnboundPredicate
 	for _, operator := range []Op{iceberg.LessThan[int32], iceberg.LessThanEqual[int32]} {
