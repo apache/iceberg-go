@@ -31,7 +31,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/compute"
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
-	avro "github.com/twmb/avro"
+	"github.com/twmb/avro"
 	"github.com/twmb/avro/ocf"
 )
 

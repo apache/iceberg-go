@@ -24,7 +24,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/iceberg-go"
 	"github.com/stretchr/testify/require"
-	avro "github.com/twmb/avro"
+	"github.com/twmb/avro"
 )
 
 func TestAvroRejectsReservedFieldIDs(t *testing.T) {
