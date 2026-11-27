@@ -215,20 +215,24 @@ func addIDOnlyFile(t *testing.T, tbl *Table, name string, partition map[int]any,
 func scanIDAndColumn(t *testing.T, tbl *Table, opts ...ScanOption) []string {
 	t.Helper()
 
-	_, records, err := tbl.Scan(opts...).ToArrowRecords(t.Context())
+	schema, records, err := tbl.Scan(opts...).ToArrowRecords(t.Context())
 	require.NoError(t, err)
 
-	return idAndColumnRows(t, records)
+	return idAndColumnRows(t, schema, records)
 }
 
 // idAndColumnRows formats each row of two-column (id, value) records as
 // "id:value", sorted, with "id:<null>" for a null value.
-func idAndColumnRows(t *testing.T, records iter.Seq2[arrow.RecordBatch, error]) []string {
+func idAndColumnRows(t *testing.T, schema *arrow.Schema, records iter.Seq2[arrow.RecordBatch, error]) []string {
 	t.Helper()
 
 	rows := []string{}
 	for rec, err := range records {
 		require.NoError(t, err)
+		for i, field := range schema.Fields() {
+			require.Truef(t, arrow.TypeEqual(field.Type, rec.Column(i).DataType()),
+				"column %q: schema says %s, array holds %s", field.Name, field.Type, rec.Column(i).DataType())
+		}
 		ids := rec.Column(0).(*array.Int64)
 		for i := range int(rec.NumRows()) {
 			value := "<null>"
@@ -458,15 +462,69 @@ func TestIncrementalScansOnIdentityPartitionColumnMissingFromDataFile(t *testing
 		appendScan := tbl.NewIncrementalAppendScan(WithRowFilter(westOne)).FromSnapshotInclusive(first)
 		tasks, err := appendScan.PlanFiles(t.Context())
 		require.NoError(t, err)
-		_, records, err := tbl.Scan(WithRowFilter(westOne)).ReadTasks(t.Context(), tasks)
+		schema, records, err := tbl.Scan(WithRowFilter(westOne)).ReadTasks(t.Context(), tasks)
 		require.NoError(t, err)
-		require.Equal(t, []string{"1:west"}, idAndColumnRows(t, records))
+		require.Equal(t, []string{"1:west"}, idAndColumnRows(t, schema, records))
 	})
 
 	t.Run("changelog", func(t *testing.T) {
 		scan := tbl.NewIncrementalChangelogScan(WithRowFilter(westOne)).FromSnapshotInclusive(first)
-		_, records, err := scan.ToArrowRecords(t.Context())
+		schema, records, err := scan.ToArrowRecords(t.Context())
 		require.NoError(t, err)
-		require.Equal(t, []string{"1:west"}, idAndColumnRows(t, records))
+		require.Equal(t, []string{"1:west"}, idAndColumnRows(t, schema, records))
 	})
+}
+
+func TestFoldIdentityPartitionConstants(t *testing.T) {
+	tableSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "region", Type: iceberg.PrimitiveTypes.String},
+	)
+	fileSchema := iceberg.NewSchema(0, tableSchema.Field(0))
+	region := iceberg.Reference("region")
+	id := iceberg.EqualTo(iceberg.Reference("id"), int64(1))
+
+	tests := []struct {
+		name      string
+		filter    iceberg.BooleanExpression
+		constants map[int]any
+		changed   bool
+		want      iceberg.BooleanExpression
+	}{
+		{"equal matches", iceberg.EqualTo(region, "east"), map[int]any{2: "east"}, true, iceberg.AlwaysTrue{}},
+		{"equal differs", iceberg.EqualTo(region, "east"), map[int]any{2: "west"}, true, iceberg.AlwaysFalse{}},
+		{"not equal", iceberg.NotEqualTo(region, "east"), map[int]any{2: "east"}, true, iceberg.AlwaysFalse{}},
+		{"in", iceberg.IsIn(region, "east", "north"), map[int]any{2: "east"}, true, iceberg.AlwaysTrue{}},
+		{"not in", iceberg.NotIn(region, "east", "north"), map[int]any{2: "east"}, true, iceberg.AlwaysFalse{}},
+		{"is null with value", iceberg.IsNull(region), map[int]any{2: "east"}, true, iceberg.AlwaysFalse{}},
+		{"not null with value", iceberg.NotNull(region), map[int]any{2: "east"}, true, iceberg.AlwaysTrue{}},
+		// A null partition value is left to the file schema translation, which
+		// already reads a missing column as null.
+		{"is null with null", iceberg.IsNull(region), map[int]any{2: nil}, false, nil},
+		{"not null with null", iceberg.NotNull(region), map[int]any{2: nil}, false, nil},
+		{"or keeps the file predicate", iceberg.NewOr(iceberg.EqualTo(region, "west"), id), map[int]any{2: "east"}, true, id},
+		{"and with a match", iceberg.NewAnd(iceberg.EqualTo(region, "east"), id), map[int]any{2: "east"}, true, id},
+		{"not of a match", iceberg.NewNot(iceberg.EqualTo(region, "east")), map[int]any{2: "east"}, true, iceberg.AlwaysFalse{}},
+		{"no constant", iceberg.EqualTo(region, "east"), nil, false, nil},
+		{"file column only", id, map[int]any{2: "east"}, false, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			bound, err := iceberg.BindExpr(tableSchema, tt.filter, true)
+			require.NoError(t, err)
+
+			got, changed, err := foldIdentityPartitionConstants(bound, fileSchema, tt.constants)
+			require.NoError(t, err)
+			require.Equal(t, tt.changed, changed)
+
+			if !tt.changed {
+				require.Equal(t, bound, got)
+
+				return
+			}
+			want, err := iceberg.BindExpr(tableSchema, tt.want, true)
+			require.NoError(t, err)
+			require.Truef(t, want.Equals(got), "want %s, got %s", want, got)
+		})
+	}
 }
