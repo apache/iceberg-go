@@ -131,15 +131,20 @@ func (b observedBody) Close() error {
 	return b.ReadCloser.Close()
 }
 
-// prepare adds the key and bounds transport replays and redirects with bodies.
+// redirectResponseKey carries per-request redirect state through the session transport.
+type redirectResponseKey struct{}
+
+// prepare adds the key and bounds transport replays with bodies.
 // Bodyless requests (keyed DELETE) never call GetBody and cannot be bounded here.
 func (kc *keyedCall) prepare(req *http.Request) {
 	req.Header.Set(headerIdempotencyKey, kc.key)
 	if body := req.GetBody; body != nil {
 		sent := &atomic.Bool{}
+		redirect := &atomic.Bool{}
+		*req = *req.WithContext(context.WithValue(req.Context(), redirectResponseKey{}, redirect))
 		req.Body = observedBody{ReadCloser: req.Body, sent: sent}
 		req.GetBody = func() (io.ReadCloser, error) {
-			if sent.Load() && !kc.open() {
+			if sent.Load() && !redirect.Load() && !kc.open() {
 				return nil, errReplayWindowClosed
 			}
 
@@ -277,6 +282,7 @@ var keyLifetimeRE = regexp.MustCompile(`(?i)^([+-]?)P(?:([+-]?\d+)D)?(?:T(?:([+-
 // parseKeyLifetime accepts positive durations; zero, negative and malformed
 // values disable resends. Java allows unbounded resends for malformed values.
 func parseKeyLifetime(s string) (time.Duration, bool) {
+	// (?i) also matches U+017F (ſ) as s; Java only accepts ASCII here.
 	for i := range len(s) {
 		if s[i] >= 0x80 {
 			return 0, false

@@ -20,6 +20,7 @@ package rest
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"math"
 	"net/http"
@@ -650,35 +651,75 @@ func TestKeyedTransportReplayWindow(t *testing.T) {
 
 func TestKeyedRedirectReplayWindow(t *testing.T) {
 	t.Parallel()
-	for _, tc := range []struct {
-		lifetime string
-		followed bool
-	}{{"PT30M", true}, {"PT0S", false}} {
-		t.Run(tc.lifetime, func(t *testing.T) {
-			t.Parallel()
-			c, attempts := newKeyedTestCatalog(t, lifetimeConfig(tc.lifetime), func(_ int, w http.ResponseWriter, r *http.Request) {
-				if r.URL.Path == "/v1/namespaces" {
-					w.Header().Set("Location", "/v1/namespaces/moved")
-					w.WriteHeader(http.StatusTemporaryRedirect)
+	for _, status := range []int{http.StatusTemporaryRedirect, http.StatusPermanentRedirect} {
+		for _, lifetime := range []string{"PT30M", "PT0S"} {
+			t.Run(fmt.Sprintf("%d/%s", status, lifetime), func(t *testing.T) {
+				t.Parallel()
+				c, attempts := newKeyedTestCatalog(t, lifetimeConfig(lifetime), func(_ int, w http.ResponseWriter, r *http.Request) {
+					if r.URL.Path == "/v1/namespaces" {
+						w.Header().Set("Location", "/v1/namespaces/moved")
+						w.WriteHeader(status)
 
-					return
-				}
-				_, _ = io.WriteString(w, `{}`)
+						return
+					}
+					_, _ = io.WriteString(w, `{}`)
+				})
+				err := c.CreateNamespace(t.Context(), table.Identifier{"ns"}, nil)
+				require.NoError(t, err)
+				got := attempts()
+				require.Len(t, got, 2)
+				require.Equal(t, "/v1/namespaces/moved", got[1].path)
+				require.NotEmpty(t, got[0].body)
+				require.Equal(t, got[0].key, got[1].key)
+				require.Equal(t, got[0].body, got[1].body)
 			})
-			err := c.CreateNamespace(t.Context(), table.Identifier{"ns"}, nil)
-			got := attempts()
-			if !tc.followed {
-				require.Error(t, err)
-				require.Len(t, got, 1)
-
-				return
-			}
-			require.NoError(t, err)
-			require.Len(t, got, 2)
-			require.Equal(t, got[0].key, got[1].key)
-			require.Equal(t, got[0].body, got[1].body)
-		})
+		}
 	}
+}
+
+func TestKeyedRedirectStatePerRequest(t *testing.T) {
+	t.Parallel()
+	kc := &keyedCall{key: "key", start: time.Now(), now: time.Now}
+	first, err := http.NewRequestWithContext(t.Context(), http.MethodPost, "http://example.com", strings.NewReader("first"))
+	require.NoError(t, err)
+	second, err := http.NewRequestWithContext(t.Context(), http.MethodPost, "http://example.com", strings.NewReader("second"))
+	require.NoError(t, err)
+	kc.prepare(first)
+	kc.prepare(second)
+	_, err = io.ReadAll(second.Body)
+	require.NoError(t, err)
+	session := &sessionTransport{RoundTripper: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		_, err := io.ReadAll(r.Body)
+		require.NoError(t, err)
+
+		return &http.Response{StatusCode: http.StatusTemporaryRedirect, Body: http.NoBody}, nil
+	})}
+	_, err = session.RoundTrip(first)
+	require.NoError(t, err)
+	body, err := first.GetBody()
+	require.NoError(t, err)
+	require.NoError(t, body.Close())
+	_, err = second.GetBody()
+	require.ErrorIs(t, err, errReplayWindowClosed)
+}
+
+// A redirect must not allow a later transport replay after the window closes.
+func TestKeyedRedirectThenTransportReplay(t *testing.T) {
+	t.Parallel()
+	c, attempts := newKeyedTestCatalog(t, lifetimeConfig("PT0S"), func(_ int, w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/namespaces" {
+			w.Header().Set("Location", "/v1/namespaces/moved")
+			w.WriteHeader(http.StatusTemporaryRedirect)
+
+			return
+		}
+		dropConnection(w)
+	})
+	err := c.CreateNamespace(t.Context(), table.Identifier{"ns"}, nil)
+	require.Error(t, err)
+	got := attempts()
+	require.Len(t, got, 2)
+	require.Equal(t, "/v1/namespaces/moved", got[1].path)
 }
 
 // A keyed DELETE has no body, so net/http replays it on a warmed connection

@@ -385,7 +385,16 @@ func (s *sessionTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 		}
 	}
 
-	return s.RoundTripper.RoundTrip(r)
+	redirect, _ := r.Context().Value(redirectResponseKey{}).(*atomic.Bool)
+	if redirect != nil {
+		redirect.Store(false)
+	}
+	resp, err := s.RoundTripper.RoundTrip(r)
+	if redirect != nil && err == nil && (resp.StatusCode == http.StatusTemporaryRedirect || resp.StatusCode == http.StatusPermanentRedirect) {
+		redirect.Store(true)
+	}
+
+	return resp, err
 }
 
 // suppressHeadersKey carries the set of session-default header keys (canonical
