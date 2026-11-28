@@ -389,6 +389,23 @@ func TestCLIExplicitMissingConfigFailsBeforeCatalogInit(t *testing.T) {
 	assert.Contains(t, string(out), path)
 }
 
+func TestCLIRejectsUnknownOutput(t *testing.T) {
+	if testing.Short() {
+		t.Skip("spawns a subprocess")
+	}
+
+	home := t.TempDir()
+	cmd := exec.Command(os.Args[0], "--output", "yaml", "list")
+	cmd.Env = append(os.Environ(), icebergCLISubprocessEnv+"=1", "HOME="+home, "USERPROFILE="+home)
+	_, err := cmd.Output()
+
+	var exitErr *exec.ExitError
+	require.ErrorAs(t, err, &exitErr)
+	assert.Equal(t, 1, exitErr.ExitCode())
+	assert.Contains(t, string(exitErr.Stderr),
+		`unsupported --output value "yaml" (supported values: json, text)`)
+}
+
 func TestCLIAcceptsMixedCaseCatalogType(t *testing.T) {
 	if testing.Short() {
 		t.Skip("spawns a subprocess")
