@@ -298,7 +298,7 @@ func main() {
 	case "json":
 		output = jsonOutput{}
 	default:
-		logFatalf("unsupported --output value %q (supported values: text, json)", args.Output)
+		logFatalf("unsupported --output value %q (supported values: json, text)", args.Output)
 	}
 
 	// Validate the rollback selector before catalog init so invalid flags fail

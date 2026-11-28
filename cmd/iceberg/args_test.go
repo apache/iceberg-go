@@ -403,7 +403,7 @@ func TestCLIRejectsUnknownOutput(t *testing.T) {
 	require.ErrorAs(t, err, &exitErr)
 	assert.Equal(t, 1, exitErr.ExitCode())
 	assert.Contains(t, string(exitErr.Stderr),
-		`unsupported --output value "yaml" (supported values: text, json)`)
+		`unsupported --output value "yaml" (supported values: json, text)`)
 }
 
 func TestCLIAcceptsMixedCaseCatalogType(t *testing.T) {
