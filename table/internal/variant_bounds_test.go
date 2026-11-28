@@ -240,6 +240,13 @@ func TestCollectVariantBoundsIncompleteRowGroup(t *testing.T) {
 
 		return e
 	}
+	missingMax := func() metadata.EncodedStatistics {
+		var e metadata.EncodedStatistics
+		e.SetMin(le64(5))
+		e.SetNullCount(0)
+
+		return e
+	}
 	allNull := func() metadata.EncodedStatistics {
 		var e metadata.EncodedStatistics
 		e.SetNullCount(2)
@@ -253,6 +260,7 @@ func TestCollectVariantBoundsIncompleteRowGroup(t *testing.T) {
 		wantBound bool
 	}{
 		{"non-null row group without min/max drops bound", nonNullNoMinMax(), minmax(), false},
+		{"non-null row group without max drops bound", missingMax(), minmax(), false},
 		{"row group with no stats drops bound", metadata.EncodedStatistics{}, minmax(), false},
 		{"all-null row group keeps bound", allNull(), minmax(), true},
 		{"both row groups valued keeps bound", minmax(), minmax(), true},

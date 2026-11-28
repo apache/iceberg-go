@@ -210,12 +210,16 @@ type StatsAgg interface {
 }
 
 type DataFileStatistics struct {
-	RecordCount      int64
-	ColSizes         map[int]int64
-	ValueCounts      map[int]int64
-	NullValueCounts  map[int]int64
-	NanValueCounts   map[int]int64
-	ColAggs          map[int]StatsAgg
+	RecordCount     int64
+	ColSizes        map[int]int64
+	ValueCounts     map[int]int64
+	NullValueCounts map[int]int64
+	NanValueCounts  map[int]int64
+	ColAggs         map[int]StatsAgg
+	// incompleteBounds holds source columns whose bounds are missing in at least
+	// one row group. Key presence blocks partition inference. The value is the
+	// partial aggregate from the other row groups and may be nil.
+	incompleteBounds map[int]StatsAgg
 	SplitOffsets     []int64
 	EqualityFieldIDs []int
 	// Variant bounds: serialized variant objects keyed by parent variant field id.
@@ -223,9 +227,16 @@ type DataFileStatistics struct {
 	VariantUpperBounds map[int][]byte
 }
 
+// PartitionValue returns the partition value indicated by the available bounds,
+// which lets a caller check a supplied value. ToDataFile requires complete
+// bounds when inferring a value.
 func (d *DataFileStatistics) PartitionValue(field iceberg.PartitionField, sc *iceberg.Schema) any {
-	agg, ok := d.ColAggs[field.FirstSourceID()]
-	if !ok {
+	sourceID := field.FirstSourceID()
+	agg := d.ColAggs[sourceID]
+	if agg == nil {
+		agg = d.incompleteBounds[sourceID]
+	}
+	if agg == nil {
 		return nil
 	}
 
@@ -306,6 +317,10 @@ func (d *DataFileStatistics) ToDataFile(opts DataFileOpts) iceberg.DataFile {
 				// prioritizing caller-supplied value.
 				fieldIDToPartitionData[field.FieldID] = partitionVal
 			case field.Transform.PreservesOrder() && sourceFieldFound:
+				if _, incomplete := d.incompleteBounds[field.FirstSourceID()]; incomplete {
+					panic(fmt.Errorf("%w: cannot infer partition field %q (id %d) from incomplete Parquet bounds; supply a partition value",
+						iceberg.ErrInvalidArgument, field.Name, field.FieldID))
+				}
 				fieldIDToPartitionData[field.FieldID] = d.partitionValueWithSourceType(
 					field, d.ColAggs[field.FirstSourceID()], sourceField.Type)
 			case field.Transform.PreservesOrder():
@@ -346,12 +361,14 @@ func (d *DataFileStatistics) ToDataFile(opts DataFileOpts) iceberg.DataFile {
 	upperBounds := make(map[int][]byte)
 
 	for fieldID, agg := range d.ColAggs {
+		// An empty string or binary bound serializes to zero bytes, so only
+		// nil means there is no bound.
 		min := must(agg.MinAsBytes())
 		max := must(agg.MaxAsBytes())
-		if len(min) > 0 {
+		if min != nil {
 			lowerBounds[fieldID] = min
 		}
-		if len(max) > 0 {
+		if max != nil {
 			upperBounds[fieldID] = max
 		}
 	}
@@ -487,7 +504,15 @@ func (s *statsAggregator[T]) toBytes(val iceberg.Literal) ([]byte, error) {
 		return nil, err
 	}
 
-	return v.MarshalBinary()
+	b, err := v.MarshalBinary()
+	if err != nil {
+		return nil, err
+	}
+	if b == nil {
+		b = []byte{}
+	}
+
+	return b, nil
 }
 
 func (s *statsAggregator[T]) updateMin(val T) {
@@ -539,24 +564,28 @@ func (s *statsAggregator[T]) MaxAsBytes() ([]byte, error) {
 		}
 
 		curMax := any(s.curMax.Value()).(string)
-		result := TruncateUpperBoundText(curMax, s.truncLen)
-		if result != "" {
-			return s.toBytes(iceberg.StringLiteral(result))
+		result, truncated := truncateUpperBoundText(curMax, s.truncLen)
+		if truncated && result == "" {
+			return nil, nil
 		}
 
-		return nil, nil
+		return s.toBytes(iceberg.StringLiteral(result))
 	case iceberg.BinaryType:
 		if !s.curMax.Type().Equals(s.primitiveType) {
 			return nil, errors.New("expected current max to be a binary")
 		}
 
 		curMax := any(s.curMax.Value()).([]byte)
-		result := TruncateUpperBoundBinary(curMax, s.truncLen)
-		if len(result) > 0 {
-			return s.toBytes(iceberg.BinaryLiteral(result))
+		if len(curMax) <= s.truncLen {
+			return s.toBytes(iceberg.BinaryLiteral(curMax))
 		}
 
-		return nil, nil
+		result := TruncateUpperBoundBinary(curMax, s.truncLen)
+		if result == nil {
+			return nil, nil
+		}
+
+		return s.toBytes(iceberg.BinaryLiteral(result))
 	default:
 		return nil, fmt.Errorf("%s cannot be truncated for upper bound", s.primitiveType)
 	}

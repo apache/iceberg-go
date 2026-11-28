@@ -83,3 +83,57 @@ func TestEmptyStringIdentityPartitionScans(t *testing.T) {
 		})
 	}
 }
+
+// A file whose string column holds only "" must keep "" as both bounds, so
+// scans can skip it for any other value.
+func TestEmptyStringBoundsPruneScans(t *testing.T) {
+	ctx := context.Background()
+	cat, err := hadoop.NewCatalog(ctx, "local", t.TempDir(), nil)
+	require.NoError(t, err)
+	require.NoError(t, cat.CreateNamespace(ctx, catalog.ToIdentifier("db"), nil))
+
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "s", Type: iceberg.PrimitiveTypes.String},
+	)
+	tbl, err := cat.CreateTable(ctx, catalog.ToIdentifier("db", "events"), schema)
+	require.NoError(t, err)
+
+	arrowSchema, err := table.SchemaToArrowSchema(schema, nil, false, false)
+	require.NoError(t, err)
+	builder := array.NewRecordBuilder(memory.DefaultAllocator, arrowSchema)
+	defer builder.Release()
+	builder.Field(0).(*array.Int64Builder).AppendValues([]int64{1, 2}, nil)
+	builder.Field(1).(*array.StringBuilder).AppendValues([]string{"", ""}, nil)
+
+	record := builder.NewRecordBatch()
+	defer record.Release()
+	reader, err := array.NewRecordReader(arrowSchema, []arrow.RecordBatch{record})
+	require.NoError(t, err)
+	defer reader.Release()
+	tbl, err = tbl.Append(ctx, reader, nil)
+	require.NoError(t, err)
+
+	tasks, err := tbl.Scan().PlanFiles(ctx)
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	require.Equal(t, []byte{}, tasks[0].File.LowerBoundValues()[2])
+	require.Equal(t, []byte{}, tasks[0].File.UpperBoundValues()[2])
+
+	for _, tc := range []struct {
+		name  string
+		expr  iceberg.BooleanExpression
+		files int
+	}{
+		{name: "equal to empty", expr: iceberg.EqualTo(iceberg.Reference("s"), ""), files: 1},
+		{name: "equal to other", expr: iceberg.EqualTo(iceberg.Reference("s"), "zz"), files: 0},
+		{name: "greater than", expr: iceberg.GreaterThan(iceberg.Reference("s"), "a"), files: 0},
+		{name: "starts with", expr: iceberg.StartsWith(iceberg.Reference("s"), "a"), files: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tasks, err := tbl.Scan(table.WithRowFilter(tc.expr)).PlanFiles(ctx)
+			require.NoError(t, err)
+			require.Len(t, tasks, tc.files)
+		})
+	}
+}

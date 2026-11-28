@@ -98,8 +98,9 @@ var ErrCommitRejected = errors.New("commit rejected")
 // commit branch's head assertion is rebased. A staged update that cannot
 // apply keeps the builder's error as its cause. Transaction.Commit also
 // returns it, on any attempt, when a delete references data files that are
-// missing (ErrDataFilesMissing), or when a RowDelta retry detects a duplicate
-// live data file path (ErrDuplicateDataFiles).
+// missing (ErrDataFilesMissing), or when a RowDelta, AddDataFiles or
+// AddDataFilesByPath retry detects a duplicate live data file path
+// (ErrDuplicateDataFiles).
 var ErrTransactionUnusable = errors.New("transaction cannot be committed again")
 
 // ErrWriteIORequired is returned by write paths when the table's file system
@@ -215,6 +216,12 @@ func (t Table) Location() string                     { return t.metadata.Locatio
 func (t Table) CurrentSnapshot() *Snapshot           { return t.metadata.CurrentSnapshot() }
 func (t Table) SnapshotByID(id int64) *Snapshot      { return t.metadata.SnapshotByID(id) }
 func (t Table) SnapshotByName(name string) *Snapshot { return t.metadata.SnapshotByName(name) }
+
+// SnapshotHistoryLimitedToRefs reports whether this table was loaded with only
+// snapshots directly referenced by branches and tags, so older snapshots may be
+// missing from its metadata.
+func (t Table) SnapshotHistoryLimitedToRefs() bool { return t.snapshotHistoryRefsOnly }
+
 func (t Table) Schemas() map[int]*iceberg.Schema {
 	m := make(map[int]*iceberg.Schema)
 	for _, s := range t.metadata.Schemas() {

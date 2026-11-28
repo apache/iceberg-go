@@ -26,7 +26,6 @@ import (
 	"strings"
 
 	"github.com/apache/iceberg-go/internal"
-	"github.com/google/uuid"
 )
 
 // BooleanExprVisitor is an interface for recursively visiting the nodes of a
@@ -493,7 +492,7 @@ func doCmp(st StructLike, term BoundTerm, lit Literal) int {
 	case StringType:
 		return typedCmp[string](st, term, lit)
 	case UUIDType:
-		return typedCmp[uuid.UUID](st, term, lit)
+		return typedCmp[UUID](st, term, lit)
 	case DecimalType:
 		return typedCmp[Decimal](st, term, lit)
 	case VariantType:

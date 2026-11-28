@@ -38,7 +38,7 @@ import (
 type pruningFilterTestReader struct {
 	schema      *arrow.Schema
 	tester      *tblutils.ParquetRowGroupTester
-	rowGroup    *metadata.RowGroupMetaData
+	fileMeta    *metadata.FileMetaData
 	statsResult bool
 }
 
@@ -58,9 +58,9 @@ func (r *pruningFilterTestReader) PrunedSchema(map[int]struct{}, iceberg.NameMap
 
 func (r *pruningFilterTestReader) GetRecords(_ context.Context, _ []int, tester any) (array.RecordReader, error) {
 	r.tester = tester.(*tblutils.ParquetRowGroupTester)
-	if r.rowGroup != nil {
+	if r.fileMeta != nil {
 		var err error
-		r.statsResult, err = r.tester.StatsFn(r.rowGroup, []int{0})
+		r.statsResult, err = r.tester.StatsFn(r.fileMeta, 0, []int{0})
 		if err != nil {
 			return nil, err
 		}
@@ -170,7 +170,7 @@ func TestProcessRecordsRebindsRowGroupFilterToPromotedFileSchema(t *testing.T) {
 
 	reader := &pruningFilterTestReader{
 		schema:   arrowSchema,
-		rowGroup: parquetReader.MetaData().RowGroup(0),
+		fileMeta: parquetReader.MetaData(),
 	}
 	out := make(chan enumeratedRecord, 1)
 	err = (&arrowScan{

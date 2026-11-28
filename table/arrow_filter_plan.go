@@ -26,7 +26,6 @@ import (
 	"sync"
 
 	"github.com/apache/arrow-go/v18/arrow/compute/exprs"
-	"github.com/apache/arrow-go/v18/parquet/metadata"
 	"github.com/apache/iceberg-go"
 	iceinternal "github.com/apache/iceberg-go/internal"
 	tblutils "github.com/apache/iceberg-go/table/internal"
@@ -63,7 +62,7 @@ func (p *compiledFileFilterPlan) recordProcessor(ctx context.Context) recProcess
 	return filterRecords(ctx, p.recordFilter)
 }
 
-func (p *compiledFileFilterPlan) statsEvaluator() func(*metadata.RowGroupMetaData, []int) (bool, error) {
+func (p *compiledFileFilterPlan) statsEvaluator() tblutils.ParquetRowGroupStatsFn {
 	// Passing an AlwaysTrue evaluator still allocates fresh metric maps for
 	// every row group. A nil evaluator has the same keep-all semantics and lets
 	// the Parquet reader take its no-pruning path.

@@ -28,8 +28,6 @@ import (
 	"sort"
 	"strings"
 	"time"
-
-	"github.com/google/uuid"
 )
 
 // JSON for boolean expressions, used as the "filter" of a REST scan-planning
@@ -360,7 +358,7 @@ func (TimestampNsLiteral) MarshalJSON() ([]byte, error) {
 }
 
 func (l UUIDLiteral) MarshalJSON() ([]byte, error) {
-	return json.Marshal(uuid.UUID(l).String())
+	return json.Marshal(UUID(l).String())
 }
 
 func (l FixedLiteral) MarshalJSON() ([]byte, error) {

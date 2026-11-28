@@ -990,6 +990,8 @@ func TestMetadataGettersReturnDefensiveCopies(t *testing.T) {
 
 	currentSchema := md.CurrentSchema()
 	currentSchema.ID = 99
+	identifierIDs := currentSchema.IdentifierFieldIDs()
+	identifierIDs[0] = 99
 
 	schemas := md.Schemas()
 	schemas[0].ID = 98
@@ -1009,6 +1011,7 @@ func TestMetadataGettersReturnDefensiveCopies(t *testing.T) {
 	assert.Equal(t, "select * from ns.tbl", md.CurrentVersion().Representations[0].SQL)
 	assert.Equal(t, "accounting", md.CurrentVersion().DefaultNamespace[0])
 	assert.Equal(t, 0, md.CurrentSchema().ID)
+	assert.Equal(t, []int{1}, md.CurrentSchema().IdentifierFieldIDs())
 	assert.Equal(t, 0, md.Schemas()[0].ID)
 	assert.Equal(t, 0, md.SchemasByID()[0].ID)
 	assert.Equal(t, int64(1), md.VersionLog()[0].VersionID)

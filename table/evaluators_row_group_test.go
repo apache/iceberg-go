@@ -21,6 +21,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"math"
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
@@ -126,7 +127,7 @@ func testDecimalRowGroup(t *testing.T, meta *metadata.FileMetaData, field iceber
 	expr, err := iceberg.BindExpr(schema, pred, true)
 	require.NoError(t, err)
 	eval := &inclusiveMetricsEval{expr: expr}
-	keep, err := eval.TestRowGroup(meta.RowGroup(0), []int{0})
+	keep, err := eval.TestRowGroup(meta, 0, []int{0})
 	require.NoError(t, err)
 
 	return keep
@@ -298,7 +299,7 @@ func TestInclusiveMetricsEvalRealParquetDecimalRowGroup(t *testing.T) {
 		expr, err := iceberg.BindExpr(schema, pred, true)
 		require.NoError(t, err)
 		eval := &inclusiveMetricsEval{expr: expr}
-		result, err := eval.TestRowGroup(meta.RowGroup(0), []int{0})
+		result, err := eval.TestRowGroup(meta, 0, []int{0})
 		require.NoError(t, err)
 
 		return result
@@ -362,7 +363,7 @@ func TestInclusiveMetricsEvalRowGroupValueCountIncludesNulls(t *testing.T) {
 		expr, err := iceberg.BindExpr(schema, pred, true)
 		require.NoError(t, err)
 		eval := &inclusiveMetricsEval{expr: expr}
-		result, err := eval.TestRowGroup(meta.RowGroup(0), []int{0})
+		result, err := eval.TestRowGroup(meta, 0, []int{0})
 		require.NoError(t, err)
 
 		return result
@@ -390,7 +391,7 @@ func TestInclusiveMetricsEvalRowGroupMetricsLifecycle(t *testing.T) {
 	require.NoError(t, err)
 	eval := &inclusiveMetricsEval{expr: expr}
 
-	firstKeep, err := eval.TestRowGroup(withoutStats.RowGroup(0), []int{0, 1})
+	firstKeep, err := eval.TestRowGroup(withoutStats, 0, []int{0, 1})
 	require.NoError(t, err)
 	assert.True(t, firstKeep)
 	assert.NotNil(t, eval.valueCounts)
@@ -399,7 +400,7 @@ func TestInclusiveMetricsEvalRowGroupMetricsLifecycle(t *testing.T) {
 	assert.Nil(t, eval.upperBounds)
 	assert.True(t, eval.mayContainNull(1), "a missing null count must be treated as unknown")
 
-	keep, err := eval.TestRowGroup(withStats.RowGroup(0), []int{0, 1})
+	keep, err := eval.TestRowGroup(withStats, 0, []int{0, 1})
 	require.NoError(t, err)
 	assert.True(t, keep)
 	assert.Len(t, eval.valueCounts, 2)
@@ -407,7 +408,7 @@ func TestInclusiveMetricsEvalRowGroupMetricsLifecycle(t *testing.T) {
 	assert.Len(t, eval.lowerBounds, 2)
 	assert.Len(t, eval.upperBounds, 2)
 
-	keep, err = eval.TestRowGroup(withoutStats.RowGroup(0), []int{0, 1})
+	keep, err = eval.TestRowGroup(withoutStats, 0, []int{0, 1})
 	require.NoError(t, err)
 	assert.Equal(t, firstKeep, keep)
 	assert.True(t, eval.mayContainNull(1), "a missing null count must be treated as unknown")
@@ -419,4 +420,163 @@ func TestInclusiveMetricsEvalRowGroupMetricsLifecycle(t *testing.T) {
 	assert.Empty(t, eval.nullCounts)
 	assert.Empty(t, eval.lowerBounds)
 	assert.Empty(t, eval.upperBounds)
+}
+
+func timestampRowGroupMeta(t *testing.T, node parquetschema.Node, values ...int64) *metadata.FileMetaData {
+	t.Helper()
+
+	root, err := parquetschema.NewGroupNode("schema", parquet.Repetitions.Required,
+		parquetschema.FieldList{node}, -1)
+	require.NoError(t, err)
+
+	var buf bytes.Buffer
+	w := file.NewParquetWriter(&buf, root,
+		file.WithWriterProps(parquet.NewWriterProperties(parquet.WithStats(true))))
+	rgw, err := w.AppendRowGroupChecked()
+	require.NoError(t, err)
+	cw, err := rgw.NextColumn()
+	require.NoError(t, err)
+	_, err = cw.(*file.Int64ColumnChunkWriter).WriteBatch(values, nil, nil)
+	require.NoError(t, err)
+	require.NoError(t, cw.Close())
+	require.NoError(t, rgw.Close())
+	require.NoError(t, w.Close())
+
+	rdr, err := file.NewParquetReader(bytes.NewReader(buf.Bytes()))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, rdr.Close()) })
+
+	return rdr.MetaData()
+}
+
+// An Iceberg timestamp is in microseconds, but a Parquet TIMESTAMP(MILLIS)
+// column keeps its statistics in milliseconds. Read as-is they are 1000 times
+// too small and prune row groups that match. The "prunes" assertions guard
+// against the fix dropping the bounds instead of converting them, and the
+// microsecond rows are a control that must behave identically.
+func TestInclusiveMetricsEvalMillisTimestampRowGroup(t *testing.T) {
+	const (
+		minMillis = int64(1_700_000_000_000)
+		maxMillis = minMillis + 1_500
+	)
+
+	logical := func(unit parquetschema.TimeUnitType, utc bool) parquetschema.Node {
+		node, err := parquetschema.NewPrimitiveNodeLogical("ts", parquet.Repetitions.Required,
+			parquetschema.NewTimestampLogicalType(utc, unit), parquet.Types.Int64, -1, 1)
+		require.NoError(t, err)
+
+		return node
+	}
+	convertedOnly, err := parquetschema.NewPrimitiveNodeConverted("ts", parquet.Repetitions.Required,
+		parquet.Types.Int64, parquetschema.ConvertedTypes.TimestampMillis, 0, 0, 0, 1)
+	require.NoError(t, err)
+
+	tests := []struct {
+		name      string
+		node      parquetschema.Node
+		icebergTy iceberg.Type
+		perMilli  int64 // stored units per millisecond
+	}{
+		{"millis logical timestamp", logical(parquetschema.TimeUnitMillis, false), iceberg.PrimitiveTypes.Timestamp, 1},
+		{"millis logical timestamptz", logical(parquetschema.TimeUnitMillis, true), iceberg.PrimitiveTypes.TimestampTz, 1},
+		{"millis converted type only", convertedOnly, iceberg.PrimitiveTypes.Timestamp, 1},
+		{"micros control", logical(parquetschema.TimeUnitMicros, false), iceberg.PrimitiveTypes.Timestamp, 1000},
+		{"micros timestamptz control", logical(parquetschema.TimeUnitMicros, true), iceberg.PrimitiveTypes.TimestampTz, 1000},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			meta := timestampRowGroupMeta(t, tt.node, minMillis*tt.perMilli, maxMillis*tt.perMilli)
+			schema := iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "ts", Type: tt.icebergTy, Required: true})
+			ref := iceberg.Reference("ts")
+			lit := func(micros int64) iceberg.Timestamp { return iceberg.Timestamp(micros) }
+			keep := func(pred iceberg.BooleanExpression) bool {
+				expr, err := iceberg.BindExpr(schema, pred, true)
+				require.NoError(t, err)
+				eval := &inclusiveMetricsEval{expr: expr}
+				result, err := eval.TestRowGroup(meta, 0, []int{0})
+				require.NoError(t, err)
+
+				return result
+			}
+
+			minMicros, maxMicros := minMillis*1000, maxMillis*1000
+			assert.True(t, keep(iceberg.EqualTo(ref, lit(minMicros))), "pruned a row group whose minimum matches")
+			assert.True(t, keep(iceberg.EqualTo(ref, lit(maxMicros))), "pruned a row group whose maximum matches")
+			assert.True(t, keep(iceberg.GreaterThanEqual(ref, lit(maxMicros))), "pruned a row group for >= its maximum")
+			assert.True(t, keep(iceberg.LessThanEqual(ref, lit(minMicros))), "pruned a row group for <= its minimum")
+			assert.False(t, keep(iceberg.LessThan(ref, lit(minMicros))), "failed to prune below the minimum")
+			assert.False(t, keep(iceberg.GreaterThan(ref, lit(maxMicros))), "failed to prune above the maximum")
+			assert.False(t, keep(iceberg.EqualTo(ref, lit(maxMicros+1))), "failed to prune one microsecond above the maximum")
+			assert.False(t, keep(iceberg.EqualTo(ref, lit(minMicros-1))), "failed to prune one microsecond below the minimum")
+		})
+	}
+}
+
+// A millisecond bound too large to express in microseconds must leave the
+// column without bounds, which keeps the row group, rather than wrap around
+// and prune it.
+func TestInclusiveMetricsEvalMillisTimestampOverflowKeepsRowGroup(t *testing.T) {
+	node, err := parquetschema.NewPrimitiveNodeLogical("ts", parquet.Repetitions.Required,
+		parquetschema.NewTimestampLogicalType(false, parquetschema.TimeUnitMillis), parquet.Types.Int64, -1, 1)
+	require.NoError(t, err)
+
+	const hugeMillis = math.MaxInt64/1000 + 1
+	meta := timestampRowGroupMeta(t, node, 0, hugeMillis)
+	schema := iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "ts", Type: iceberg.PrimitiveTypes.Timestamp, Required: true})
+
+	expr, err := iceberg.BindExpr(schema,
+		iceberg.GreaterThanEqual(iceberg.Reference("ts"), iceberg.Timestamp(5_000_000_000_000_000_000)), true)
+	require.NoError(t, err)
+	eval := &inclusiveMetricsEval{expr: expr}
+	keep, err := eval.TestRowGroup(meta, 0, []int{0})
+	require.NoError(t, err)
+	assert.True(t, keep)
+}
+
+func TestInclusiveMetricsEvalMillisTimestampNonMicrosTypeOmitsBounds(t *testing.T) {
+	const (
+		minMillis = int64(1_700_000_000_000)
+		maxMillis = minMillis + 1_500
+	)
+
+	tests := []struct {
+		name      string
+		utc       bool
+		icebergTy iceberg.Type
+	}{
+		{"timestamp_ns", false, iceberg.PrimitiveTypes.TimestampNs},
+		{"timestamptz_ns", true, iceberg.PrimitiveTypes.TimestampTzNs},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			node, err := parquetschema.NewPrimitiveNodeLogical("ts", parquet.Repetitions.Required,
+				parquetschema.NewTimestampLogicalType(tt.utc, parquetschema.TimeUnitMillis), parquet.Types.Int64, -1, 1)
+			require.NoError(t, err)
+
+			meta := timestampRowGroupMeta(t, node, minMillis, maxMillis)
+			schema := iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "ts", Type: tt.icebergTy, Required: false})
+			ref := iceberg.Reference("ts")
+			keep := func(pred iceberg.BooleanExpression) bool {
+				expr, err := iceberg.BindExpr(schema, pred, true)
+				require.NoError(t, err)
+				eval := &inclusiveMetricsEval{expr: expr}
+				result, err := eval.TestRowGroup(meta, 0, []int{0})
+				require.NoError(t, err)
+
+				return result
+			}
+
+			// Bounds must be omitted for non-microsecond target types, so range
+			// and equality predicates never prune.
+			assert.True(t, keep(iceberg.LessThan(ref, iceberg.TimestampNano(0))))
+			assert.True(t, keep(iceberg.GreaterThan(ref, iceberg.TimestampNano(math.MaxInt64))))
+			assert.True(t, keep(iceberg.EqualTo(ref, iceberg.TimestampNano(minMillis*1000))))
+
+			// Value and null counts remain available for IsNull / NotNull.
+			assert.False(t, keep(iceberg.IsNull(ref)))
+			assert.True(t, keep(iceberg.NotNull(ref)))
+		})
+	}
 }

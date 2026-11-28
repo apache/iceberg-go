@@ -908,6 +908,28 @@ fmt.Printf("removed %d files\n", len(result.DeletedFiles))
 
 Also see `maintenance.WithCleanupLocation`, `maintenance.WithCleanupDeleteFunc`, `maintenance.WithPrefixMismatchMode`, `maintenance.WithEqualSchemes`, and `maintenance.WithEqualAuthorities` in `table/maintenance/orphan_cleanup.go`.
 
+Use `maintenance.PlanOrphanFiles` to inspect candidates before passing the
+plan to `maintenance.ExecuteOrphanCleanup`. Execution deletes exactly the
+planned files without rescanning. `maintenance.DeleteOrphanFiles` combines
+planning and deletion and also supports dry runs. The default minimum file
+age is 72 hours.
+
+**Safety:** All three orphan-cleanup entry points, including dry runs, reject
+`gc.enabled=false` and tables loaded by REST with
+`snapshot-loading-mode=refs`. Refs-only metadata can omit snapshots whose
+files are still live. Both checks run before filesystem access. A refs-only
+error matches `table.ErrInvalidOperation` through `errors.Is`.
+
+Create the REST catalog with `snapshot-loading-mode=all` (or omit the
+property), for example using `rest.WithAdditionalProps`, then reload the
+table before cleanup. A one-time `LoadTableWithFullSnapshotHistory` load is
+enough for planning and dry runs. Deletion refreshes the table using the
+catalog's configured mode, so its regular loads must also return full
+history. A server override that forces `refs` prevents deletion.
+`maintenance.PurgeFiles`, used when dropping a table, is not subject to
+this restriction; best-effort purge may miss files outside the table
+location that were omitted from refs-only metadata.
+
 ### Compaction (rewrite data files)
 
 ```go

@@ -506,6 +506,45 @@ func TestDataFileFromMetadata_NilPartitionValueInferredFromStats(t *testing.T) {
 	})
 }
 
+func TestDataFileFromMetadata_WidenedDecimalPartitionRequiresValue(t *testing.T) {
+	fileSchema := iceberg.NewSchema(0, iceberg.NestedField{
+		ID: 1, Name: "amount", Type: iceberg.MustDecimalTypeOf(24, 2),
+	})
+	pqBytes, pqMeta := parquetMetaFromSchema(t, fileSchema, `[{"amount": "0.00"}]`)
+	args := table.DataFileArgs{
+		Schema: iceberg.NewSchema(0, iceberg.NestedField{
+			ID: 1, Name: "amount", Type: iceberg.MustDecimalTypeOf(38, 2),
+		}),
+		Spec: iceberg.NewPartitionSpec(iceberg.PartitionField{
+			SourceIDs: []int{1}, FieldID: 1000, Name: "amount", Transform: iceberg.IdentityTransform{},
+		}),
+		Format:   iceberg.ParquetFile,
+		Metadata: pqMeta,
+		FilePath: "s3://bucket/data/amount=0/data.parquet",
+		FileSize: int64(len(pqBytes)),
+		Content:  iceberg.EntryContentData,
+	}
+	for _, values := range []map[int]any{nil, {1000: nil}} {
+		args.PartitionValues = values
+		df, err := table.DataFileFromMetadata(args)
+		require.Nil(t, df)
+		require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+		require.ErrorContains(t, err, "incomplete Parquet bounds")
+	}
+
+	value := iceberg.Decimal{Scale: 2}
+	args.PartitionValues = map[int]any{1000: value}
+	df, err := table.DataFileFromMetadata(args)
+	require.NoError(t, err)
+	assert.Equal(t, value, df.Partition()[1000])
+	assert.NotContains(t, df.LowerBoundValues(), 1)
+	assert.NotContains(t, df.UpperBoundValues(), 1)
+	assert.Contains(t, df.NullValueCounts(), 1)
+	assert.EqualValues(t, 0, df.NullValueCounts()[1])
+	assert.EqualValues(t, 1, df.ValueCounts()[1])
+	assert.Positive(t, df.ColumnSizes()[1])
+}
+
 func TestDataFileFromMetadata_TruncatePartitionInferred(t *testing.T) {
 	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
 		SourceIDs: []int{2},

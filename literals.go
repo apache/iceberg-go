@@ -35,14 +35,14 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/arrow-go/v18/parquet/variant"
-	"github.com/google/uuid"
+	"github.com/apache/iceberg-go/internal/uuid"
 )
 
 // LiteralType is a generic type constraint for the explicit Go types that we allow
 // for literal values. This represents the actual primitive types that exist in Iceberg
 type LiteralType interface {
 	bool | int32 | int64 | float32 | float64 | Date |
-		Time | Timestamp | TimestampNano | string | []byte | uuid.UUID | Decimal |
+		Time | Timestamp | TimestampNano | string | []byte | UUID | Decimal |
 		variant.Value
 }
 
@@ -112,7 +112,7 @@ func NewLiteral[T LiteralType](val T) Literal {
 		return StringLiteral(*v)
 	case *[]byte:
 		return BinaryLiteral(*v)
-	case *uuid.UUID:
+	case *UUID:
 		return UUIDLiteral(*v)
 	case *Decimal:
 		return DecimalLiteral(*v)
@@ -1316,35 +1316,31 @@ func (f *FixedLiteral) UnmarshalBinary(data []byte) error {
 	return nil
 }
 
-type UUIDLiteral uuid.UUID
+type UUIDLiteral UUID
 
-func (UUIDLiteral) Comparator() Comparator[uuid.UUID] {
-	return func(v1, v2 uuid.UUID) int {
+func (UUIDLiteral) Comparator() Comparator[UUID] {
+	return func(v1, v2 UUID) int {
 		return bytes.Compare(v1[:], v2[:])
 	}
 }
 
-func (UUIDLiteral) Type() Type         { return PrimitiveTypes.UUID }
-func (u UUIDLiteral) Value() uuid.UUID { return uuid.UUID(u) }
-func (u UUIDLiteral) Any() any         { return u.Value() }
-func (u UUIDLiteral) String() string   { return uuid.UUID(u).String() }
+func (UUIDLiteral) Type() Type       { return PrimitiveTypes.UUID }
+func (u UUIDLiteral) Value() UUID    { return UUID(u) }
+func (u UUIDLiteral) Any() any       { return u.Value() }
+func (u UUIDLiteral) String() string { return UUID(u).String() }
 func (u UUIDLiteral) To(typ Type) (Literal, error) {
 	switch t := typ.(type) {
 	case UUIDType:
 		return u, nil
 	case FixedType:
 		if len(u) == t.len {
-			v, _ := uuid.UUID(u).MarshalBinary()
-
-			return FixedLiteral(v), nil
+			return FixedLiteral(bytes.Clone(u[:])), nil
 		}
 
 		return nil, fmt.Errorf("%w: cannot convert UUIDLiteral to %s, different length - %d <> %d",
 			ErrBadCast, typ, len(u), t.len)
 	case BinaryType:
-		v, _ := uuid.UUID(u).MarshalBinary()
-
-		return BinaryLiteral(v), nil
+		return BinaryLiteral(bytes.Clone(u[:])), nil
 	}
 
 	return nil, fmt.Errorf("%w: UUIDLiteral to %s", ErrBadCast, typ)
@@ -1356,11 +1352,11 @@ func (u UUIDLiteral) Equals(other Literal) bool {
 		return false
 	}
 
-	return uuid.UUID(u) == uuid.UUID(rhs)
+	return UUID(u) == UUID(rhs)
 }
 
 func (u UUIDLiteral) MarshalBinary() (data []byte, err error) {
-	return uuid.UUID(u).MarshalBinary()
+	return bytes.Clone(u[:]), nil
 }
 
 func (u *UUIDLiteral) UnmarshalBinary(data []byte) error {

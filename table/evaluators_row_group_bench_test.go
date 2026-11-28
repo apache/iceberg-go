@@ -64,7 +64,7 @@ func benchmarkRowGroupMetricsMaps(
 	b *testing.B,
 	meta *metadata.FileMetaData,
 	colIndices []int,
-	testRowGroup func(*inclusiveMetricsEval, *metadata.RowGroupMetaData, []int) (bool, error),
+	testRowGroup func(*inclusiveMetricsEval, *metadata.FileMetaData, int, []int) (bool, error),
 ) {
 	b.Helper()
 	m := &inclusiveMetricsEval{expr: iceberg.AlwaysTrue{}}
@@ -73,7 +73,7 @@ func benchmarkRowGroupMetricsMaps(
 
 	for b.Loop() {
 		for rowGroup := range meta.NumRowGroups() {
-			keep, err := testRowGroup(m, meta.RowGroup(rowGroup), colIndices)
+			keep, err := testRowGroup(m, meta, rowGroup, colIndices)
 			if err != nil {
 				b.Fatal(err)
 			}
@@ -84,8 +84,9 @@ func benchmarkRowGroupMetricsMaps(
 	}
 }
 
-func benchmarkTestRowGroupBefore(m *inclusiveMetricsEval, rgmeta *metadata.RowGroupMetaData, colIndices []int) (bool, error) {
+func benchmarkTestRowGroupBefore(m *inclusiveMetricsEval, meta *metadata.FileMetaData, rowGroup int, colIndices []int) (bool, error) {
 	// Keep this as a frozen pre-#1899 copy; it should not track future changes to TestRowGroup.
+	rgmeta := meta.RowGroup(rowGroup)
 	if !m.includeEmptyFiles && rgmeta.NumRows() == 0 {
 		return rowsCannotMatch, nil
 	}

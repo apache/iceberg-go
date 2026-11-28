@@ -83,6 +83,10 @@ type DataFileArgs struct {
 	//     transforms), inferred from the file's column statistics; for
 	//     non-order-preserving transforms (bucket, void) it stays nil.
 	//
+	// Inference fails if the source column's bounds are incomplete. Since nil
+	// means "not supplied", it cannot be used to import such a source into a
+	// null partition.
+	//
 	// Void-transform fields may be omitted (they always resolve to nil).
 	//
 	// This helper validates only that any supplied field IDs belong to the spec

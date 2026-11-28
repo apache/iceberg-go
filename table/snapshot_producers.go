@@ -172,7 +172,10 @@ func (fa *fastAppendFiles) parentDependentManifests(ctx context.Context, parent 
 // resulting manifest list. Two concurrent fast-appends adding the
 // same file path is a writer-side error (paths are expected to be
 // unique, normally via UUID-stamped filenames); detecting it here
-// is out of Java parity scope.
+// is out of Java parity scope. As an iceberg-go-only addition,
+// AddDataFiles and AddDataFilesByPath, which take caller-supplied
+// paths, recheck them against the fresh parent when a commit retry
+// rebuilds the snapshot; Java's FastAppend and MergeAppend do not.
 func (fa *fastAppendFiles) validate(_ *conflictContext) error {
 	return nil
 }
@@ -818,6 +821,8 @@ type snapshotProducer struct {
 	deletedFiles            map[string]iceberg.DataFile
 	deletedDeleteFiles      map[string]iceberg.DataFile
 	deletedDVsByRef         map[string]iceberg.DataFile
+	duplicateCheckPaths     map[string]struct{}
+	checkedManifests        map[string]struct{}
 	snapshotProps           iceberg.Properties
 	written                 writtenManifests
 }
@@ -1488,6 +1493,55 @@ func (p *removedFilePresence) counts(df iceberg.DataFile) bool {
 	return ok
 }
 
+// manifestPaths returns the paths of the manifests in snapshot s.
+func manifestPaths(ctx context.Context, fio iceio.IO, s *Snapshot) (map[string]struct{}, error) {
+	manifests, err := s.Manifests(ctx, fio)
+	if err != nil {
+		return nil, err
+	}
+	paths := make(map[string]struct{}, len(manifests))
+	for _, m := range manifests {
+		paths[m.FilePath()] = struct{}{}
+	}
+
+	return paths, nil
+}
+
+// checkDuplicatePaths fails if a data file live on parent has a path in
+// duplicateCheckPaths. The retry rebuild calls it so that a path another writer
+// committed after this producer planned is not added a second time. Manifests
+// in checkedManifests were read by the staging-time check, and manifest files
+// never change, so only manifests that concurrent commits added are read.
+func (sp *snapshotProducer) checkDuplicatePaths(ctx context.Context, parent *Snapshot) error {
+	if len(sp.duplicateCheckPaths) == 0 || parent == nil {
+		return nil
+	}
+
+	manifests, err := parent.Manifests(ctx, sp.io)
+	if err != nil {
+		return err
+	}
+	for _, m := range manifests {
+		if m.ManifestContent() != iceberg.ManifestContentData {
+			continue
+		}
+		if _, ok := sp.checkedManifests[m.FilePath()]; ok {
+			continue
+		}
+		for entry, err := range sp.iterManifestEntries(ctx, m, true) {
+			if err != nil {
+				return err
+			}
+			if _, ok := sp.duplicateCheckPaths[entry.DataFile().FilePath()]; ok {
+				return fmt.Errorf("%w: %w: data file %s is already present in snapshot %d",
+					ErrTransactionUnusable, ErrDuplicateDataFiles, entry.DataFile().FilePath(), parent.SnapshotID)
+			}
+		}
+	}
+
+	return nil
+}
+
 // checkRemovedFiles scans parent once and (1) fails terminally if any data file
 // this producer intends to rewrite is no longer live — a concurrent writer
 // already removed it, so proceeding would leave our replacement beside the
@@ -1502,9 +1556,11 @@ func (sp *snapshotProducer) checkRemovedFiles(ctx context.Context, parent *Snaps
 		dvRefs:      map[string]struct{}{},
 	}
 
-	// Producers that remove nothing (fast/merge append) skip the parent scan
+	// Producers that remove nothing (fast/merge append) skip this scan
 	// entirely — otherwise every retry re-reads the full manifest list only to
-	// find there is nothing to check.
+	// find there is nothing to check. AddDataFiles and AddDataFilesByPath
+	// still read the manifests concurrent commits added; see
+	// checkDuplicatePaths.
 	if len(sp.deletedFiles) == 0 && len(sp.deletedDeleteFiles) == 0 && len(sp.deletedDVsByRef) == 0 {
 		return present, nil
 	}
@@ -1756,6 +1812,9 @@ func (sp *snapshotProducer) commitManifests(ctx context.Context, newManifests, a
 		// so the summary below does not double-subtract a peer's prior removal.
 		present, err := sp.checkRemovedFiles(rebuildCtx, freshParent)
 		if err != nil {
+			return nil, err
+		}
+		if err := sp.checkDuplicatePaths(rebuildCtx, freshParent); err != nil {
 			return nil, err
 		}
 
