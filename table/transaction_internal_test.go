@@ -2503,3 +2503,26 @@ func TestTransactionStagedTableConcurrentWithSetProperties(t *testing.T) {
 		assert.Equal(t, "v", staged.Properties()[fmt.Sprintf("k%d", i)])
 	}
 }
+
+// Why: ExpireSnapshots swaps t.tbl under the transaction lock, and StagedTable
+// read t.tbl's fields after releasing it.
+// Condition: StagedTable and ExpireSnapshots run concurrently on one transaction.
+// Assertion: both succeed with no race reported.
+func TestTransactionStagedTableConcurrentWithExpireSnapshots(t *testing.T) {
+	txn := createTestTransaction(t, iceio.LocalFS{}, *iceberg.UnpartitionedSpec)
+
+	const n = 3000
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		for range n {
+			assert.NoError(t, txn.ExpireSnapshots())
+		}
+	})
+	wg.Go(func() {
+		for range n {
+			_, err := txn.StagedTable()
+			assert.NoError(t, err)
+		}
+	})
+	wg.Wait()
+}

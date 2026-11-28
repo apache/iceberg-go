@@ -2748,9 +2748,11 @@ func (t *Transaction) StagedTable() (*StagedTable, error) {
 	if err := t.checkNotNil(); err != nil {
 		return nil, err
 	}
-	// apply swaps t.meta under t.mx, so copy the builder under the lock and
-	// build the staged view from the copy.
+	// apply swaps t.meta and ExpireSnapshots swaps t.tbl under t.mx, so copy
+	// the builder and read the table under the lock, then build the staged
+	// view from those.
 	t.mx.Lock()
+	tbl := t.tbl
 	meta, err := t.txnMeta()
 	if err == nil {
 		meta = meta.clone()
@@ -2766,17 +2768,17 @@ func (t *Transaction) StagedTable() (*StagedTable, error) {
 
 	return &StagedTable{
 		Table: New(
-			t.tbl.identifier,
+			tbl.identifier,
 			updatedMeta,
 			updatedMeta.Location(),
-			t.tbl.fsF,
-			t.tbl.cat,
-			withReporterState(t.tbl.reporter, t.tbl.reporterSet),
-			WithScanPlanningIOProperties(t.tbl.scanPlanningIOProps),
-			WithScanPlanningDirective(t.tbl.scanPlanningDirective, t.tbl.hasScanPlanningDirective),
-			WithLabels(t.tbl.labels),
-			WithSavedConfig(t.tbl.savedConfig),
-			WithSnapshotHistoryLimitedToRefsFrom(t.tbl),
+			tbl.fsF,
+			tbl.cat,
+			withReporterState(tbl.reporter, tbl.reporterSet),
+			WithScanPlanningIOProperties(tbl.scanPlanningIOProps),
+			WithScanPlanningDirective(tbl.scanPlanningDirective, tbl.hasScanPlanningDirective),
+			WithLabels(tbl.labels),
+			WithSavedConfig(tbl.savedConfig),
+			WithSnapshotHistoryLimitedToRefsFrom(tbl),
 		),
 	}, nil
 }
