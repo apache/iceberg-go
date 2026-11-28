@@ -19,10 +19,16 @@ package table
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
+	"math"
 	"slices"
+	"unsafe"
 
 	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/decimal128"
+	"github.com/apache/arrow-go/v18/arrow/extensions"
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/table/stats"
 )
@@ -208,6 +214,7 @@ type ndvTarget struct {
 // its sketch, using Iceberg single-value serialization for the hashed bytes.
 func addRecordToSketches(rec arrow.RecordBatch, targets map[int]*ndvTarget) error {
 	numRows := int(rec.NumRows())
+	var scratch [16]byte
 	for col := range int(rec.NumCols()) {
 		tgt, ok := targets[col]
 		if !ok {
@@ -215,6 +222,14 @@ func addRecordToSketches(rec arrow.RecordBatch, targets map[int]*ndvTarget) erro
 		}
 		arr := rec.Column(col)
 		for row := range numRows {
+			if arr.IsNull(row) {
+				continue // null value: not counted
+			}
+			if b, ok := ndvValueBytes(scratch[:0], arr, row, tgt.field.Type); ok {
+				tgt.sketch.Add(b)
+
+				continue
+			}
 			lit, err := getArrowValueAsIcebergLiteral(arr, row, tgt.field.Type)
 			if err != nil {
 				return fmt.Errorf("field %q: row %d: %w", tgt.field.Name, row, err)
@@ -231,4 +246,114 @@ func addRecordToSketches(rec arrow.RecordBatch, targets map[int]*ndvTarget) erro
 	}
 
 	return nil
+}
+
+// ndvValueBytes returns the Iceberg single-value serialization of the non-null
+// value at row, read straight from the Arrow buffers. It produces the same
+// bytes as getArrowValueAsIcebergLiteral followed by MarshalBinary, without the
+// per-value literal and allocation. The result may alias scratch or the
+// array's buffers, so it is only valid until the next call. ok is false for
+// arrays without a fast path or values that fail to convert; the caller then
+// falls back to the literal path, which also reports the error.
+func ndvValueBytes(scratch []byte, arr arrow.Array, row int, typ iceberg.Type) (b []byte, ok bool) {
+	switch arr := arr.(type) {
+	case *array.Boolean:
+		if arr.Value(row) {
+			return append(scratch, 1), true
+		}
+
+		return append(scratch, 0), true
+	case *array.Int32:
+		return binary.LittleEndian.AppendUint32(scratch, uint32(arr.Value(row))), true
+	case *array.Int64:
+		return binary.LittleEndian.AppendUint64(scratch, uint64(arr.Value(row))), true
+	case *array.Float32:
+		return binary.LittleEndian.AppendUint32(scratch, math.Float32bits(arr.Value(row))), true
+	case *array.Float64:
+		return binary.LittleEndian.AppendUint64(scratch, math.Float64bits(arr.Value(row))), true
+	case *array.Date32:
+		return binary.LittleEndian.AppendUint32(scratch, uint32(arr.Value(row))), true
+	case *array.Time64:
+		if arr.DataType().(*arrow.Time64Type).Unit != arrow.Microsecond {
+			return nil, false
+		}
+
+		return binary.LittleEndian.AppendUint64(scratch, uint64(arr.Value(row))), true
+	case *array.Timestamp:
+		unit := arr.DataType().(*arrow.TimestampType).Unit
+		var v int64
+		var err error
+		switch typ.(type) {
+		case iceberg.TimestampType, iceberg.TimestampTzType:
+			v, err = arrowTimestampToMicros(int64(arr.Value(row)), unit)
+		case iceberg.TimestampNsType, iceberg.TimestampTzNsType:
+			v, err = arrowTimestampToNanos(int64(arr.Value(row)), unit)
+		default:
+			return nil, false
+		}
+		if err != nil {
+			return nil, false
+		}
+
+		return binary.LittleEndian.AppendUint64(scratch, uint64(v)), true
+	case *array.Decimal128:
+		return appendDecimalBytes(scratch, arr.Value(row)), true
+	case *array.String:
+		// The literal path converts strings for binary, fixed and uuid columns.
+		if _, ok := typ.(iceberg.StringType); !ok {
+			return nil, false
+		}
+		s := arr.Value(row)
+
+		return unsafe.Slice(unsafe.StringData(s), len(s)), true
+	case *array.LargeString:
+		if _, ok := typ.(iceberg.StringType); !ok {
+			return nil, false
+		}
+		s := arr.Value(row)
+
+		return unsafe.Slice(unsafe.StringData(s), len(s)), true
+	case *array.Binary:
+		if _, ok := typ.(iceberg.BinaryType); !ok {
+			return nil, false
+		}
+
+		return arr.Value(row), true
+	case *array.LargeBinary:
+		if _, ok := typ.(iceberg.BinaryType); !ok {
+			return nil, false
+		}
+
+		return arr.Value(row), true
+	case *array.FixedSizeBinary:
+		ft, ok := typ.(iceberg.FixedType)
+		if !ok || ft.Len() != arr.DataType().(*arrow.FixedSizeBinaryType).ByteWidth {
+			return nil, false
+		}
+
+		return arr.Value(row), true
+	case *extensions.UUIDArray:
+		if _, ok := typ.(iceberg.UUIDType); !ok {
+			return nil, false
+		}
+
+		return arr.Storage().(*array.FixedSizeBinary).Value(row), true
+	default:
+		return nil, false
+	}
+}
+
+// appendDecimalBytes appends n as minimal-length big-endian two's complement,
+// as DecimalLiteral.MarshalBinary does, without going through big.Int.
+func appendDecimalBytes(dst []byte, n decimal128.Num) []byte {
+	var b [16]byte
+	binary.BigEndian.PutUint64(b[:8], uint64(n.HighBits()))
+	binary.BigEndian.PutUint64(b[8:], n.LowBits())
+	// Drop leading bytes that only repeat the sign bit of the byte after them.
+	i := 0
+	for i < len(b)-1 && ((b[i] == 0x00 && b[i+1] < 0x80) || (b[i] == 0xff && b[i+1] >= 0x80)) {
+		i++
+	}
+
+	return append(dst, b[i:]...)
 }
