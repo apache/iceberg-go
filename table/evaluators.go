@@ -958,6 +958,43 @@ type inclusiveMetricsEval struct {
 	metricsEvaluator
 	expr              iceberg.BooleanExpression
 	includeEmptyFiles bool
+	fieldTypes        map[int]iceberg.Type
+}
+
+type exprFieldTypesVisitor struct {
+	types map[int]iceberg.Type
+}
+
+func (exprFieldTypesVisitor) VisitTrue() struct{}                  { return struct{}{} }
+func (exprFieldTypesVisitor) VisitFalse() struct{}                 { return struct{}{} }
+func (exprFieldTypesVisitor) VisitNot(struct{}) struct{}           { return struct{}{} }
+func (exprFieldTypesVisitor) VisitAnd(struct{}, struct{}) struct{} { return struct{}{} }
+func (exprFieldTypesVisitor) VisitOr(struct{}, struct{}) struct{}  { return struct{}{} }
+func (exprFieldTypesVisitor) VisitUnbound(iceberg.UnboundPredicate) struct{} {
+	return struct{}{}
+}
+
+func (v exprFieldTypesVisitor) VisitBound(pred iceberg.BoundPredicate) struct{} {
+	field := pred.Ref().Field()
+	if prev, exists := v.types[field.ID]; exists {
+		if prev != nil && !prev.Equals(field.Type) {
+			v.types[field.ID] = nil
+		}
+
+		return struct{}{}
+	}
+	v.types[field.ID] = field.Type
+
+	return struct{}{}
+}
+
+func (m *inclusiveMetricsEval) fieldType(fieldID int) iceberg.Type {
+	if m.fieldTypes == nil {
+		m.fieldTypes = make(map[int]iceberg.Type)
+		_, _ = iceberg.VisitExpr(m.expr, exprFieldTypesVisitor{types: m.fieldTypes})
+	}
+
+	return m.fieldTypes[fieldID]
 }
 
 // intBackedDecimal reports whether a column's statistics are a decimal that
@@ -979,10 +1016,16 @@ func intBackedDecimal(descr *parquetschema.Column) bool {
 }
 
 // parquetStatsBounds converts a Parquet column chunk's min/max statistics into
-// Iceberg bound bytes. Any evaluator that populates bounds from raw Parquet
-// statistics must go through here rather than calling EncodeMin/EncodeMax
-// directly, or int-backed decimals silently prune rows that match.
-func parquetStatsBounds(stats metadata.TypedStatistics) (lower, upper []byte) {
+// Iceberg bound bytes, reporting false when the statistics carry no usable min
+// and max. Any evaluator that populates bounds from raw Parquet statistics must
+// go through here rather than calling EncodeMin/EncodeMax directly, or
+// int-backed decimals and millisecond timestamps silently prune rows that match.
+func parquetStatsBounds(stats metadata.TypedStatistics, fieldType iceberg.Type) (lower, upper []byte, ok bool) {
+	stats = internal.TimestampMillisStatsForType(stats, fieldType)
+	if !stats.HasMinMax() {
+		return nil, nil, false
+	}
+
 	lower, upper = stats.EncodeMin(), stats.EncodeMax()
 	if intBackedDecimal(stats.Descr()) {
 		// EncodeMin/EncodeMax return fresh buffers, so reversing in place is safe.
@@ -992,7 +1035,7 @@ func parquetStatsBounds(stats metadata.TypedStatistics) (lower, upper []byte) {
 		slices.Reverse(upper)
 	}
 
-	return lower, upper
+	return lower, upper, true
 }
 
 func (m *inclusiveMetricsEval) TestRowGroup(meta *metadata.FileMetaData, rowGroup int, colIndices []int) (bool, error) {
@@ -1045,15 +1088,20 @@ func (m *inclusiveMetricsEval) TestRowGroup(meta *metadata.FileMetaData, rowGrou
 			m.nullCounts[fieldID] = stats.NullCount()
 		}
 		if hasBounds && stats.HasMinMax() {
-			if m.lowerBounds == nil {
-				// Lower and upper bounds are always allocated together.
-				m.lowerBounds = make(map[int][]byte, len(colIndices))
-				m.upperBounds = make(map[int][]byte, len(colIndices))
+			var fieldType iceberg.Type
+			if internal.IsTimestampMillis(stats.Descr()) {
+				fieldType = m.fieldType(fieldID)
 			}
+			if lower, upper, ok := parquetStatsBounds(stats, fieldType); ok {
+				if m.lowerBounds == nil {
+					// Lower and upper bounds are always allocated together.
+					m.lowerBounds = make(map[int][]byte, len(colIndices))
+					m.upperBounds = make(map[int][]byte, len(colIndices))
+				}
 
-			lower, upper := parquetStatsBounds(stats)
-			m.lowerBounds[fieldID] = lower
-			m.upperBounds[fieldID] = upper
+				m.lowerBounds[fieldID] = lower
+				m.upperBounds[fieldID] = upper
+			}
 		}
 	}
 
@@ -1310,7 +1358,11 @@ func (m *inclusiveMetricsEval) VisitEqual(t iceberg.BoundTerm, lit iceberg.Liter
 	return rowsMightMatch
 }
 
-func (m *inclusiveMetricsEval) VisitNotEqual(iceberg.BoundTerm, iceberg.Literal) bool {
+func (m *inclusiveMetricsEval) VisitNotEqual(t iceberg.BoundTerm, lit iceberg.Literal) bool {
+	if value := m.findUniqueValue(t); value != nil && getCmpLiteral(value)(value, lit) == 0 {
+		return rowsCannotMatch
+	}
+
 	return rowsMightMatch
 }
 
@@ -1399,11 +1451,61 @@ func (m *inclusiveMetricsEval) visitIn(
 	return rowsMightMatch
 }
 
-func (m *inclusiveMetricsEval) VisitNotIn(iceberg.BoundTerm, iceberg.Set[iceberg.Literal]) bool {
+func (m *inclusiveMetricsEval) VisitNotIn(t iceberg.BoundTerm, s iceberg.Set[iceberg.Literal]) bool {
 	// because the bounds are not necessarily a min or max value, this cannot be
 	// answered using them. notIn(col, {X, ...}) with (XX, Y) doesn't guarantee that
-	// X is a value in col
+	// X is a value in col, unless every row holds the same value.
+	if value := m.findUniqueValue(t); value != nil && s.Contains(value) {
+		return rowsCannotMatch
+	}
+
 	return rowsMightMatch
+}
+
+// findUniqueValue returns the value every row of the file holds for t, or nil if
+// the stats don't prove that the column has a single value.
+func (m *inclusiveMetricsEval) findUniqueValue(t iceberg.BoundTerm) iceberg.Literal {
+	if _, ok := t.(iceberg.BoundExtract); ok {
+		return nil
+	}
+
+	field := t.Ref().Field()
+	if m.mayContainNull(field.ID) {
+		return nil
+	}
+
+	lowerBound, upperBound := m.lowerBounds[field.ID], m.upperBounds[field.ID]
+	if lowerBound == nil || upperBound == nil || !slices.Equal(lowerBound, upperBound) {
+		return nil
+	}
+
+	switch field.Type.(type) {
+	case iceberg.GeometryType, iceberg.GeographyType:
+		return nil
+	case iceberg.Float32Type, iceberg.Float64Type:
+		if count, ok := m.nanCounts[field.ID]; !ok || count != 0 {
+			return nil
+		}
+	}
+
+	value, err := iceberg.LiteralFromBytes(field.Type, lowerBound)
+	if err != nil {
+		return nil
+	}
+
+	// Keep zero floats for the row filter, which can tell -0 from +0.
+	switch v := value.(type) {
+	case iceberg.Float32Literal:
+		if v == 0 || m.isNan(v) {
+			return nil
+		}
+	case iceberg.Float64Literal:
+		if v == 0 || m.isNan(v) {
+			return nil
+		}
+	}
+
+	return value
 }
 
 func (m *inclusiveMetricsEval) VisitStartsWith(t iceberg.BoundTerm, lit iceberg.Literal) bool {
@@ -1435,7 +1537,7 @@ func (m *inclusiveMetricsEval) VisitStartsWith(t iceberg.BoundTerm, lit iceberg.
 			v = v[:lenPrefix]
 		}
 
-		if len(v) > 0 && v > prefix {
+		if v > prefix {
 			return rowsCannotMatch
 		}
 	}
@@ -1453,7 +1555,7 @@ func (m *inclusiveMetricsEval) VisitStartsWith(t iceberg.BoundTerm, lit iceberg.
 			v = v[:lenPrefix]
 		}
 
-		if len(v) > 0 && v < prefix {
+		if v < prefix {
 			return rowsCannotMatch
 		}
 	}

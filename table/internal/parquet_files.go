@@ -45,6 +45,7 @@ import (
 	"github.com/apache/arrow-go/v18/parquet/file"
 	"github.com/apache/arrow-go/v18/parquet/metadata"
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
+	parquetschema "github.com/apache/arrow-go/v18/parquet/schema"
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/internal"
 	iceio "github.com/apache/iceberg-go/io"
@@ -143,7 +144,7 @@ func (parquetFormat) Open(ctx context.Context, fs iceio.IO, path string) (_ File
 	return wrapPqArrowReader{
 		FileReader:          arrRdr,
 		dictionarySource:    inputfile,
-		dictionaryMem:       alloc,
+		mem:                 alloc,
 		dictionaryReadProps: readProps,
 	}, nil
 }
@@ -1831,6 +1832,103 @@ func (w wrappedDecByteArrayStats) Max() iceberg.Decimal {
 	return iceberg.Decimal{Val: dec, Scale: w.scale}
 }
 
+// IsTimestampMillis reports whether a Parquet column stores timestamps in
+// milliseconds, whether declared by the TIMESTAMP logical type or only by the
+// legacy TIMESTAMP_MILLIS converted type. Iceberg reads such a column as a
+// microsecond timestamp, so raw values, statistics and encoded literals are
+// off by a factor of 1000 unless they are converted.
+func IsTimestampMillis(descr *parquetschema.Column) bool {
+	if descr.PhysicalType() != parquet.Types.Int64 {
+		return false
+	}
+	if ts, ok := descr.LogicalType().(parquetschema.TimestampLogicalType); ok {
+		return ts.TimeUnit() == parquetschema.TimeUnitMillis
+	}
+
+	return descr.ConvertedType() == parquetschema.ConvertedTypes.TimestampMillis
+}
+
+// TimestampMillisAsMicros returns stats with min and max scaled to
+// microseconds when they describe a TIMESTAMP(MILLIS) column, and stats
+// unchanged otherwise. Only the min and max accessors and encoders are
+// converted. A bound that overflows int64 once scaled leaves the wrapper
+// without min and max.
+func TimestampMillisAsMicros(stats metadata.TypedStatistics) metadata.TypedStatistics {
+	i64, ok := stats.(*metadata.Int64Statistics)
+	if !ok || !IsTimestampMillis(i64.Descr()) {
+		return stats
+	}
+
+	return &wrappedMillisTimestampStats{i64}
+}
+
+// TimestampMillisStatsForType scales TIMESTAMP(MILLIS) statistics to
+// microseconds for Iceberg timestamp and timestamptz fields and drops
+// min/max bounds for any other Iceberg field type. Non-millisecond
+// statistics are returned unchanged.
+func TimestampMillisStatsForType(stats metadata.TypedStatistics, fieldType iceberg.Type) metadata.TypedStatistics {
+	if !IsTimestampMillis(stats.Descr()) {
+		return stats
+	}
+	switch fieldType.(type) {
+	case iceberg.TimestampType, iceberg.TimestampTzType:
+		return TimestampMillisAsMicros(stats)
+	default:
+		return statsWithoutMinMax{stats}
+	}
+}
+
+type wrappedMillisTimestampStats struct {
+	*metadata.Int64Statistics
+}
+
+func millisToMicros(v int64) (int64, bool) {
+	const unitsPerMilli = 1000
+	if v > math.MaxInt64/unitsPerMilli || v < math.MinInt64/unitsPerMilli {
+		return 0, false
+	}
+
+	return v * unitsPerMilli, true
+}
+
+func (w wrappedMillisTimestampStats) HasMinMax() bool {
+	if !w.Int64Statistics.HasMinMax() {
+		return false
+	}
+	_, minOK := millisToMicros(w.Int64Statistics.Min())
+	_, maxOK := millisToMicros(w.Int64Statistics.Max())
+
+	return minOK && maxOK
+}
+
+func (w wrappedMillisTimestampStats) Min() int64 {
+	v, _ := millisToMicros(w.Int64Statistics.Min())
+
+	return v
+}
+
+func (w wrappedMillisTimestampStats) Max() int64 {
+	v, _ := millisToMicros(w.Int64Statistics.Max())
+
+	return v
+}
+
+func (w wrappedMillisTimestampStats) EncodeMin() []byte {
+	if !w.HasMinMax() {
+		return nil
+	}
+
+	return binary.LittleEndian.AppendUint64(nil, uint64(w.Min()))
+}
+
+func (w wrappedMillisTimestampStats) EncodeMax() []byte {
+	if !w.HasMinMax() {
+		return nil
+	}
+
+	return binary.LittleEndian.AppendUint64(nil, uint64(w.Max()))
+}
+
 // parquetStatsColumn contains the immutable per-file resolution needed to
 // interpret a physical Parquet column's statistics. The row-group metadata
 // still carries the values that are accumulated, but the path-to-field lookup
@@ -1920,7 +2018,6 @@ func (p parquetFormat) DataFileStatsFromMeta(meta Metadata, statsCols map[int]St
 		splitOffsets     = make([]int64, 0)
 		nullValueCounts  = make(map[int]int64)
 		nanValueCounts   = make(map[int]int64)
-		invalidateCol    = make(map[int]struct{})
 		missingNulls     = make(map[int]struct{})
 		incompleteBounds = make(map[int]StatsAgg)
 		colAggs          = make(map[int]StatsAgg)
@@ -1975,9 +2072,6 @@ func (p parquetFormat) DataFileStatsFromMeta(meta Metadata, statsCols map[int]St
 			if rowGroup.NumRows() == 0 && colChunk.NumValues() == 0 {
 				continue
 			}
-			if _, invalid := invalidateCol[fieldID]; invalid {
-				continue
-			}
 
 			set, err := colChunk.StatsSet()
 			if err != nil {
@@ -2024,6 +2118,13 @@ func (p parquetFormat) DataFileStatsFromMeta(meta Metadata, statsCols map[int]St
 				continue
 			}
 
+			stats = wrapStatsForType(stats, statsCol.IcebergTyp)
+			if !stats.HasMinMax() {
+				incompleteBounds[fieldID] = nil
+
+				continue
+			}
+
 			agg, ok := colAggs[fieldID]
 			if !ok {
 				agg, err = p.createStatsAgg(statsCol.IcebergTyp, stats.Type().String(), statsCol.Mode.Len)
@@ -2032,15 +2133,6 @@ func (p parquetFormat) DataFileStatsFromMeta(meta Metadata, statsCols map[int]St
 				}
 
 				colAggs[fieldID] = agg
-			}
-
-			stats = wrapStatsForType(stats, statsCol.IcebergTyp)
-
-			if !stats.HasMinMax() {
-				invalidateCol[fieldID] = struct{}{}
-				delete(colAggs, fieldID)
-
-				continue
 			}
 
 			agg.Update(stats)
@@ -2089,8 +2181,18 @@ func (p parquetFormat) DataFileStatsFromMeta(meta Metadata, statsCols map[int]St
 	}
 }
 
+type statsWithoutMinMax struct {
+	metadata.TypedStatistics
+}
+
+func (statsWithoutMinMax) HasMinMax() bool { return false }
+
 // wrapStatsForType adapts Parquet stats so a StatsAgg reads Iceberg-typed min/max.
 func wrapStatsForType(stats metadata.TypedStatistics, typ iceberg.PrimitiveType) metadata.TypedStatistics {
+	if IsTimestampMillis(stats.Descr()) {
+		return TimestampMillisStatsForType(stats, typ)
+	}
+
 	switch t := typ.(type) {
 	case iceberg.BinaryType:
 		return &wrappedBinaryStats{stats.(*metadata.ByteArrayStatistics)}
@@ -2232,7 +2334,13 @@ func (p parquetFormat) collectVariantBoundsWithColumns(meta *metadata.FileMetaDa
 					}
 					e.agg = agg
 				}
-				e.agg.Update(wrapStatsForType(st, e.leaf.icebergType))
+				wrapped := wrapStatsForType(st, e.leaf.icebergType)
+				if !wrapped.HasMinMax() {
+					e.invalid = true
+
+					break
+				}
+				e.agg.Update(wrapped)
 			case !hasNullCount || cc.NumValues()-st.NullCount() > 0:
 				e.invalid = true
 			}
@@ -2355,7 +2463,7 @@ type wrapPqArrowReader struct {
 	// dictionarySource is shared with FileReader. The temporary reader created
 	// from it wraps the source so it cannot close the main reader's input.
 	dictionarySource    parquet.ReaderAtSeeker
-	dictionaryMem       memory.Allocator
+	mem                 memory.Allocator
 	dictionaryReadProps *parquet.ReaderProperties
 }
 
@@ -2371,8 +2479,24 @@ func (w wrapPqArrowReader) Close() error {
 	return w.ParquetReader().Close()
 }
 
+func (w wrapPqArrowReader) Schema() (*arrow.Schema, error) {
+	sc, err := w.FileReader.Schema()
+	if err != nil {
+		return nil, err
+	}
+	norm, _ := normalizeTimestampMillisSchema(sc)
+
+	return norm, nil
+}
+
 func (w wrapPqArrowReader) PrunedSchema(projectedIDs map[int]struct{}, mapping iceberg.NameMapping) (*arrow.Schema, []int, error) {
-	return pruneParquetColumns(w.Manifest, projectedIDs, false, mapping)
+	sc, cols, err := pruneParquetColumns(w.Manifest, projectedIDs, false, mapping)
+	if err != nil {
+		return nil, nil, err
+	}
+	norm, _ := normalizeTimestampMillisSchema(sc)
+
+	return norm, cols, nil
 }
 
 // ReadDictionaries rebuilds the schema manifest because pqarrow decides
@@ -2540,6 +2664,13 @@ func (w wrapPqArrowReader) GetRecords(ctx context.Context, cols []int, tester an
 			len(rowGroupTester.BloomPreds) > 0 || len(rowGroupTester.DictionaryPreds) > 0 {
 			fieldIDToColIdx = buildFieldIDToColIdx(fileMeta)
 		}
+		// Dictionary and bloom predicates carry the Iceberg literal's physical
+		// bytes, which for a millisecond timestamp column are microseconds and
+		// would never match the stored values.
+		predColIdx := fieldIDToColIdx
+		if len(rowGroupTester.BloomPreds) > 0 || len(rowGroupTester.DictionaryPreds) > 0 {
+			predColIdx = withoutTimestampMillis(fileMeta, fieldIDToColIdx)
+		}
 		statsCols := cols
 		if rowGroupTester.StatsFn != nil && rowGroupTester.StatsFieldIDs != nil {
 			statsCols = make([]int, 0, len(rowGroupTester.StatsFieldIDs))
@@ -2552,13 +2683,13 @@ func (w wrapPqArrowReader) GetRecords(ctx context.Context, cols []int, tester an
 		var dictionaryPredsByColumn map[int][]int
 		if len(rowGroupTester.DictionaryPreds) > 0 {
 			dictionaryPredsByColumn = groupRowGroupDictionaryPredicates(
-				fieldIDToColIdx, rowGroupTester.DictionaryPreds)
+				predColIdx, rowGroupTester.DictionaryPreds)
 			if len(dictionaryPredsByColumn) > 0 && w.dictionarySource != nil {
 				// Dictionary inspection is an optional optimisation. If the
 				// section-read reader cannot be created, use the main reader and
 				// keep the existing conservative behaviour.
 				dictionaryReader, _ = newParquetDictionaryReader(
-					w.dictionarySource, fileMeta, w.dictionaryMem, w.dictionaryReadProps)
+					w.dictionarySource, fileMeta, w.mem, w.dictionaryReadProps)
 				if dictionaryReader != nil {
 					// The temporary reader owns only its buffers. Its source is
 					// wrapped so this cannot close the main reader's input.
@@ -2626,7 +2757,7 @@ func (w wrapPqArrowReader) GetRecords(ctx context.Context, cols []int, tester an
 
 			if use && bfReader != nil {
 				var err error
-				use, err = checkRowGroupBloomFilters(bfReader, rg, fieldIDToColIdx, rowGroupTester.BloomPreds)
+				use, err = checkRowGroupBloomFilters(bfReader, rg, predColIdx, rowGroupTester.BloomPreds)
 				if err != nil {
 					return nil, err
 				}
@@ -2650,7 +2781,22 @@ func (w wrapPqArrowReader) GetRecords(ctx context.Context, cols []int, tester an
 		}
 	}
 
-	return w.GetRecordReader(ctx, cols, rgList)
+	rr, err := w.GetRecordReader(ctx, cols, rgList)
+	if err != nil {
+		return nil, err
+	}
+
+	normSchema, needsNorm := normalizeTimestampMillisSchema(rr.Schema())
+	if !needsNorm {
+		return rr, nil
+	}
+
+	alloc := w.mem
+	if alloc == nil {
+		alloc = compute.GetAllocator(ctx)
+	}
+
+	return newTimestampMillisRecordReader(rr, normSchema, alloc), nil
 }
 
 // nonClosingReaderAtSeeker gives a temporary Parquet reader access to a shared
@@ -3054,6 +3200,26 @@ func buildFieldIDToColIdx(meta *metadata.FileMetaData) map[int]int {
 	return result
 }
 
+// withoutTimestampMillis returns fieldIDToColIdx without the columns that
+// store TIMESTAMP(MILLIS), copying the map only when there is one to drop.
+func withoutTimestampMillis(meta *metadata.FileMetaData, fieldIDToColIdx map[int]int) map[int]int {
+	var filtered map[int]int
+	for fieldID, colIdx := range fieldIDToColIdx {
+		if !IsTimestampMillis(meta.Schema.Column(colIdx)) {
+			continue
+		}
+		if filtered == nil {
+			filtered = maps.Clone(fieldIDToColIdx)
+		}
+		delete(filtered, fieldID)
+	}
+	if filtered == nil {
+		return fieldIDToColIdx
+	}
+
+	return filtered
+}
+
 // checkRowGroupBloomFilters checks each bloom predicate against the bloom filter
 // for its column in row group rg. Returns false (skip) if ANY predicate has none
 // of its values present in the bloom filter. Returns true (keep) on any error or
@@ -3178,7 +3344,7 @@ func (pfs *ParquetFileSource) GetReader(ctx context.Context) (result FileReader,
 		FileReader:          fr,
 		rowGroupInfos:       rowGroupInfos,
 		dictionarySource:    pf,
-		dictionaryMem:       pfs.mem,
+		mem:                 pfs.mem,
 		dictionaryReadProps: readProps,
 	}
 

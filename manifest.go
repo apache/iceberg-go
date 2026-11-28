@@ -36,7 +36,6 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/iceberg-go/internal"
 	iceio "github.com/apache/iceberg-go/io"
-	"github.com/google/uuid"
 	"github.com/twmb/avro"
 	"github.com/twmb/avro/atype"
 	"github.com/twmb/avro/ocf"
@@ -1551,18 +1550,18 @@ func convertPartitionBytes(value any) ([]byte, bool) {
 	}
 }
 
-func convertPartitionUUID(value any) (uuid.UUID, bool) {
+func convertPartitionUUID(value any) (UUID, bool) {
 	switch value := value.(type) {
-	case uuid.UUID:
+	case UUID:
 		return value, true
 	case [16]byte:
-		return uuid.UUID(value), true
+		return UUID(value), true
 	case []byte:
-		if len(value) != len(uuid.UUID{}) {
-			return uuid.UUID{}, false
+		if len(value) != len(UUID{}) {
+			return UUID{}, false
 		}
 
-		var converted uuid.UUID
+		var converted UUID
 		copy(converted[:], value)
 
 		return converted, true
@@ -1571,7 +1570,7 @@ func convertPartitionUUID(value any) (uuid.UUID, bool) {
 			return convertPartitionUUID(literal)
 		}
 
-		return uuid.UUID{}, false
+		return UUID{}, false
 	}
 }
 
@@ -1639,7 +1638,7 @@ func newPartitionFieldStat(typ PrimitiveType) (fieldStats, error) {
 	case TimestampNsType, TimestampTzNsType:
 		return makePartitionFieldStats[TimestampNano](convertPartitionTimestampNano), nil
 	case UUIDType:
-		return makePartitionFieldStats[uuid.UUID](convertPartitionUUID), nil
+		return makePartitionFieldStats[UUID](convertPartitionUUID), nil
 	case BinaryType:
 		return makePartitionFieldStats[[]byte](convertPartitionBytes), nil
 	case FixedType:
@@ -2602,7 +2601,7 @@ func encodeDecimalBytes(dec DecimalLiteral, fixedSize int) ([]byte, error) {
 }
 
 func convertUUIDValue(v any) any {
-	if uuidVal, ok := v.(uuid.UUID); ok {
+	if uuidVal, ok := v.(UUID); ok {
 		return [16]byte(uuidVal)
 	}
 
@@ -2812,7 +2811,7 @@ func (d *dataFile) convertAvroValueToIcebergType(v any, fieldID int) any {
 			return v
 		case atype.UUID:
 			if uuidArr, ok := v.([16]byte); ok {
-				return uuid.UUID(uuidArr)
+				return UUID(uuidArr)
 			}
 
 			return v
