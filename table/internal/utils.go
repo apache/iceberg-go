@@ -222,7 +222,9 @@ type DataFileStatistics struct {
 	incompleteBounds map[int]StatsAgg
 	// partitionBounds holds complete bounds for columns whose metrics mode
 	// omits bounds. They infer partition values but are not written.
-	partitionBounds  map[int]StatsAgg
+	partitionBounds map[int]StatsAgg
+	// sourceNullCounts holds complete null counts regardless of metrics mode.
+	sourceNullCounts map[int]int64
 	SplitOffsets     []int64
 	EqualityFieldIDs []int
 	// Variant bounds: serialized variant objects keyed by parent variant field id.
@@ -332,8 +334,15 @@ func (d *DataFileStatistics) ToDataFile(opts DataFileOpts) iceberg.DataFile {
 					panic(fmt.Errorf("%w: cannot infer partition field %q (id %d) from incomplete Parquet bounds; supply a partition value",
 						iceberg.ErrInvalidArgument, field.Name, field.FieldID))
 				}
+				agg := d.sourceBounds(field.FirstSourceID())
+				// Bounds cover only non-null values, so a file with nulls and
+				// values spans a null partition and a non-null one.
+				if agg != nil && d.sourceNullCounts[field.FirstSourceID()] > 0 {
+					panic(fmt.Errorf("%w: cannot infer partition field %q (id %d): Parquet file contains both null and non-null values",
+						iceberg.ErrInvalidArgument, field.Name, field.FieldID))
+				}
 				fieldIDToPartitionData[field.FieldID] = d.partitionValueWithSourceType(
-					field, d.sourceBounds(field.FirstSourceID()), sourceField.Type)
+					field, agg, sourceField.Type)
 			case field.Transform.PreservesOrder():
 				// Preserve the existing error path for an invalid schema. This branch
 				// is not part of the valid hot path because sourceFieldFound is false.

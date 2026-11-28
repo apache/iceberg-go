@@ -1926,6 +1926,8 @@ func (p parquetFormat) DataFileStatsFromMeta(meta Metadata, statsCols map[int]St
 		colAggs          = make(map[int]StatsAgg)
 		// Bounds of none and counts columns are kept only for partition inference.
 		partitionBounds = make(map[int]StatsAgg)
+		// Null counts for every mode, used only to check partition inference.
+		sourceNullCounts = make(map[int]int64)
 	)
 
 	for rg := range pqmeta.NumRowGroups() {
@@ -2000,8 +2002,11 @@ func (p parquetFormat) DataFileStatsFromMeta(meta Metadata, statsCols map[int]St
 			hasNullCount, hasBounds := ParquetColumnStatsPresence(pqmeta, rg, pos)
 			if !hasNullCount {
 				missingNulls[fieldID] = struct{}{}
-			} else if recordCounts {
-				nullValueCounts[fieldID] += stats.NullCount()
+			} else {
+				sourceNullCounts[fieldID] += stats.NullCount()
+				if recordCounts {
+					nullValueCounts[fieldID] += stats.NullCount()
+				}
 			}
 
 			// Geometry/Geography bounds are computed from raw WKB during the
@@ -2046,11 +2051,13 @@ func (p parquetFormat) DataFileStatsFromMeta(meta Metadata, statsCols map[int]St
 	slices.Sort(splitOffsets)
 	for fieldID := range invalidateCol {
 		delete(nullValueCounts, fieldID)
+		delete(sourceNullCounts, fieldID)
 		delete(colAggs, fieldID)
 		incompleteBounds[fieldID] = nil
 	}
 	for fieldID := range missingNulls {
 		delete(nullValueCounts, fieldID)
+		delete(sourceNullCounts, fieldID)
 	}
 	// Keep observed bounds available to validate an explicit partition value.
 	for fieldID := range incompleteBounds {
@@ -2076,6 +2083,7 @@ func (p parquetFormat) DataFileStatsFromMeta(meta Metadata, statsCols map[int]St
 		ColAggs:            colAggs,
 		incompleteBounds:   incompleteBounds,
 		partitionBounds:    partitionBounds,
+		sourceNullCounts:   sourceNullCounts,
 		VariantLowerBounds: vlo,
 		VariantUpperBounds: vup,
 	}

@@ -311,6 +311,21 @@ func TestPartitionInferenceWithoutBoundMetrics(t *testing.T) {
 	}
 }
 
+func TestPartitionInferenceRejectsNullAndNonNullValues(t *testing.T) {
+	value := int32(7)
+	schema := iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "amount", Type: iceberg.PrimitiveTypes.Int32})
+	spec := iceberg.NewPartitionSpecID(0, iceberg.PartitionField{SourceIDs: []int{1}, FieldID: 1000, Name: "amount", Transform: iceberg.IdentityTransform{}})
+	for _, mode := range []string{"full", "none", "counts"} {
+		t.Run(mode, func(t *testing.T) {
+			props := iceberg.Properties{table.MetricsModeColumnConfPrefix + ".amount": mode}
+			path := writePartialMetricsParquet(t, schema, [][]*int32{{nil}, {&value}}, "")
+			_, err := table.FileToDataFile(t.Context(), iceio.LocalFS{}, path, schema, spec, 0, props)
+			require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+			require.ErrorContains(t, err, "both null and non-null values")
+		})
+	}
+}
+
 func TestPartitionInferenceWithoutBoundMetricsRequiresFooterBounds(t *testing.T) {
 	value := int32(7)
 	schema := iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "amount", Type: iceberg.PrimitiveTypes.Int32})
