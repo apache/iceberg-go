@@ -267,6 +267,90 @@ func TestMissingParquetStatisticsPartitionInference(t *testing.T) {
 	}
 }
 
+func TestPartitionInferenceWithoutBoundMetrics(t *testing.T) {
+	value := int32(7)
+	schema := iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "amount", Type: iceberg.PrimitiveTypes.Int32})
+	spec := iceberg.NewPartitionSpecID(0, iceberg.PartitionField{SourceIDs: []int{1}, FieldID: 1000, Name: "amount", Transform: iceberg.IdentityTransform{}})
+	for _, mode := range []string{"none", "counts"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx := t.Context()
+			path := writePartialMetricsParquet(t, schema, [][]*int32{{&value}, {&value}}, "")
+			cat, err := hadoop.NewCatalog(ctx, "local", t.TempDir(), nil)
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, cat.Close()) })
+			require.NoError(t, cat.CreateNamespace(ctx, catalog.ToIdentifier("db"), nil))
+			tbl, err := cat.CreateTable(ctx, catalog.ToIdentifier("db", "amounts"), schema,
+				catalog.WithPartitionSpec(&spec),
+				catalog.WithProperties(iceberg.Properties{table.MetricsModeColumnConfPrefix + ".amount": mode}))
+			require.NoError(t, err)
+			txn := tbl.NewTransaction()
+			require.NoError(t, txn.AddDataFilesByPath(ctx, []string{path}, nil, false))
+			tbl, err = txn.Commit(ctx)
+			require.NoError(t, err)
+
+			files, err := tbl.Scan().PlanFiles(ctx)
+			require.NoError(t, err)
+			require.Len(t, files, 1)
+			imported := files[0].File
+			assert.Equal(t, map[int]any{1000: value}, imported.Partition())
+			assert.NotContains(t, imported.LowerBoundValues(), 1)
+			assert.NotContains(t, imported.UpperBoundValues(), 1)
+			if mode == "counts" {
+				assert.Equal(t, map[int]int64{1: 2}, imported.ValueCounts())
+				assert.Equal(t, map[int]int64{1: 0}, imported.NullValueCounts())
+			} else {
+				assert.NotContains(t, imported.ValueCounts(), 1)
+				assert.NotContains(t, imported.NullValueCounts(), 1)
+			}
+
+			result, err := tbl.Scan(table.WithRowFilter(iceberg.EqualTo(iceberg.Reference("amount"), value))).ToArrowTable(ctx)
+			require.NoError(t, err)
+			defer result.Release()
+			assert.EqualValues(t, 2, result.NumRows())
+		})
+	}
+}
+
+func TestPartitionInferenceRejectsNullAndNonNullValues(t *testing.T) {
+	value := int32(7)
+	schema := iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "amount", Type: iceberg.PrimitiveTypes.Int32})
+	spec := iceberg.NewPartitionSpecID(0, iceberg.PartitionField{SourceIDs: []int{1}, FieldID: 1000, Name: "amount", Transform: iceberg.IdentityTransform{}})
+	for _, mode := range []string{"full", "none", "counts"} {
+		t.Run(mode, func(t *testing.T) {
+			props := iceberg.Properties{table.MetricsModeColumnConfPrefix + ".amount": mode}
+			path := writePartialMetricsParquet(t, schema, [][]*int32{{nil}, {&value}}, "")
+			_, err := table.FileToDataFile(t.Context(), iceio.LocalFS{}, path, schema, spec, 0, props)
+			require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+			require.ErrorContains(t, err, "both null and non-null values")
+		})
+	}
+}
+
+func TestPartitionInferenceWithoutBoundMetricsRequiresFooterBounds(t *testing.T) {
+	value := int32(7)
+	schema := iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "amount", Type: iceberg.PrimitiveTypes.Int32})
+	spec := iceberg.NewPartitionSpecID(0, iceberg.PartitionField{SourceIDs: []int{1}, FieldID: 1000, Name: "amount", Transform: iceberg.IdentityTransform{}})
+	for _, mode := range []string{"none", "counts"} {
+		t.Run(mode, func(t *testing.T) {
+			props := iceberg.Properties{table.MetricsModeColumnConfPrefix + ".amount": mode}
+			path := writePartialMetricsParquet(t, schema, [][]*int32{{&value}, {&value}}, "min_max")
+			_, err := table.FileToDataFile(t.Context(), iceio.LocalFS{}, path, schema, spec, 0, props)
+			require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+			require.ErrorContains(t, err, "incomplete Parquet bounds")
+
+			_, err = table.FileToDataFileWithOptions(t.Context(), iceio.LocalFS{}, path, schema, spec, 0, props, table.WithFilePartitionValues(map[int]any{1000: int32(8)}))
+			require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+			require.ErrorContains(t, err, "does not match Parquet bounds")
+
+			dataFile, err := table.FileToDataFileWithOptions(t.Context(), iceio.LocalFS{}, path, schema, spec, 0, props, table.WithFilePartitionValues(map[int]any{1000: value}))
+			require.NoError(t, err)
+			assert.Equal(t, value, dataFile.Partition()[1000])
+			assert.NotContains(t, dataFile.LowerBoundValues(), 1)
+			assert.NotContains(t, dataFile.UpperBoundValues(), 1)
+		})
+	}
+}
+
 func TestEmptyParquetRowGroupsPartitionInference(t *testing.T) {
 	value := int32(7)
 	schema := iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "amount", Type: iceberg.PrimitiveTypes.Int32})

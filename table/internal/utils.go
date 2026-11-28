@@ -220,6 +220,11 @@ type DataFileStatistics struct {
 	// one row group. Key presence blocks partition inference. The value is the
 	// partial aggregate from the other row groups and may be nil.
 	incompleteBounds map[int]StatsAgg
+	// partitionBounds holds complete bounds for columns whose metrics mode
+	// omits bounds. They infer partition values but are not written.
+	partitionBounds map[int]StatsAgg
+	// sourceNullCounts holds complete null counts regardless of metrics mode.
+	sourceNullCounts map[int]int64
 	SplitOffsets     []int64
 	EqualityFieldIDs []int
 	// Variant bounds: serialized variant objects keyed by parent variant field id.
@@ -232,7 +237,7 @@ type DataFileStatistics struct {
 // bounds when inferring a value.
 func (d *DataFileStatistics) PartitionValue(field iceberg.PartitionField, sc *iceberg.Schema) any {
 	sourceID := field.FirstSourceID()
-	agg := d.ColAggs[sourceID]
+	agg := d.sourceBounds(sourceID)
 	if agg == nil {
 		agg = d.incompleteBounds[sourceID]
 	}
@@ -251,6 +256,14 @@ func (d *DataFileStatistics) PartitionValue(field iceberg.PartitionField, sc *ic
 	}
 
 	return d.partitionValueWithSourceType(field, agg, sourceField.Type)
+}
+
+func (d *DataFileStatistics) sourceBounds(sourceID int) StatsAgg {
+	if agg := d.ColAggs[sourceID]; agg != nil {
+		return agg
+	}
+
+	return d.partitionBounds[sourceID]
 }
 
 func (d *DataFileStatistics) partitionValueWithSourceType(field iceberg.PartitionField, agg StatsAgg, sourceType iceberg.Type) any {
@@ -321,8 +334,15 @@ func (d *DataFileStatistics) ToDataFile(opts DataFileOpts) iceberg.DataFile {
 					panic(fmt.Errorf("%w: cannot infer partition field %q (id %d) from incomplete Parquet bounds; supply a partition value",
 						iceberg.ErrInvalidArgument, field.Name, field.FieldID))
 				}
+				agg := d.sourceBounds(field.FirstSourceID())
+				// Bounds cover only non-null values, so a file with nulls and
+				// values spans a null partition and a non-null one.
+				if agg != nil && d.sourceNullCounts[field.FirstSourceID()] > 0 {
+					panic(fmt.Errorf("%w: cannot infer partition field %q (id %d): Parquet file contains both null and non-null values",
+						iceberg.ErrInvalidArgument, field.Name, field.FieldID))
+				}
 				fieldIDToPartitionData[field.FieldID] = d.partitionValueWithSourceType(
-					field, d.ColAggs[field.FirstSourceID()], sourceField.Type)
+					field, agg, sourceField.Type)
 			case field.Transform.PreservesOrder():
 				// Preserve the existing error path for an invalid schema. This branch
 				// is not part of the valid hot path because sourceFieldFound is false.

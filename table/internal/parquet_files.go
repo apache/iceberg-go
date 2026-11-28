@@ -2021,6 +2021,10 @@ func (p parquetFormat) DataFileStatsFromMeta(meta Metadata, statsCols map[int]St
 		missingNulls     = make(map[int]struct{})
 		incompleteBounds = make(map[int]StatsAgg)
 		colAggs          = make(map[int]StatsAgg)
+		// Bounds of none and counts columns are kept only for partition inference.
+		partitionBounds = make(map[int]StatsAgg)
+		// Null counts for every mode, used only to check partition inference.
+		sourceNullCounts = make(map[int]int64)
 	)
 
 	for rg := range pqmeta.NumRowGroups() {
@@ -2047,11 +2051,12 @@ func (p parquetFormat) DataFileStatsFromMeta(meta Metadata, statsCols map[int]St
 
 				panic(column.resolveErr)
 			}
-			if column.variantChild || column.skipStats || column.statsCol.Mode.Typ == MetricModeNone {
+			if column.variantChild || column.skipStats {
 				continue
 			}
 
 			fieldID, statsCol := column.fieldID, column.statsCol
+			recordCounts := statsCol.Mode.Typ != MetricModeNone
 			colChunk, err = rowGroup.ColumnChunk(pos)
 			if err != nil {
 				panic(err)
@@ -2059,8 +2064,10 @@ func (p parquetFormat) DataFileStatsFromMeta(meta Metadata, statsCols map[int]St
 
 			// These metrics come from column chunk metadata, so keep totaling them even when stats are invalid.
 			// This deliberately diverges from Java, which drops value_counts for a column once any row group lacks stats.
-			colSizes[fieldID] += colChunk.TotalCompressedSize()
-			valueCounts[fieldID] += colChunk.NumValues()
+			if recordCounts {
+				colSizes[fieldID] += colChunk.TotalCompressedSize()
+				valueCounts[fieldID] += colChunk.NumValues()
+			}
 			// An empty row group contributes no nulls or bounds.
 			if rowGroup.NumRows() == 0 && colChunk.NumValues() == 0 {
 				continue
@@ -2087,14 +2094,13 @@ func (p parquetFormat) DataFileStatsFromMeta(meta Metadata, statsCols map[int]St
 			}
 
 			hasNullCount, hasBounds := ParquetColumnStatsPresence(pqmeta, rg, pos)
-			if hasNullCount {
-				nullValueCounts[fieldID] += stats.NullCount()
-			} else {
+			if !hasNullCount {
 				missingNulls[fieldID] = struct{}{}
-			}
-
-			if statsCol.Mode.Typ == MetricModeCounts {
-				continue
+			} else {
+				sourceNullCounts[fieldID] += stats.NullCount()
+				if recordCounts {
+					nullValueCounts[fieldID] += stats.NullCount()
+				}
 			}
 
 			// Geometry/Geography bounds are computed from raw WKB during the
@@ -2135,13 +2141,26 @@ func (p parquetFormat) DataFileStatsFromMeta(meta Metadata, statsCols map[int]St
 	}
 
 	slices.Sort(splitOffsets)
+	for fieldID := range invalidateCol {
+		delete(nullValueCounts, fieldID)
+		delete(sourceNullCounts, fieldID)
+		delete(colAggs, fieldID)
+		incompleteBounds[fieldID] = nil
+	}
 	for fieldID := range missingNulls {
 		delete(nullValueCounts, fieldID)
+		delete(sourceNullCounts, fieldID)
 	}
 	// Keep observed bounds available to validate an explicit partition value.
 	for fieldID := range incompleteBounds {
 		incompleteBounds[fieldID] = colAggs[fieldID]
 		delete(colAggs, fieldID)
+	}
+	for fieldID, agg := range colAggs {
+		if mode := statsCols[fieldID].Mode.Typ; mode == MetricModeNone || mode == MetricModeCounts {
+			partitionBounds[fieldID] = agg
+			delete(colAggs, fieldID)
+		}
 	}
 
 	vlo, vup := p.collectVariantBoundsWithColumns(pqmeta, arrowSchema, colMapping, statsCols, columns)
@@ -2155,6 +2174,8 @@ func (p parquetFormat) DataFileStatsFromMeta(meta Metadata, statsCols map[int]St
 		SplitOffsets:       splitOffsets,
 		ColAggs:            colAggs,
 		incompleteBounds:   incompleteBounds,
+		partitionBounds:    partitionBounds,
+		sourceNullCounts:   sourceNullCounts,
 		VariantLowerBounds: vlo,
 		VariantUpperBounds: vup,
 	}
