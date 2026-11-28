@@ -133,12 +133,19 @@ func RunCatalogTests(t *testing.T, cfg Config) {
 	} else {
 		t.Run("RenameTableNotSupported", func(t *testing.T) { testRenameTableNotSupported(t, cfg) })
 	}
+	t.Run("RegisterTable", func(t *testing.T) { testRegisterTable(t, cfg) })
+	t.Run("RegisterExistingTable", func(t *testing.T) { testRegisterExistingTable(t, cfg) })
+	t.Run("RegisterTableInMissingNamespace", func(t *testing.T) { testRegisterTableInMissingNamespace(t, cfg) })
+	t.Run("PurgeTable", func(t *testing.T) { testPurgeTable(t, cfg) })
+	t.Run("PurgeMissingTable", func(t *testing.T) { testPurgeMissingTable(t, cfg) })
 
 	t.Run("CreateTableWithProperties", func(t *testing.T) { testCreateTableWithProperties(t, cfg) })
 	t.Run("UpdateTableProperties", func(t *testing.T) { testUpdateTableProperties(t, cfg) })
 	t.Run("UpdateTableSchema", func(t *testing.T) { testUpdateTableSchema(t, cfg) })
 	t.Run("CommitWithStaleRequirement", func(t *testing.T) { testCommitWithStaleRequirement(t, cfg) })
 	t.Run("CommitToDroppedTable", func(t *testing.T) { testCommitToDroppedTable(t, cfg) })
+	t.Run("CreateTableWithPartitionSpec", func(t *testing.T) { testCreateTableWithPartitionSpec(t, cfg) })
+	t.Run("CreateTableWithSortOrder", func(t *testing.T) { testCreateTableWithSortOrder(t, cfg) })
 
 	t.Run("CreateNamespace", func(t *testing.T) { testCreateNamespace(t, cfg) })
 	t.Run("CreateNamespaceThatAlreadyExists", func(t *testing.T) { testCreateNamespaceThatAlreadyExists(t, cfg) })

@@ -37,7 +37,6 @@ import (
 	"github.com/apache/iceberg-go/internal"
 	"github.com/apache/iceberg-go/internal/iomock"
 	iceio "github.com/apache/iceberg-go/io"
-	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
@@ -538,7 +537,7 @@ func TestPartitionFieldStatsAcceptsConvertibleValues(t *testing.T) {
 			name:  "uuid from array",
 			typ:   PrimitiveTypes.UUID,
 			value: [16]byte{1, 2, 3, 4},
-			want:  NewLiteral(uuid.UUID{1, 2, 3, 4}),
+			want:  NewLiteral(UUID{1, 2, 3, 4}),
 		},
 		{
 			name:  "decimal from decimal literal",
@@ -638,7 +637,7 @@ func TestPartitionFieldStatsRejectsSentinelLiterals(t *testing.T) {
 }
 
 func TestPartitionFieldStatsRejectsInvalidUUIDLengths(t *testing.T) {
-	for _, value := range [][]byte{make([]byte, len(uuid.UUID{})-1), make([]byte, len(uuid.UUID{})+1)} {
+	for _, value := range [][]byte{make([]byte, len(UUID{})-1), make([]byte, len(UUID{})+1)} {
 		stats, err := newPartitionFieldStat(PrimitiveTypes.UUID)
 		if err != nil {
 			t.Fatal(err)

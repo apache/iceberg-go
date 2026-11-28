@@ -32,10 +32,7 @@ import (
 // typesFixturesSkip names type cases iceberg-go does not pass yet, with the
 // reason. A type iceberg-go does not model goes here as "unsupported: ...".
 // Listed cases still run, and fail once they pass so the entry gets removed.
-var typesFixturesSkip = map[string]string{
-	"geospatial/geometry-crs84":            "writes geometry, not the canonical geometry(OGC:CRS84)",
-	"geospatial/geography-crs84-spherical": "writes geography, not the canonical geography(OGC:CRS84, spherical)",
-}
+var typesFixturesSkip = map[string]string{}
 
 type typesFixtureCase struct {
 	ID             string          `json:"id"`
