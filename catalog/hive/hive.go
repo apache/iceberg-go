@@ -29,6 +29,7 @@ import (
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
 	"github.com/apache/iceberg-go/catalog/internal"
+	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/metrics"
 	"github.com/apache/iceberg-go/table"
 	"github.com/apache/iceberg-go/table/maintenance"
@@ -49,8 +50,8 @@ var (
 )
 
 func init() {
-	catalog.MustRegister("hive", catalog.RegistrarFunc(func(ctx context.Context, name string, props iceberg.Properties) (catalog.Catalog, error) {
-		return NewCatalog(ctx, props, WithName(name))
+	catalog.MustRegister("hive", catalog.IORegistryRegistrarFunc(func(ctx context.Context, name string, props iceberg.Properties, registry *iceio.Registry) (catalog.Catalog, error) {
+		return NewCatalog(ctx, props, WithName(name), WithIORegistry(registry))
 	}))
 }
 

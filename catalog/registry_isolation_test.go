@@ -26,6 +26,7 @@ import (
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
+	iceio "github.com/apache/iceberg-go/io"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -97,6 +98,39 @@ func TestCatalogRegistryZeroValue(t *testing.T) {
 
 	reg.Unregister("MOCK")
 	assert.Empty(t, reg.Names())
+}
+
+func TestRegistryLoadWithUnsupportedIORegistry(t *testing.T) {
+	var reg catalog.Registry
+	require.NoError(t, reg.Register("custom", stubRegistrar()))
+	props := iceberg.Properties{"type": "custom"}
+
+	_, err := reg.Load(t.Context(), "test", props, catalog.WithIORegistry(nil))
+	require.NoError(t, err)
+	_, err = reg.Load(t.Context(), "test", props, catalog.WithIORegistry(&iceio.Registry{}))
+	require.ErrorIs(t, err, iceberg.ErrNotImplemented)
+}
+
+func TestRegistryLoadPassesIORegistryToWrappedRegistrar(t *testing.T) {
+	var received []*iceio.Registry
+	factory := catalog.IORegistryRegistrarFunc(func(_ context.Context, _ string, _ iceberg.Properties, registry *iceio.Registry) (catalog.Catalog, error) {
+		received = append(received, registry)
+
+		return nil, nil
+	})
+	var reg catalog.Registry
+	require.NoError(t, reg.Register("wrapped", struct{ catalog.IORegistryRegistrar }{factory}))
+	props := iceberg.Properties{"type": "wrapped"}
+
+	_, err := reg.Load(t.Context(), "test", props)
+	require.NoError(t, err)
+
+	scoped := &iceio.Registry{}
+	_, err = reg.Load(t.Context(), "test", props, nil, catalog.WithIORegistry(scoped), nil)
+	require.NoError(t, err)
+	require.Len(t, received, 2)
+	require.Nil(t, received[0])
+	require.Same(t, scoped, received[1])
 }
 
 func TestCatalogRegistryCloneIsIndependent(t *testing.T) {

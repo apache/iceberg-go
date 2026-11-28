@@ -45,7 +45,7 @@ func TestSQLCatalogIORegistriesAreIsolated(t *testing.T) {
 	t.Cleanup(func() { iceio.Unregister(scheme) })
 
 	type catalogCase struct {
-		cat *sqlcat.Catalog
+		cat catalog.Catalog
 		fs  *iceio.MemFS
 	}
 	cases := make([]catalogCase, 2)
@@ -57,13 +57,13 @@ func TestSQLCatalogIORegistriesAreIsolated(t *testing.T) {
 			return fs, nil
 		}))
 
-		db, err := sql.Open(sqliteshim.ShimName, filepath.Join(t.TempDir(), "catalog.db"))
-		require.NoError(t, err)
-		t.Cleanup(func() { require.NoError(t, db.Close()) })
-
-		cat, err := sqlcat.NewCatalog(t.Context(), "isolated", db, sqlcat.SQLite,
-			iceberg.Properties{"warehouse": scheme + "://bucket/warehouse"},
-			sqlcat.WithIORegistry(registry))
+		cat, err := catalog.Load(t.Context(), "isolated", iceberg.Properties{
+			"type":            "sql",
+			"uri":             filepath.Join(t.TempDir(), "catalog.db"),
+			"warehouse":       scheme + "://bucket/warehouse",
+			sqlcat.DriverKey:  sqliteshim.ShimName,
+			sqlcat.DialectKey: string(sqlcat.SQLite),
+		}, catalog.WithIORegistry(registry))
 		require.NoError(t, err)
 		t.Cleanup(func() { require.NoError(t, cat.Close()) })
 		cases[i] = catalogCase{cat: cat, fs: fs}

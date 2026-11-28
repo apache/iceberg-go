@@ -28,6 +28,7 @@ import (
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -40,6 +41,7 @@ import (
 	"github.com/apache/iceberg-go/awsconfig"
 	"github.com/apache/iceberg-go/catalog"
 	"github.com/apache/iceberg-go/catalog/catalogtest"
+	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
@@ -532,11 +534,38 @@ func TestDynamoDBReconcilesCreateAndRenameResponses(t *testing.T) {
 
 func TestDynamoDBRegistry(t *testing.T) {
 	c := localCatalog(t)
+	const scheme = "dynamodb-private-registry"
+	privateFS := iceio.NewMemFS()
+	registry := &iceio.Registry{}
+	require.NoError(t, registry.Register(scheme, func(context.Context, *url.URL, map[string]string) (iceio.IO, error) {
+		return privateFS, nil
+	}))
+
 	props := maps.Clone(c.props)
 	props["type"] = "dynamodb"
-	loaded, err := catalog.Load(awsconfig.NewContext(t.Context(), &c.awsConfig), "registry", props)
+	props["warehouse"] = scheme + "://bucket/warehouse"
+	ctx := awsconfig.NewContext(t.Context(), &c.awsConfig)
+	loaded, err := catalog.Load(ctx, "registry", props, catalog.WithIORegistry(registry))
 	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, loaded.Close()) })
 	require.Equal(t, "registry", loaded.Name())
 	require.Equal(t, catalog.DynamoDB, loaded.CatalogType())
-	require.NoError(t, loaded.Close())
+
+	ns := table.Identifier{"db"}
+	ident := table.Identifier{"db", "scoped"}
+	require.NoError(t, loaded.CreateNamespace(ctx, ns, nil))
+	created, err := loaded.CreateTable(ctx, ident, catalogtest.Schema)
+	require.NoError(t, err)
+	_, updatedLocation, err := loaded.CommitTable(ctx, ident, nil,
+		[]table.Update{table.NewSetPropertiesUpdate(iceberg.Properties{"updated": "true"})})
+	require.NoError(t, err)
+	require.NotEqual(t, created.MetadataLocation(), updatedLocation)
+
+	reloaded, err := loaded.LoadTable(ctx, ident)
+	require.NoError(t, err)
+	require.Equal(t, updatedLocation, reloaded.MetadataLocation())
+	require.Equal(t, "true", reloaded.Properties()["updated"])
+	got, err := reloaded.FS(ctx)
+	require.NoError(t, err)
+	require.Same(t, privateFS, got)
 }
